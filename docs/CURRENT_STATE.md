@@ -1,112 +1,99 @@
 # Current State
 
-Last updated: 2026-09-02 (M1 — Django/PostgreSQL application foundation implemented and verified).
+Last updated: 2026-09-02 (M2 — LLM provider abstraction, registry, and audit foundation
+implemented and verified).
 
 ## Summary
 
-This repository has completed **Milestone M1**: a running Django project against a local
-Dockerized PostgreSQL, with the seven pipeline app boundaries from `docs/ARCHITECTURE.md` §2
-scaffolded. No business logic, no models beyond Django's own built-in apps, and no LLM provider
-calls exist yet — M1 is scaffolding only, exactly as scoped in `docs/IMPLEMENTATION_PLAN.md`.
-Milestones M2 (LLM provider abstraction) through M8 remain **not implemented**.
+This repository has completed **Milestones M1 and M2**. M1 established the Django/PostgreSQL
+application foundation (see git history for detail). M2 fully implements the `llm_provider` app:
+the provider/model registry, the normalized adapter interface, retry policy, typed error
+taxonomy, per-provider schema translation (OpenAI/NVIDIA NIM/Gemini), a deterministic fake
+adapter, and opt-in manual smoke-test commands. No pipeline stage calls into this app yet --
+that starts at Milestone M3. Milestones M3 through M8 remain **not implemented**.
 
-## What exists
+## What exists (M2 — new)
 
-### Planning documents (M0/M0.1)
-- `requirements.md` — the authoritative product requirements (v1.1.1 / "M0.1").
-- `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/DECISIONS.md` (D-001..D-015),
-  `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`, `docs/RESUME_OUTPUT_STRUCTURE.md`,
-  `docs/CANDIDATE_MEMORY_SNAPSHOT.md`, `CLAUDE.md` — see prior entries in this file's history
-  (git log) for what each covers; unchanged in substance by M1.
-- `docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`, `docs/AC/AC-profile_german.md`
-  — committed, operator-approved Candidate Memory bootstrap evidence (still unused until M3).
+- **Registry models** (`llm_provider/models.py`): `LLMProvider` (name, `provider_type`, `base_url`,
+  `credential_env_var` -- never a credential value), `LLMModel` (capability flags:
+  `supports_structured_output`/`supports_streaming`/`supports_reasoning`/`max_output_tokens`),
+  `StageModelAssignment` (one row per pipeline stage, unique constraint enforces exactly one
+  assignment per stage), `LLMCallLog` (token-first audit ledger: input/cached-input/output/total
+  tokens, latency, retry count, sanitized error category/message -- no raw body fields exist on
+  this model at all, so there is nothing to accidentally log unsanitized). All four registered in
+  Django admin (`llm_provider/admin.py`); `LLMCallLog` is admin-read-only by design (an audit
+  ledger is never hand-edited).
+- **Normalized types** (`llm_provider/types.py`): `NormalizedLLMRequest`, `NormalizedLLMResult`,
+  `TokenUsage`. **Error taxonomy** (`llm_provider/errors.py`): `LLMErrorCategory` (six categories
+  per requirements.md Sec 9.5) and `sanitize_error_message()`, which strips body-shaped content
+  and truncates before anything reaches `LLMCallLog` or a log line.
+- **Retry policy** (`llm_provider/retry.py`): `execute_with_retry()` retries only transient
+  categories (`RATE_LIMIT`/`TIMEOUT`/`PROVIDER_INTERNAL`), never retries once
+  `partial_output_received` is set (regardless of category), and caps attempts with linear
+  backoff. Sleep is injectable so tests never actually wait.
+- **Schema translation** (`llm_provider/schema_translation.py`): `to_openai_strict_schema()`
+  (keeps `$ref`/`$defs`/`enum`, adds `additionalProperties: false` recursively -- OpenAI and NIM
+  both use this) and `to_gemini_schema()` (inlines `$ref`/`$defs`, strips `enum`, converts type
+  names to Gemini's uppercase OpenAPI-subset dialect).
+- **Adapters** (`llm_provider/adapters/`): `BaseLLMAdapter` (abstract -- owns the shared call
+  path: retry, re-validation of the provider's raw dict against the canonical Pydantic
+  `output_schema` via `model_validate()`, latency measurement, and the single `LLMCallLog` write);
+  `OpenAIAdapter`, `NvidiaNimAdapter` (checks `supports_structured_output` before assuming NIM
+  strict-schema support), `GeminiAdapter` (REST-only, never gRPC; defensive `thinkingConfig`
+  handling), all three via plain REST (`requests`), no provider SDK dependency anywhere; and
+  `FakeAdapter` for deterministic tests. `adapters/__init__.py` provides
+  `get_adapter_for_stage(stage)`, the one routing function pipeline code will call from M3 onward.
+- **Opt-in manual smoke tests** (`llm_provider/smoke/` + three management commands
+  `smoke_test_openai`/`smoke_test_nvidia`/`smoke_test_gemini`): each checks for its provider's
+  credential env var, prints `NOT LIVE-VERIFIED` and exits cleanly if absent (verified manually
+  with all three credentials unset), otherwise makes one real structured-output call. Never
+  invoked by `manage.py test` or any automated path.
+- **Automated test suite**: 41 deterministic tests across `llm_provider/tests/` (registry CRUD +
+  admin-changelist reachability, stage-routing incl. zero-code-change reassignment, retry
+  classification matrix incl. the partial-stream rule, error sanitizer, fake-adapter
+  `LLMCallLog` correctness, schema translation for all three real adapters, and
+  credential/capability configuration guards) -- all pass with zero live credentials.
 
-### Application foundation (M1 — new)
-- **Django project** (`config/`): `manage.py`, `config/settings.py`, `config/urls.py`,
-  `config/wsgi.py`, `config/asgi.py`. Django 5.1 on Python 3.11.
-- **Seven scaffolded apps**, one per `docs/ARCHITECTURE.md` §2 boundary, each with only the
-  default `apps.py`/`admin.py`/`models.py`/`views.py`/`tests.py`/`migrations/` Django generates —
-  **no model fields, no views, no business logic in any of them**: `llm_provider`,
-  `candidate_memory`, `job_intake`, `candidate_matching`, `resume_builder`, `reviews`,
-  `job_applications`. All seven are registered in `INSTALLED_APPS`.
-  - **Deliberate scope decision**: `job_applications` does **not** get the `JobApplication` model's
-    fields at M1, even though `docs/IMPLEMENTATION_PLAN.md` M1 named this as a possibility. Its
-    `current_jra`/`current_fit_assessment`/`current_resume_draft` foreign keys point at models
-    (`JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`) that don't exist until M4/M5/M6 —
-    defining them now would mean forward-referencing apps that aren't built yet. M1 keeps
-    `job_applications` scaffolding-only like every other app; the `JobApplication` model is built
-    in Milestone M4 instead, per `docs/IMPLEMENTATION_PLAN.md` M4's own "populated with real fields
-    if not already done at M1" phrasing. This is a documented interpretation of an ambiguous plan
-    sentence, not a scope violation — recorded here per `CLAUDE.md`'s instruction to report
-    deviations honestly.
-- **Settings** (`config/settings.py`): `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, and all four
-  `DATABASES` values are read from environment variables (via `python-dotenv` loading `.env`),
-  never hardcoded. `DEBUG` defaults on for local dev; a missing `DJANGO_SECRET_KEY` raises at
-  import time once `DJANGO_DEBUG` is false, rather than silently falling back to an insecure key
-  in a non-debug context. `DATABASES` targets PostgreSQL only — no SQLite fallback.
-- **`docker-compose.yml`**: a single `db` service (`postgres:16-alpine`), reading
-  `POSTGRES_DB`/`USER`/`PASSWORD`/`PORT` from the environment with local-dev defaults, a named
-  volume, and a healthcheck. No other services (no Redis, no broker — per STACK-003/NG-004).
-- **`.env.example`**: placeholders only (no real values) for Django config, Postgres config, and
-  the three provider credential variable names (`OPENAI_API_KEY`, `NVIDIA_NIM_API_KEY`,
-  `GEMINI_API_KEY`) that the M2 provider registry will reference by name. A real `.env` exists
-  locally for development and is gitignored — never committed.
-- **`.gitignore`**: covers `.env`, `.venv/`, Python bytecode/egg-info, Django `staticfiles/`/
-  `media/`/`*.sqlite3`, and `.DS_Store` (new occurrences only — the pre-existing tracked
-  `docs/.DS_Store` was deliberately left untouched, per explicit prior instruction not to handle
-  it as part of documentation work; it remains a known, harmless pre-existing artifact).
-- **`templates/base.html`**: a minimal server-rendered base template (STACK-004 — no SPA), wired
-  into `TEMPLATES[0]["DIRS"]`.
-- **`requirements.txt`** (Django, psycopg[binary], python-dotenv, pydantic) and
-  **`requirements-dev.txt`** (adds ruff). **`pyproject.toml`** holds ruff's configuration.
-- **`Makefile`**: `make check` (`manage.py check`), `make test` (`manage.py test`), `make lint`
-  (`ruff check .`), plus `migrate`/`makemigrations`/`run`/`superuser`/`up`/`down` — the repeatable
-  local quality commands M1 requires; no remote CI was added or is required to consider M1 done.
-- **`.venv/`** — local virtual environment (gitignored, not committed) with all of the above
-  installed.
+## M2 verification performed (2026-09-02)
+
+- `manage.py makemigrations`/`migrate` applied `llm_provider.0001_initial` cleanly against the
+  real local Postgres instance.
+- `manage.py test` -> 41/41 passing (up from 0 at M1), zero live credentials used or required.
+- `make check`/`make lint`/`make test` all pass repeatably.
+- Manually ran all three smoke-test management commands with no credentials configured; each
+  correctly reported `NOT LIVE-VERIFIED` and exited cleanly rather than failing or attempting a
+  network call.
+- `grep` across the repository confirms no pipeline app imports a provider SDK directly (there is
+  no OpenAI/Google-GenerativeAI/Anthropic SDK import anywhere) and no secret-shaped literal exists
+  in any tracked file.
+- **Not yet done**: none of the three real adapters have been exercised against a live provider
+  (no credentials were available in this environment). Per the M2 risk note in
+  `docs/IMPLEMENTATION_PLAN.md`, this means LLM-007's per-provider quirk handling is verified only
+  at the deterministic schema-translation level, not against real API behavior -- flagged
+  honestly rather than claimed as fully proven.
 
 ## What does not exist
 
-- Any model fields, migrations beyond Django's own built-in apps, views, or templates for any of
-  the seven pipeline apps.
-- Any LLM provider adapters, registry data, or `LLMCallLog` rows (Milestone M2).
+- Any model fields, migrations, views, or templates for `candidate_memory`, `job_intake`,
+  `candidate_matching`, `resume_builder`, `reviews`, or `job_applications` (Milestones M3-M7).
+- Any wiring of a pipeline stage to actually call `get_adapter_for_stage()` (starts at M3).
+- Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
+  not performed in this environment -- no credentials configured).
 - Any Candidate Memory bootstrap command, source ingestion, or claims (Milestone M3).
-- Any tests beyond Django's default empty `tests.py` stubs (0 tests currently defined).
-- Any remote/CI configuration (not required for M1; may be added later without blocking anything).
-
-## M1 verification performed (2026-09-02)
-
-- `docker compose up -d` → `db` container reached `healthy` status (Postgres 16, local volume).
-- `python manage.py migrate` → applied all built-in Django migrations (contenttypes, auth, admin,
-  sessions) against the real Postgres instance cleanly, zero errors.
-- `python manage.py check` → "System check identified no issues (0 silenced)."
-- `make check`, `make lint` (ruff, after auto-fixing Django's own boilerplate unused-import
-  scaffolding across all seven apps), and `make test` (0 tests, exits 0) all pass repeatably.
-- Django admin verified reachable and login-capable end-to-end: created a throwaway local
-  superuser (`createsuperuser --noinput`, random password, local dev DB only, never committed),
-  started the dev server, confirmed `GET /admin/login/` → 200, `POST` with valid credentials → 302,
-  and the post-redirect `/admin/` page rendered "Site administration"/"Log out" — i.e. a real
-  logged-in session, not just a reachable page. Dev server was stopped afterward; verification
-  artifacts (cookies, HTML, password note) were not retained.
-- `git status`/manual review confirmed no secret value is staged or committed: `.env` is
-  gitignored and was never staged; a grep of all newly-created tracked-candidate files for
-  credential-shaped strings found nothing.
+- Any remote/CI configuration (not required; local quality commands remain the standard).
 
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
 D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
-No decision remains blocking for any milestone through M7 — D-004's fetch-library choice is
-deferred to M4 by design, not blocked; the D-001 orchestration-framework re-evaluation is
-deliberately deferred to a post-M7 checkpoint.
+No decision remains blocking for any milestone through M7.
 
 ## Next action
 
-Milestone M2 (LLM provider abstraction, registry, and audit foundation) is next, per
-`docs/IMPLEMENTATION_PLAN.md`. M3 and M4 both depend only on M2, not on each other, and may proceed
-in either order after M2 completes.
+Milestone M3 (Candidate Memory build and confirmation workflow) or M4 (Agent Jobber) may proceed
+next -- both depend only on M2, which is now complete, and not on each other.
 
 ## Maintenance rule for this file
 
 Update this file after any milestone completes or any meaningful implementation step lands.
-Describe the repository as it truly is — never mark something present, tested, or working that
+Describe the repository as it truly is -- never mark something present, tested, or working that
 has not actually been built and verified.

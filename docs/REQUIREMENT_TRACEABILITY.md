@@ -18,7 +18,7 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 | Requirement | Source | Component | Milestone | Artifact | Verification | Status |
 |---|---|---|---|---|---|---|
 | GOAL-001 truthful, tailored resume from job req + candidate background | §1 | resume_builder + whole pipeline | M7 | end-to-end pipeline | manual run producing a resume for a real job posting | Not implemented |
-| GOAL-002 provider independence (OpenAI/NVIDIA NIM/Gemini v1, extensible) | §1, §9 | llm_provider | M2 | adapter interface + 3 provider adapters | unit tests per adapter + registry-driven stage routing | Not implemented |
+| GOAL-002 provider independence (OpenAI/NVIDIA NIM/Gemini v1, extensible) | §1, §9 | llm_provider | M2 | adapter interface + 3 provider adapters | unit tests per adapter + registry-driven stage routing | **Implemented** — 41 tests passing, 2026-09-02 |
 | GOAL-003 human review at every meaningful checkpoint | §1 | reviews | M3, M5, M6 | gate views/templates | manual walkthrough of both gates | Not implemented |
 | NG-001 no PDF/DOCX, markdown only | §1, §14 | resume_builder | M6 | ResumeDraft renderer | code review confirms no rendering deps added | Not started |
 | NG-002 no *product-level* multi-tenant/auth (v1.1: Django admin auth is standard framework infra, not excluded) | §1 | project-wide | M1 | settings — `django.contrib.admin`/`auth`/`sessions`/`contenttypes` installed; no product-level account/tenant/role model | code review confirms no product-level user model, admin auth present and reachable | **Implemented** — admin verified reachable + login-capable 2026-09-02 |
@@ -83,8 +83,8 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 | DATA-005 FitAssessment (+ child RequirementAssessment, v1.1/D-014) | §8, §16 | candidate_matching | M5 | model | migration + admin check | Not implemented |
 | DATA-006 ReviewFeedback | §8 | reviews | M5 | model | migration + admin check | Not implemented |
 | DATA-007 ResumeDraft (+ child ResumeElement, v1.1/D-014; structured representation, not markdown-first) | §8, §16 | resume_builder | M6 | model | migration + admin check | Not implemented |
-| DATA-008 provider registry tables | §8 | llm_provider | M2 | models | migration + admin check | Not implemented |
-| DATA-009 LLMCallLog (v1.1: token-first fields — input/cached-input/output/total; no cost field at M2) | §8, §13 | llm_provider | M2 | model | migration + admin check | Not implemented |
+| DATA-008 provider registry tables | §8 | llm_provider | M2 | `LLMProvider`/`LLMModel`/`StageModelAssignment` models | migration + admin check | **Implemented** |
+| DATA-009 LLMCallLog (v1.1: token-first fields — input/cached-input/output/total; no cost field at M2) | §8, §13 | llm_provider | M2 | `LLMCallLog` model | migration + admin check | **Implemented** |
 | DATA-010 (v1.1/D-012) JobApplication aggregate | §8, §17 | job_applications | M4 (see M1 scope note in `docs/CURRENT_STATE.md`: the app is scaffolded at M1, empty; fields deferred to M4 since its FK targets don't exist before then) | model | migration + admin check | Not implemented |
 | DATA-011 (M0.1/D-015) MemoryClaimSupport — one or more exact supporting passages per claim | §8, §16 (M0.1) | candidate_memory | M3 | model | migration + admin check; unit test: multi-support fixture | Not implemented |
 | DATA-012 (M0.1/D-015) CandidateRule — constraint/positioning content, never resume evidence | §8, §16 (M0.1) | candidate_memory | M3 | model | migration + admin check | Not implemented |
@@ -94,17 +94,17 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 
 | Requirement | Source | Component | Milestone | Artifact | Verification | Status |
 |---|---|---|---|---|---|---|
-| LLM-001 every call independently configurable; new provider ⇒ zero pipeline changes | §9 | llm_provider | M2 | adapter interface + registry | unit test: swapping StageModelAssignment changes routing with no pipeline code change | Not implemented |
-| LLM-002 single adapter interface; pipeline never touches provider SDK | §9.1 | llm_provider | M2 | NormalizedLLMRequest/Result types | code review: no provider SDK import outside llm_provider | Not implemented |
-| LLM-003 registry is DB-backed, admin-editable | §9.2 | llm_provider | M2 | Django admin registration | manual admin check | Not implemented |
-| LLM-004 LLMProvider: name, base_url, credential reference only | §9.2 | llm_provider | M2 | model | unit test: no credential value field exists | Not implemented |
-| LLM-005 LLMModel: capability flags | §9.2 | llm_provider | M2 | model | schema check | Not implemented |
-| LLM-006 StageModelAssignment: stage → model, admin editable | §9.2 | llm_provider | M2 | model | manual admin check | Not implemented |
-| LLM-007 per-provider structured-output handling (OpenAI/NVIDIA NIM/Gemini quirks) | §9.3 | llm_provider | M2 | per-provider adapter | unit test per adapter against fixture schemas | Not implemented |
-| LLM-008 retry only transient failures; streaming retry only if nothing streamed; cap+backoff | §9.4 | llm_provider | M2 | retry policy module | unit test: retry classification matrix | Not implemented |
-| LLM-009 normalized typed error taxonomy; no raw provider content unsanitized | §9.5 | llm_provider | M2 | error types + sanitizer | unit test: sanitizer strips response bodies | Not implemented |
-| LLM-010 every call writes an LLMCallLog row | §9.6 | llm_provider | M2 | logging middleware in adapter call path | unit test: fake adapter call produces exactly one log row | Not implemented |
-| LLM-011 adapter layer not extracted into shared package now | §9.7 | llm_provider | M2 | (non-goal) | code review confirms no shared-package dependency | Not started |
+| LLM-001 every call independently configurable; new provider ⇒ zero pipeline changes | §9 | llm_provider | M2 | `adapters.get_adapter_for_stage()` + registry | unit test: swapping StageModelAssignment changes routing with no pipeline code change | **Implemented** — `test_routing.py` |
+| LLM-002 single adapter interface; pipeline never touches provider SDK | §9.1 | llm_provider | M2 | `NormalizedLLMRequest`/`NormalizedLLMResult` in `types.py` | code review: no provider SDK import outside llm_provider | **Implemented** — REST via `requests` only, no SDK deps |
+| LLM-003 registry is DB-backed, admin-editable | §9.2 | llm_provider | M2 | Django admin registration | manual admin check | **Implemented** — `test_registry.py` exercises admin CRUD |
+| LLM-004 LLMProvider: name, base_url, credential reference only | §9.2 | llm_provider | M2 | `LLMProvider` model | unit test: no credential value field exists | **Implemented** |
+| LLM-005 LLMModel: capability flags | §9.2 | llm_provider | M2 | `LLMModel` model | schema check | **Implemented** |
+| LLM-006 StageModelAssignment: stage → model, admin editable | §9.2 | llm_provider | M2 | `StageModelAssignment` model | manual admin check | **Implemented** |
+| LLM-007 per-provider structured-output handling (OpenAI/NVIDIA NIM/Gemini quirks) | §9.3 | llm_provider | M2 | `schema_translation.py` + 3 adapters | unit test per adapter against fixture schemas | **Implemented** (deterministic translation tests only — live-provider behavior not yet smoke-verified, see M2 risk note) |
+| LLM-008 retry only transient failures; streaming retry only if nothing streamed; cap+backoff | §9.4 | llm_provider | M2 | `retry.py` | unit test: retry classification matrix | **Implemented** — `test_retry.py` |
+| LLM-009 normalized typed error taxonomy; no raw provider content unsanitized | §9.5 | llm_provider | M2 | `errors.py` | unit test: sanitizer strips response bodies | **Implemented** — `test_errors.py` |
+| LLM-010 every call writes an LLMCallLog row | §9.6 | llm_provider | M2 | `BaseLLMAdapter._write_call_log` | unit test: fake adapter call produces exactly one log row | **Implemented** — `test_fake_adapter.py` |
+| LLM-011 adapter layer not extracted into shared package now | §9.7 | llm_provider | M2 | (non-goal) | code review confirms no shared-package dependency | **Implemented** (as a non-goal — no such dependency exists) |
 
 ## Human-in-the-loop mechanics (§10)
 
@@ -123,7 +123,7 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 | STACK-002 PostgreSQL via Docker locally | §11 | project-wide | M1 | `docker-compose.yml` | `docker compose up` + migration succeeds | **Implemented** — `db` healthy, `manage.py migrate` applied cleanly |
 | STACK-003 no queue/broker; synchronous in-request LLM calls | §11 | project-wide | M1 | absence of Celery/Redis deps | code review | **Implemented** — `requirements.txt` has no queue/broker dependency |
 | STACK-004 server-rendered Django templates, no SPA | §11 | project-wide | M1 | `templates/base.html` | code review | **Implemented** — base template wired into `TEMPLATES[0]["DIRS"]` |
-| STACK-005 Pydantic for LLM-output validation | §11 | llm_provider | M2 | Pydantic models | unit test | Not implemented (pydantic dependency installed at M1, unused until M2) |
+| STACK-005 Pydantic for LLM-output validation | §11 | llm_provider | M2 | `BaseLLMAdapter.generate()` re-validation | unit test | **Implemented** — `output_schema.model_validate()` in the shared adapter call path |
 | STACK-006 orchestration: plain sequence, LangGraph not adopted for v1 (D-001 approved; post-M7 re-evaluation checkpoint scheduled) | §11 | project-wide | M1 | service-function sequence | code review confirms no langgraph/langchain/agents-sdk dependency | **Implemented** — no such dependency in `requirements.txt` |
 | STACK-007 secrets via `.env`, never committed; DB stores references only | §11 | project-wide | M1 | `.env.example` + `.gitignore` | code review + git history check | **Implemented** — `.env` gitignored and never staged; settings read all secrets from environment |
 | STACK-008 local-first; minimal CI (lint+test) worth adding early (v1.1: local repeatable quality commands are the hard M1 requirement; remote CI is not mandatory) | §11 | project-wide | M1 | `Makefile` (`check`/`test`/`lint`) | local quality commands run and pass | **Implemented** — `make check`/`make test`/`make lint` all pass repeatably; no remote CI added, none required |
@@ -132,7 +132,7 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 
 | Requirement | Source | Component | Milestone | Artifact | Verification | Status |
 |---|---|---|---|---|---|---|
-| TEST-001 Phase 1: ordinary unit tests for non-LLM logic from day one | §12 | test suite | M1–M8 | per-milestone test modules | `pytest`/`manage.py test` passing | Not implemented |
+| TEST-001 Phase 1: ordinary unit tests for non-LLM logic from day one | §12 | test suite | M1–M8 | per-milestone test modules | `pytest`/`manage.py test` passing | Partially implemented — `llm_provider` (M2) has 41 passing deterministic tests; M3–M8 apps not yet started |
 | TEST-002 Phase 2: cassette/recorded-response layer once outputs stabilize | §12 | test suite | Deferred (post-v1) | n/a | n/a | Not started (deliberately deferred) |
 
 ## Non-functional / hard invariants (§13)
@@ -141,9 +141,9 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 |---|---|---|---|---|---|---|
 | NFR-001 no-fabrication: every resume claim traces to a confirmed MemoryClaim | §13 | resume_builder | M6 | post-generation validator | unit test: fixture with untraceable claim rejected | Not implemented |
 | NFR-002 no-concealment: AC gap analysis never softened | §13 | candidate_matching | M5 | FitAssessment validator | unit test: known-gap fixture always surfaces | Not implemented |
-| NFR-003 secrets never in DB/VCS | §13 | project-wide | M1 | `.env` pattern + registry credential-reference design | code review + git-secrets style scan | Not implemented |
-| NFR-004 token visibility, token-first (v1.1/D-008: dollar-cost optional/deferred, must not block M2) | §13 | llm_provider | M2, M8 | LLMCallLog (input/cached-input/output/total tokens) + reporting view | manual report check against known fixture calls | Not implemented |
-| NFR-005 extensibility: new provider = adapter + registry rows only | §13 | llm_provider | M2 | adapter interface | manual test: add a 4th fake provider with no pipeline change | Not implemented |
+| NFR-003 secrets never in DB/VCS | §13 | project-wide | M1 | `.env` pattern + registry credential-reference design | code review + git-secrets style scan | **Implemented** — `LLMProvider.credential_env_var` stores only the variable name; `test_credential_value_is_never_a_field` |
+| NFR-004 token visibility, token-first (v1.1/D-008: dollar-cost optional/deferred, must not block M2) | §13 | llm_provider | M2, M8 | `LLMCallLog` (input/cached-input/output/total tokens) + reporting view | manual report check against known fixture calls | Partially implemented — `LLMCallLog` token fields exist and are populated (M2); the per-job/stage/provider *reporting view* is still M8 |
+| NFR-005 extensibility: new provider = adapter + registry rows only | §13 | llm_provider | M2 | `ADAPTER_CLASSES` registry | manual test: add a 4th fake provider with no pipeline change | **Implemented** — `FakeAdapter`/`LLMProvider.ProviderType.FAKE` is exactly this 4th provider, added with zero routing-code changes |
 
 ## Open questions / deferred (§14)
 
