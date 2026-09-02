@@ -227,7 +227,8 @@ semantics and invariants come first.
   a complete logical snapshot (D-002, **APPROVED WITH MODIFICATION**), scoped to what D-015 adds:
   explicit lifecycle status and lineage rather than an implicit "version int only" model.
 - **Key fields**: `id` (UUID), `version` (int, monotonic), `status`
-  (`BUILDING`/`NEEDS_REVIEW`/`ACTIVE`/`SUPERSEDED`), `base_revision` (optional FK to the prior
+  (`BUILDING`/`NEEDS_REVIEW`/`ACTIVE`/`SUPERSEDED`/`FAILED` -- `FAILED` added by D-016, **PROPOSED**,
+  not yet product-owner-approved), `base_revision` (optional FK to the prior
   `CandidateMemory` this one incrementally builds on — the D-002 "unchanged documents carry
   forward" comparison is always relative to this pointer, never to "whatever the latest revision
   happened to be" at build time), `created_at`, `activated_at` (nullable — set only when an
@@ -266,6 +267,16 @@ semantics and invariants come first.
     one retrieval reads from. Activating a new revision is the one event that moves the
     previously-`ACTIVE` revision to `SUPERSEDED` — the two transitions (`new → ACTIVE`,
     `old ACTIVE → SUPERSEDED`) happen atomically, together.
+  - **`FAILED`** (D-016, **PROPOSED**): a second terminal state, reachable only from `BUILDING` or
+    `NEEDS_REVIEW`, never from `ACTIVE`. Reached either by an unexpected failure during the build
+    (a genuine bug/outage, not the already-tallied expected per-chunk extraction errors, which
+    still leave the revision at `NEEDS_REVIEW`) or by an explicit operator "abandon this working
+    revision" action. Like `SUPERSEDED`, it is frozen and never resurrected -- recovery always
+    means starting a new revision (`base_revision` still points at whatever was `ACTIVE` at the
+    time, exactly as any other new revision would). Before starting a build, the bootstrap
+    mechanism refuses outright if a `BUILDING`/`NEEDS_REVIEW` revision already exists, rather than
+    silently creating a second one -- an explicit `abandon_existing`/`--abandon-existing` action is
+    required to discard the existing one and proceed.
 
   Put another way: `status` and `activated_at` are not the *only* fields that ever change — claim/
   conflict child records legitimately change throughout `BUILDING`/`NEEDS_REVIEW` — but they are

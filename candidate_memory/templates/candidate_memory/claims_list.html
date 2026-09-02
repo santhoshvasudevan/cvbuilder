@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Claims -- v{{ revision.version }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:revision_detail' version=revision.version %}">&larr; v{{ revision.version }}</a></p>
+<h2>Claims -- CandidateMemory v{{ revision.version }}</h2>
+
+<form method="get">
+  <input type="text" name="q" placeholder="Employer / client / scope" value="{{ filters.q }}">
+  <select name="claim_type">
+    <option value="">All claim types</option>
+    {% for ct in claim_type_choices %}
+      <option value="{{ ct }}" {% if filters.claim_type == ct %}selected{% endif %}>{{ ct }}</option>
+    {% endfor %}
+  </select>
+  <select name="experience_level">
+    <option value="">All experience levels</option>
+    {% for value, label in experience_choices %}
+      <option value="{{ value }}" {% if filters.experience_level == value %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="confirmation_status">
+    <option value="">All confirmation statuses</option>
+    {% for value, label in confirmation_choices %}
+      <option value="{{ value }}" {% if filters.confirmation_status == value %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="eligible">
+    <option value="">Any eligibility</option>
+    <option value="yes" {% if filters.eligible == "yes" %}selected{% endif %}>Resume-eligible</option>
+    <option value="no" {% if filters.eligible == "no" %}selected{% endif %}>Not resume-eligible</option>
+  </select>
+  <button type="submit">Filter</button>
+</form>
+
+<table border="1" cellpadding="4">
+  <tr><th>ID</th><th>Text</th><th>Scope</th><th>Type</th><th>Level</th><th>Eligible</th><th>Status</th><th>Supports</th></tr>
+  {% for claim in claims %}
+  <tr>
+    <td><a href="{% url 'candidate_memory:claim_detail' version=revision.version claim_id=claim.claim_id %}">{{ claim.claim_id }}</a></td>
+    <td>{{ claim.canonical_text_en|truncatewords:20 }}</td>
+    <td>{{ claim.subject_scope }}</td>
+    <td>{{ claim.claim_type }}</td>
+    <td>{{ claim.get_experience_level_display|default:"--" }}</td>
+    <td>{{ claim.resume_eligible|yesno:"yes,no" }}</td>
+    <td>{{ claim.confirmation_status }}</td>
+    <td>{{ claim.supports.count }}</td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="8">No claims match these filters.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

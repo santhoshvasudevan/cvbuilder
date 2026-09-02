@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Conflicts -- v{{ revision.version }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:revision_detail' version=revision.version %}">&larr; v{{ revision.version }}</a></p>
+<h2>Conflicts -- CandidateMemory v{{ revision.version }}</h2>
+
+{% for conflict in conflicts %}
+<div style="border:1px solid #999; padding:8px; margin-bottom:8px;">
+  <h3>{{ conflict.conflict_key }} ({{ conflict.status }})</h3>
+  <p>{{ conflict.description }}</p>
+  <p>Involved claims:
+    {% for claim in conflict.involved_claims.all %}
+      <a href="{% url 'candidate_memory:claim_detail' version=revision.version claim_id=claim.claim_id %}">{{ claim.claim_id }}</a>
+      ({{ claim.confirmation_status }}){% if not forloop.last %}, {% endif %}
+    {% endfor %}
+  </p>
+  {% if conflict.operator_resolution %}
+    <p><em>Resolution note: {{ conflict.operator_resolution }}</em></p>
+  {% endif %}
+
+  {% if revision.is_mutable and conflict.status == "OPEN" %}
+  <form method="post" action="{% url 'candidate_memory:conflict_resolve' version=revision.version conflict_id=conflict.pk %}">
+    {% csrf_token %}
+    <label>Winning claim ID (blank = none win, all retired)
+      <input type="text" name="resolved_claim_id" placeholder="e.g. MC-3-0012"></label>
+    <label>Resolution note<br><textarea name="resolution_note" rows="2" cols="60"></textarea></label>
+    <button type="submit">Resolve</button>
+  </form>
+  <form method="post" action="{% url 'candidate_memory:conflict_dismiss' version=revision.version conflict_id=conflict.pk %}">
+    {% csrf_token %}
+    <label>Dismissal note<br><textarea name="resolution_note" rows="2" cols="60"></textarea></label>
+    <button type="submit">Dismiss (not a real conflict)</button>
+  </form>
+  {% endif %}
+</div>
+{% empty %}
+<p>No conflicts recorded.</p>
+{% endfor %}
+{% endblock %}

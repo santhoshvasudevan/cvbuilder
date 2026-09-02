@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}CandidateMemory v{{ revision.version }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:overview' %}">&larr; Overview</a></p>
+<h2>CandidateMemory v{{ revision.version }} ({{ revision.status }})</h2>
+
+{% if revision.is_mutable %}
+  <p><a href="{% url 'candidate_memory:activate_confirm' version=revision.version %}">Review &amp; activate this revision</a></p>
+  <form method="post" action="{% url 'candidate_memory:abandon' version=revision.version %}"
+        onsubmit="return confirm('Mark this revision FAILED and abandon it?');">
+    {% csrf_token %}
+    <label>Reason (optional)<input type="text" name="reason" size="40"></label>
+    <button type="submit">Abandon this working revision</button>
+  </form>
+{% else %}
+  <p><em>This revision is {{ revision.status }} and read-only.</em></p>
+{% endif %}
+
+<h3>Source registry</h3>
+<table border="1" cellpadding="4">
+  <tr><th>Filename</th><th>Role</th><th>Language</th><th>Trust</th><th>Precedence</th><th>SHA-256</th></tr>
+  {% for source in sources %}
+  <tr>
+    <td>{{ source.filename }}</td>
+    <td>{{ source.source_role }}</td>
+    <td>{{ source.language }}</td>
+    <td>{{ source.trust_status }}</td>
+    <td>{{ source.precedence }}</td>
+    <td><code>{{ source.content_sha256|slice:":16" }}...</code></td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>Build summary</h3>
+<ul>
+  {% for key, value in revision.build_summary.items %}
+    <li>{{ key }}: {{ value }}</li>
+  {% empty %}
+    <li>No build summary recorded.</li>
+  {% endfor %}
+</ul>
+
+<h3>Content</h3>
+<ul>
+  <li><a href="{% url 'candidate_memory:claims_list' version=revision.version %}">Claims</a>
+      -- {{ claim_counts.total }} total
+      ({{ claim_counts.confirmed }} confirmed, {{ claim_counts.unconfirmed }} unconfirmed,
+       {{ claim_counts.blocked }} blocked, {{ claim_counts.retired }} retired)</li>
+  <li><a href="{% url 'candidate_memory:rules_list' version=revision.version %}">Candidate rules</a>
+      -- {{ rule_count }}</li>
+  <li><a href="{% url 'candidate_memory:conflicts_inbox' version=revision.version %}">Conflicts</a>
+      -- {{ open_conflicts }} open</li>
+</ul>
+{% endblock %}

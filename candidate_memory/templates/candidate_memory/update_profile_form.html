@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Add experience / update profile{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:overview' %}">&larr; Overview</a></p>
+<h2>Add experience / update profile</h2>
+<p>Submitting this creates one new, immutable operator-update source and a new NEEDS_REVIEW
+   CandidateMemory revision. All existing sources and claims are carried forward unchanged; only
+   this new material is processed. The new revision requires review and explicit activation
+   before it takes effect.</p>
+
+<form method="post">
+  {% csrf_token %}
+  <p><label>Context (optional)<br><input type="text" name="context" size="60"></label></p>
+  <p><label>Employer / client / project (optional)<br><input type="text" name="employer" size="60"></label></p>
+  <p><label>Experience level (optional)<br><input type="text" name="experience_level" size="60"></label></p>
+  <p><label>Dates (optional)<br><input type="text" name="dates" size="60"></label></p>
+  <p><label>Actions (optional)<br><textarea name="actions" rows="3" cols="80"></textarea></label></p>
+  <p><label>Results (optional)<br><textarea name="results" rows="3" cols="80"></textarea></label></p>
+  <p><label>Metrics (optional)<br><input type="text" name="metrics" size="60"></label></p>
+  <p><label>Description<br><textarea name="text" rows="8" cols="80" required></textarea></label></p>
+  <button type="submit">Create new revision</button>
+</form>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Candidate rules -- v{{ revision.version }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:revision_detail' version=revision.version %}">&larr; v{{ revision.version }}</a></p>
+<h2>Candidate rules -- CandidateMemory v{{ revision.version }}</h2>
+<p><em>Constraint/positioning content only -- never resume evidence, never independently sufficient for a MATCH or PARTIAL disposition.</em></p>
+
+<table border="1" cellpadding="4">
+  <tr><th>Type</th><th>Scope</th><th>Text</th><th>Source</th></tr>
+  {% for rule in rules %}
+  <tr>
+    <td>{{ rule.rule_type }}</td>
+    <td>{{ rule.scope }}</td>
+    <td>{{ rule.text }}</td>
+    <td>{% if rule.source_document %}{{ rule.source_document.filename }} L{{ rule.start_line }}-{{ rule.end_line }}{% endif %}</td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="4">No candidate rules recorded.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

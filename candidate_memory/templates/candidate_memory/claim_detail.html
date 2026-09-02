@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}{{ claim.claim_id }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:claims_list' version=revision.version %}">&larr; Claims</a></p>
+<h2>{{ claim.claim_id }} ({{ claim.confirmation_status }})</h2>
+
+<p>{{ claim.canonical_text_en }}</p>
+<ul>
+  <li>Scope: {{ claim.subject_scope }}</li>
+  <li>Claim type: {{ claim.claim_type }}</li>
+  <li>Experience level: {{ claim.get_experience_level_display|default:"--" }}</li>
+  <li>Resume-eligible: {{ claim.resume_eligible|yesno:"yes,no" }}</li>
+  <li>Valid: {{ claim.valid_from|default:"?" }} -- {{ claim.valid_to|default:"ongoing/unspecified" }}</li>
+  {% if claim.legal_employer or claim.client_organization %}
+    <li>Legal employer: {{ claim.legal_employer|default:"--" }}; Client organization:
+      {{ claim.client_organization|default:"--" }}; Presentation: {{ claim.presentation_mode }}</li>
+  {% endif %}
+</ul>
+
+<h3>Supporting quotations</h3>
+<table border="1" cellpadding="4">
+  <tr><th>Source</th><th>Lines</th><th>Role</th><th>Quotation</th></tr>
+  {% for support in supports %}
+  <tr>
+    <td>{{ support.memory_source_document.filename }}</td>
+    <td>L{{ support.start_line }}-{{ support.end_line }}</td>
+    <td>{{ support.support_role }}</td>
+    <td><blockquote>{{ support.quotation }}</blockquote></td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="4">No supports recorded.</td></tr>
+  {% endfor %}
+</table>
+
+{% if conflicts %}
+<h3>Conflicts involving this claim</h3>
+<ul>
+  {% for conflict in conflicts %}
+    <li>{{ conflict.conflict_key }} ({{ conflict.status }}) --
+      <a href="{% url 'candidate_memory:conflicts_inbox' version=revision.version %}">view</a></li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if revision.is_mutable %}
+<h3>Actions</h3>
+<form method="post" action="{% url 'candidate_memory:claim_confirm' version=revision.version claim_id=claim.claim_id %}" style="display:inline">
+  {% csrf_token %}<button type="submit">Confirm</button>
+</form>
+<form method="post" action="{% url 'candidate_memory:claim_retire' version=revision.version claim_id=claim.claim_id %}" style="display:inline">
+  {% csrf_token %}<button type="submit">Retire</button>
+</form>
+<form method="post" action="{% url 'candidate_memory:claim_restore' version=revision.version claim_id=claim.claim_id %}" style="display:inline">
+  {% csrf_token %}<button type="submit">Restore to unconfirmed</button>
+</form>
+
+<h4>Correct claim</h4>
+<form method="post" action="{% url 'candidate_memory:claim_correct' version=revision.version claim_id=claim.claim_id %}">
+  {% csrf_token %}
+  <p><label>Text<br><textarea name="canonical_text_en" rows="3" cols="80">{{ claim.canonical_text_en }}</textarea></label></p>
+  <p><label>Claim type<br><input type="text" name="claim_type" value="{{ claim.claim_type }}"></label></p>
+  <p><label>Subject scope<br><input type="text" name="subject_scope" value="{{ claim.subject_scope }}"></label></p>
+  <p><label>Legal employer<br><input type="text" name="legal_employer" value="{{ claim.legal_employer }}"></label></p>
+  <p><label>Client organization<br><input type="text" name="client_organization" value="{{ claim.client_organization }}"></label></p>
+  <p><label>Presentation
+    <select name="presentation_mode">
+      {% for value, label in presentation_choices %}
+        <option value="{{ value }}" {% if claim.presentation_mode == value %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label></p>
+  <button type="submit">Save correction</button>
+</form>
+{% else %}
+<p><em>This claim belongs to a {{ revision.status }} revision and is read-only.</em></p>
+{% endif %}
+{% endblock %}

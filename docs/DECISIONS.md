@@ -373,3 +373,48 @@ requirement text there).
   decision for the domain-model refinement in `docs/ARCHITECTURE.md` §4
   (`MemoryClaimSupport`, `CandidateRule`, `MemoryConflict`, and the strengthened `CandidateMemory`/
   `MemorySourceDocument`/`MemoryClaim` fields).
+
+## D-016: `FAILED` lifecycle state and bootstrap idempotency/recovery
+
+- **Status**: **PROPOSED** — added while repairing audit findings against the M3 implementation;
+  not yet product-owner-approved. Implemented now because the underlying bug (bootstrap could be
+  rerun while a working revision was already pending, silently creating an orphaned second
+  `NEEDS_REVIEW` revision with no recovery path, and a crash mid-build left a revision stuck at
+  `BUILDING` forever) was assessed as a release blocker; the design choice below is what was
+  implemented, offered here for confirmation or correction rather than presented as already
+  settled.
+- **Requirement**: extends D-015's bootstrap-mechanism decision; addresses a gap that decision did
+  not originally cover (rerun safety, crash recovery).
+- **Issue**: `bootstrap_candidate_memory` (and the "add/update profile" UI workflow) had no way to
+  detect that a `BUILDING`/`NEEDS_REVIEW` revision already existed before starting another, and no
+  way to distinguish "still legitimately in progress" from "crashed and stuck" — both looked
+  identical (`BUILDING`), and only `NEEDS_REVIEW` was ever exposed as "review this," so a crashed
+  build with partial content could be mistaken for a genuine, complete, reviewable one.
+- **Decision made (pending confirmation)**:
+  1. Add a fourth terminal status, `FAILED`, alongside `SUPERSEDED` — reachable only from
+     `BUILDING` or `NEEDS_REVIEW`, never from `ACTIVE` (which still only ever moves to
+     `SUPERSEDED`), and itself immutable once set (no resurrection; recovery means starting a
+     genuinely new revision).
+  2. Before starting a build, refuse outright if a `BUILDING`/`NEEDS_REVIEW` revision already
+     exists (`services.revision.require_no_working_revision` /
+     `ExistingWorkingRevisionError`) — never silently create a second one.
+  3. An explicit `abandon_existing=True` argument (CLI: `--abandon-existing`; UI: an "abandon this
+     working revision" action) marks the existing one `FAILED` and proceeds — an auditable,
+     operator-initiated action, never an automatic side effect of merely retrying.
+  4. An unexpected failure during the build itself (not the already-tallied, expected per-chunk/
+     per-item extraction errors) marks the new revision `FAILED` with a recorded `failure_reason`
+     and whatever partial `build_summary` had accumulated, then re-raises so the caller still sees
+     the real error.
+  5. No single long-held `transaction.atomic()` wraps the whole build (which would hold database
+     locks across dozens of provider calls) — each write still commits as it happens; `FAILED` is
+     reached via the try/except above, not via a transaction rollback.
+- **Alternative considered**: an `ABANDONED` status distinct from a crash-induced `FAILED`, so an
+  operator's deliberate abandonment reads differently from an unexpected crash. Not adopted here —
+  both cases are "this revision never became usable and a new one should be started instead," and
+  a single terminal `FAILED` status with a `build_summary["abandoned_reason"]` /
+  `build_summary["failure_reason"]` key recording *why* seemed like less state to reason about for
+  the same information. Flagged explicitly in case the product owner prefers the two-status split.
+- **Consequence**: `CandidateMemory.Status` gained `FAILED` (migration
+  `0003_alter_candidatememory_status`); `docs/ARCHITECTURE.md` §4's lifecycle diagram needs the
+  same addition; `docs/REQUIREMENT_TRACEABILITY.md` needs a row/note for this if the product owner
+  confirms the design.

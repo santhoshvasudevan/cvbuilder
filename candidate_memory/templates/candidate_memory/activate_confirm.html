@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Activate v{{ revision.version }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'candidate_memory:revision_detail' version=revision.version %}">&larr; v{{ revision.version }}</a></p>
+<h2>Activate CandidateMemory v{{ revision.version }}</h2>
+
+{% if blockers %}
+  <h3>Blocked -- cannot activate</h3>
+  <ul>
+    {% for blocker in blockers %}<li>{{ blocker }}</li>{% endfor %}
+  </ul>
+{% else %}
+  {% if warnings %}
+    <h3>Warnings</h3>
+    <ul>
+      {% for warning in warnings %}<li>{{ warning }}</li>{% endfor %}
+    </ul>
+    <p>These affected claims will remain ineligible/blocked after activation. You may still
+       proceed, or go back and resolve the conflicts first.</p>
+  {% endif %}
+  <form method="post" action="{% url 'candidate_memory:activate' version=revision.version %}">
+    {% csrf_token %}
+    <button type="submit">Activate this revision</button>
+  </form>
+{% endif %}
+{% endblock %}
