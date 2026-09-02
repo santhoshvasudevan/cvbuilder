@@ -98,6 +98,14 @@ class Command(BaseCommand):
             )
         else:
             self.stdout.write(self.style.WARNING("MEMORY_BUILD stage has no StageModelAssignment."))
+        self.stdout.write(
+            f"Configured max output tokens per call: {report.configured_max_output_tokens} "
+            "(registry LLMModel.max_output_tokens if set, else the conservative canary default)"
+        )
+        self.stdout.write(
+            "Maximum theoretical output tokens across this run "
+            f"(configured limit x planned calls): {report.max_theoretical_output_tokens}"
+        )
         if report.would_make_live_call:
             self.stdout.write(
                 self.style.WARNING(

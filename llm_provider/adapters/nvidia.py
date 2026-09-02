@@ -2,6 +2,17 @@
 supporting response_format-style strict JSON schema -- but as a self-hosted/managed endpoint,
 per-model support is not uniform, so `LLMModel.supports_structured_output` is checked before
 assuming it.
+
+Reasoning/sampling translation (operator-decision repair): `request.reasoning_enabled` and
+`request.top_p` are generic, typed `NormalizedLLMRequest` options (see `llm_provider/types.py`) --
+this adapter is the only place that knows NVIDIA NIM's own provider-specific representation of
+them (`chat_template_kwargs.enable_thinking`, `top_p`). Both are opt-in: a request that leaves
+either field `None` gets no such key in its body at all, so this never changes behavior for a
+call that doesn't ask for it, and it never hardcodes "MEMORY_BUILD" or any other stage name here
+-- the *caller* (e.g. `candidate_memory.services.extraction`) decides, per stage and per resolved
+model, whether to set these fields; this adapter only ever faithfully translates what it's given.
+Never touches the shared `build_chat_completion_body()` in `openai.py`, so OpenAI's request body
+is completely unaffected by either field.
 """
 
 from __future__ import annotations
@@ -52,6 +63,13 @@ class NvidiaNimAdapter(BaseLLMAdapter):
 
         schema = self.translate_schema(request.output_schema)
         body = build_chat_completion_body(request, self.llm_model.model_id, schema)
+        # NVIDIA-specific translation of generic, opt-in normalized options -- applied only when
+        # the caller explicitly set them (never a blanket per-adapter default); see module
+        # docstring. `build_chat_completion_body` itself (shared with OpenAI) is never touched.
+        if request.top_p is not None:
+            body["top_p"] = request.top_p
+        if request.reasoning_enabled is not None:
+            body.setdefault("chat_template_kwargs", {})["enable_thinking"] = request.reasoning_enabled
         base_url = provider.base_url or DEFAULT_BASE_URL
 
         try:

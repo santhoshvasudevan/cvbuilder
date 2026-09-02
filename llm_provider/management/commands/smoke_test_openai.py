@@ -9,5 +9,16 @@ class Command(BaseCommand):
         "Requires OPENAI_API_KEY in the environment."
     )
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--model",
+            default=None,
+            help=(
+                "Explicit OpenAI model id to test. If omitted, uses the model assigned to "
+                "MEMORY_BUILD for this provider, or the sole registered structured-output-"
+                "capable model if unambiguous; fails clearly (no provider call) otherwise."
+            ),
+        )
+
     def handle(self, *args, **options):
-        main()
+        main(options["model"])

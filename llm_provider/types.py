@@ -22,6 +22,14 @@ class NormalizedLLMRequest:
     temperature: float = 0.0
     max_output_tokens: int | None = None
     reasoning_effort: str | None = None
+    # Explicit, typed, provider-agnostic request-level options (not a free-form escape hatch) --
+    # each adapter translates the ones it understands into its own provider-specific fields and
+    # silently ignores the rest (e.g. Gemini's `thinkingConfig.thinkingBudget` already uses
+    # `reasoning_effort`, not `reasoning_enabled`; OpenAI currently reads neither). `None` always
+    # means "say nothing, let the provider/model use its own default" -- only an explicit
+    # True/False or a set float ever reaches a request body.
+    reasoning_enabled: bool | None = None
+    top_p: float | None = None
 
 
 @dataclasses.dataclass

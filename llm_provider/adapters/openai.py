@@ -35,6 +35,19 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
                 message=f"Provider returned {response.status_code}.",
             )
         )
+    if response.status_code in (404, 410):
+        # The requested model id is missing/no longer available -- a registry/configuration
+        # problem (wrong or stale model_id), not a malformed request body. Misfiling this as
+        # SCHEMA_VALIDATION hides the real, actionable cause.
+        return NormalizedLLMResult(
+            error=NormalizedLLMError(
+                category=LLMErrorCategory.CONFIGURATION,
+                message=(
+                    f"Provider reports the requested model is not found/no longer available "
+                    f"({response.status_code}). Check the registered LLMModel.model_id."
+                ),
+            )
+        )
     if response.status_code >= 400:
         return NormalizedLLMResult(
             error=NormalizedLLMError(
@@ -55,6 +68,30 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
         content_str = payload["choices"][0]["message"]["content"]
         content_dict = json.loads(content_str)
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        finish_reason = None
+        try:
+            finish_reason = payload["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError):
+            pass
+        if finish_reason == "length":
+            # The provider truncated the response at max_output_tokens before any (or enough)
+            # visible content was emitted -- observed with reasoning models that can spend the
+            # entire budget "thinking" before writing a final answer. This is a configuration
+            # problem (the token limit for this model/prompt), not a malformed request and not a
+            # transient failure -- CONFIGURATION is deliberately excluded from
+            # TRANSIENT_ERROR_CATEGORIES, so callers must never retry it blindly.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(
+                    category=LLMErrorCategory.CONFIGURATION,
+                    message=(
+                        "Provider truncated output at the configured token limit before "
+                        "producing valid content (finish_reason=length). Raise max_output_tokens "
+                        "or reduce reasoning for this model -- not a transient failure, do not "
+                        "retry with identical settings."
+                    ),
+                ),
+                usage=usage,
+            )
         return NormalizedLLMResult(
             error=NormalizedLLMError.from_exception(LLMErrorCategory.SCHEMA_VALIDATION, exc),
             usage=usage,

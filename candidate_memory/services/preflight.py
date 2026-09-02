@@ -21,6 +21,7 @@ from llm_provider.models import LLMProvider, StageModelAssignment
 
 from .bootstrap import SourceSpec
 from .chunking import chunk_source
+from .extraction import DEFAULT_MAX_OUTPUT_TOKENS
 from .revision import current_active_revision, current_working_revision
 
 
@@ -50,6 +51,8 @@ class BootstrapPreflightReport:
     credential_env_var: str | None
     credential_configured: bool
     would_make_live_call: bool
+    configured_max_output_tokens: int
+    max_theoretical_output_tokens: int
 
 
 def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflightReport:
@@ -110,6 +113,15 @@ def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflight
     # Only ever check *whether* the named env var has a non-empty value -- never read/log/return
     # the value itself.
     credential_configured = bool(credential_env_var) and bool(os.environ.get(credential_env_var))
+    # Audit repair: the same resolution `extraction.extract_chunk` applies -- the resolved
+    # model's own registry ceiling wins when set, otherwise the conservative canary default.
+    # Never unbounded, and always shown before any real call is made.
+    configured_max_output_tokens = (
+        (assignment.model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS)
+        if assignment
+        else DEFAULT_MAX_OUTPUT_TOKENS
+    )
+    max_theoretical_output_tokens = configured_max_output_tokens * total_chunks
 
     would_make_live_call = (
         existing_working is None
@@ -132,4 +144,6 @@ def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflight
         credential_env_var=credential_env_var,
         credential_configured=credential_configured,
         would_make_live_call=would_make_live_call,
+        configured_max_output_tokens=configured_max_output_tokens,
+        max_theoretical_output_tokens=max_theoretical_output_tokens,
     )

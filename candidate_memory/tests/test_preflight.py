@@ -10,6 +10,7 @@ from django.test import TestCase
 from ..models import CandidateMemory, MemorySourceDocument
 from ..services.bootstrap import SourceSpec, build_revision
 from ..services.chunking import chunk_source
+from ..services.extraction import DEFAULT_MAX_OUTPUT_TOKENS
 from ..services.preflight import build_preflight_report
 from ..services.revision import abandon_revision
 from .factories import make_fake_stage_assignment, scripted_extraction
@@ -137,3 +138,54 @@ class DryRunPreflightTests(TestCase):
         self.assertIsNone(report.existing_working_revision)
         # No ACTIVE revision either, so nothing to reuse -- must process.
         self.assertFalse(report.sources[0].would_reuse_unchanged)
+
+
+class OutputTokenLimitPreflightTests(TestCase):
+    """Audit repair: the dry-run must display the same finite output-token limit the real build
+    will use, and compute the maximum theoretical output exposure across the whole run."""
+
+    def setUp(self):
+        self.tmp_dir = Path(self._testMethodName + "_fixtures")
+        self.tmp_dir.mkdir(exist_ok=True)
+        self.addCleanup(lambda: [p.unlink() for p in self.tmp_dir.glob("*")] and self.tmp_dir.rmdir())
+
+    def _spec(self, name: str, content: str):
+        path = self.tmp_dir / name
+        path.write_text(content, encoding="utf-8")
+        return SourceSpec(
+            path=path, logical_source_key=name,
+            source_role=MemorySourceDocument.SourceRole.ENGLISH_CORPUS, language="en", precedence=2,
+        )
+
+    def test_defaults_to_the_conservative_canary_limit_when_no_stage_assignment_exists(self):
+        spec = self._spec("corpus.md", "Built the Ford integration.\n")
+        report = build_preflight_report([spec])
+        self.assertEqual(report.configured_max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertEqual(
+            report.max_theoretical_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS * report.total_chunks
+        )
+
+    def test_uses_the_assigned_models_registry_ceiling_when_set(self):
+        model = make_fake_stage_assignment()
+        model.max_output_tokens = 8192
+        model.save(update_fields=["max_output_tokens"])
+
+        spec = self._spec("corpus.md", "Built the Ford integration.\n")
+        report = build_preflight_report([spec])
+        self.assertEqual(report.configured_max_output_tokens, 8192)
+        self.assertEqual(report.max_theoretical_output_tokens, 8192 * report.total_chunks)
+
+    def test_max_theoretical_output_is_zero_when_nothing_needs_processing(self):
+        spec = self._spec("corpus.md", "Built the Ford integration.\n")
+        with scripted_extraction(_ONE_ITEM_RESPONSE):
+            rev = build_revision([spec])
+        from ..services import lifecycle as lifecycle_service
+
+        for claim in rev.claims.all():
+            lifecycle_service.confirm_claim(claim)
+        lifecycle_service.activate_revision(rev)
+
+        same_spec = self._spec("corpus.md", "Built the Ford integration.\n")
+        report = build_preflight_report([same_spec])
+        self.assertEqual(report.total_chunks, 0)
+        self.assertEqual(report.max_theoretical_output_tokens, 0)

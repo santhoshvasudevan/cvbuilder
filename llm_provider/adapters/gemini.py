@@ -106,6 +106,18 @@ class GeminiAdapter(BaseLLMAdapter):
                     message=f"Provider returned {response.status_code}.",
                 )
             )
+        if response.status_code in (404, 410):
+            # The requested model id is missing/no longer available -- a registry/configuration
+            # problem (wrong or stale model_id), not a malformed request body.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(
+                    category=LLMErrorCategory.CONFIGURATION,
+                    message=(
+                        f"Provider reports the requested model is not found/no longer available "
+                        f"({response.status_code}). Check the registered LLMModel.model_id."
+                    ),
+                )
+            )
         if response.status_code >= 400:
             return NormalizedLLMResult(
                 error=NormalizedLLMError(

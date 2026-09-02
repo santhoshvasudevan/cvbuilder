@@ -9,14 +9,17 @@ backstop, not the prompt wording alone."""
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
+
+from llm_provider.models import LLMModel, LLMProvider, StageModelAssignment
 
 from ..models import MemoryClaim, MemorySourceDocument
 from ..services.bootstrap import SourceSpec, build_revision
 from ..services.chunking import chunk_source
-from ..services.extraction import SYSTEM_PROMPT, build_request
-from .factories import scripted_extraction
+from ..services.extraction import DEFAULT_MAX_OUTPUT_TOKENS, SYSTEM_PROMPT, build_request, extract_chunk
+from .factories import make_fake_stage_assignment, scripted_extraction
 
 
 class PromptDelimitingTests(SimpleTestCase):
@@ -97,3 +100,108 @@ class InjectionAttemptFailsClosedPipelineTests(TestCase):
         )
         self.assertEqual(rev.build_summary["extraction_errors"], 1)
         self.assertEqual(rev.build_summary["claims_extracted"], 0)
+
+
+class OutputTokenBoundTests(SimpleTestCase):
+    """Audit repair: the request must never default to effectively unbounded output."""
+
+    def test_build_request_defaults_to_a_finite_conservative_bound(self):
+        chunk = chunk_source("Some candidate evidence text.\n")[0]
+        request = build_request(chunk, source_role="ENGLISH_CORPUS", language="en")
+        self.assertEqual(request.max_output_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        self.assertIsNotNone(request.max_output_tokens)
+
+    def test_build_request_accepts_an_explicit_override(self):
+        chunk = chunk_source("Some candidate evidence text.\n")[0]
+        request = build_request(
+            chunk, source_role="ENGLISH_CORPUS", language="en", max_output_tokens=1234
+        )
+        self.assertEqual(request.max_output_tokens, 1234)
+
+
+class ExtractChunkOutputTokenResolutionTests(TestCase):
+    def test_extract_chunk_uses_the_registry_models_max_output_tokens_when_set(self):
+        model = make_fake_stage_assignment()
+        model.max_output_tokens = 8192
+        model.save(update_fields=["max_output_tokens"])
+
+        from ..services import extraction as extraction_module
+
+        with mock.patch(
+            "candidate_memory.services.extraction.build_request", wraps=extraction_module.build_request
+        ) as build_request_mock:
+            chunk = chunk_source("Some candidate evidence text.\n")[0]
+            extract_chunk(chunk, source_role="ENGLISH_CORPUS", language="en")
+
+        _, kwargs = build_request_mock.call_args
+        self.assertEqual(kwargs["max_output_tokens"], 8192)
+
+    def test_extract_chunk_falls_back_to_the_conservative_default_when_registry_field_unset(self):
+        model = make_fake_stage_assignment()
+        self.assertIsNone(model.max_output_tokens)
+
+        from ..services import extraction as extraction_module
+
+        with mock.patch(
+            "candidate_memory.services.extraction.build_request", wraps=extraction_module.build_request
+        ) as build_request_mock:
+            chunk = chunk_source("Some candidate evidence text.\n")[0]
+            extract_chunk(chunk, source_role="ENGLISH_CORPUS", language="en")
+
+        _, kwargs = build_request_mock.call_args
+        self.assertEqual(kwargs["max_output_tokens"], DEFAULT_MAX_OUTPUT_TOKENS)
+
+
+class NemotronGenerationSettingsTests(TestCase):
+    """Operator-decision repair: the non-reasoning/temperature/top_p settings are scoped to this
+    exact NVIDIA provider+model combination, decided by extract_chunk() itself -- never hardcoded
+    inside NvidiaNimAdapter, never applied to any other stage/model."""
+
+    def _assign_model(self, model_id: str, provider_type: str = LLMProvider.ProviderType.NVIDIA_NIM):
+        provider, _ = LLMProvider.objects.get_or_create(
+            name=f"{provider_type} test provider",
+            defaults={"provider_type": provider_type, "credential_env_var": "TEST_KEY"},
+        )
+        model, _ = LLMModel.objects.get_or_create(
+            provider=provider, model_id=model_id, defaults={"supports_structured_output": True}
+        )
+        StageModelAssignment.objects.update_or_create(
+            stage=StageModelAssignment.Stage.MEMORY_BUILD, defaults={"model": model}
+        )
+        return model
+
+    def _extract_with_fake_adapter(self, model_id: str, provider_type=LLMProvider.ProviderType.NVIDIA_NIM):
+        from llm_provider.adapters.fake import FakeAdapter
+
+        from ..services import extraction as extraction_module
+
+        self._assign_model(model_id, provider_type)
+        chunk = chunk_source("Some candidate evidence text.\n")[0]
+        with mock.patch.dict("llm_provider.adapters.ADAPTER_CLASSES", {provider_type: FakeAdapter}):
+            with mock.patch(
+                "candidate_memory.services.extraction.build_request",
+                wraps=extraction_module.build_request,
+            ) as build_request_mock:
+                extract_chunk(chunk, source_role="ENGLISH_CORPUS", language="en")
+        return build_request_mock.call_args.kwargs
+
+    def test_nemotron_gets_reasoning_disabled_and_recommended_sampling(self):
+        kwargs = self._extract_with_fake_adapter("nvidia/nemotron-3-super-120b-a12b")
+        self.assertEqual(kwargs["reasoning_enabled"], False)
+        self.assertEqual(kwargs["temperature"], 1.0)
+        self.assertEqual(kwargs["top_p"], 0.95)
+
+    def test_a_different_nvidia_model_keeps_the_plain_defaults(self):
+        kwargs = self._extract_with_fake_adapter("some-other-nvidia-model")
+        self.assertIsNone(kwargs["reasoning_enabled"])
+        self.assertEqual(kwargs["temperature"], 0.0)
+        self.assertIsNone(kwargs["top_p"])
+
+    def test_the_same_model_id_under_a_non_nvidia_provider_keeps_the_plain_defaults(self):
+        """Proves the check is genuinely provider+model scoped, not just a model_id string match."""
+        kwargs = self._extract_with_fake_adapter(
+            "nvidia/nemotron-3-super-120b-a12b", provider_type=LLMProvider.ProviderType.OPENAI
+        )
+        self.assertIsNone(kwargs["reasoning_enabled"])
+        self.assertEqual(kwargs["temperature"], 0.0)
+        self.assertIsNone(kwargs["top_p"])

@@ -17,11 +17,30 @@ confirmation gating) mean nothing becomes a trusted fact just because a chunk's 
 from __future__ import annotations
 
 from llm_provider.adapters import get_adapter_for_stage
-from llm_provider.models import StageModelAssignment
+from llm_provider.models import LLMProvider, StageModelAssignment
 from llm_provider.types import NormalizedLLMRequest, NormalizedLLMResult
 
 from ..schemas import ChunkExtractionResult
 from .chunking import SourceChunk, render_chunk_for_prompt
+
+# Audit repair: the request must never default to effectively unbounded output. Conservative
+# canary value for the initial structured-extraction rollout -- not an evidence-based ceiling for
+# every possible chunk/model, just a safe starting point. Overridden per-call by the resolved
+# LLMModel's own `max_output_tokens` registry field when that is set (see extract_chunk below),
+# so raising the real limit for a specific model is a registry edit, never a code change.
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+# Operator decision (2026-09-02): this specific NVIDIA NIM reasoning model consumed its entire
+# output budget on internal "thinking" before emitting any visible JSON on a moderately rich
+# excerpt (a live-qualification failure, not a hypothetical). NVIDIA's own guidance for this model
+# recommends disabling reasoning for structured-extraction use and using temperature=1.0/
+# top_p=0.95. This is scoped to this exact provider+model combination, not a blanket MEMORY_BUILD
+# override -- see extract_chunk() below, which decides based on whichever model MEMORY_BUILD is
+# actually routed to today. If MEMORY_BUILD is later reassigned to a different provider/model,
+# none of this applies and the request falls back to the stage's own plain defaults.
+_NVIDIA_NEMOTRON_MODEL_ID = "nvidia/nemotron-3-super-120b-a12b"
+_NVIDIA_NEMOTRON_TEMPERATURE = 1.0
+_NVIDIA_NEMOTRON_TOP_P = 0.95
 
 SYSTEM_PROMPT = """\
 You are extracting a candidate's professional memory from one bounded excerpt of a larger source
@@ -96,6 +115,10 @@ def build_request(
     source_role: str,
     language: str,
     stage: str = StageModelAssignment.Stage.MEMORY_BUILD,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    temperature: float = 0.0,
+    top_p: float | None = None,
+    reasoning_enabled: bool | None = None,
 ) -> NormalizedLLMRequest:
     numbered_excerpt = render_chunk_for_prompt(chunk)
     return NormalizedLLMRequest(
@@ -113,11 +136,41 @@ def build_request(
             },
         ],
         output_schema=ChunkExtractionResult,
-        temperature=0.0,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        top_p=top_p,
+        reasoning_enabled=reasoning_enabled,
     )
 
 
 def extract_chunk(chunk: SourceChunk, *, source_role: str, language: str) -> NormalizedLLMResult:
-    request = build_request(chunk, source_role=source_role, language=language)
     adapter = get_adapter_for_stage(StageModelAssignment.Stage.MEMORY_BUILD)
+    llm_model = adapter.llm_model
+    # The resolved model's own registry capability wins when set (an operator-editable ceiling
+    # per model, e.g. a model with a smaller real context/output budget); otherwise fall back to
+    # the conservative canary default -- either way, never unbounded.
+    max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+
+    # Scoped exactly to this one provider+model (see the constants' docstring above) -- any other
+    # stage/model combination keeps the plain defaults (temperature=0.0, no top_p/reasoning key).
+    temperature = 0.0
+    top_p = None
+    reasoning_enabled = None
+    if (
+        llm_model.provider.provider_type == LLMProvider.ProviderType.NVIDIA_NIM
+        and llm_model.model_id == _NVIDIA_NEMOTRON_MODEL_ID
+    ):
+        temperature = _NVIDIA_NEMOTRON_TEMPERATURE
+        top_p = _NVIDIA_NEMOTRON_TOP_P
+        reasoning_enabled = False
+
+    request = build_request(
+        chunk,
+        source_role=source_role,
+        language=language,
+        max_output_tokens=max_output_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        reasoning_enabled=reasoning_enabled,
+    )
     return adapter.generate(request)
