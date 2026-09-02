@@ -1,18 +1,24 @@
 # Current State
 
-Last updated: 2026-09-02 (M0 — planning baseline reviewed by product owner; still pre-
-implementation).
+Last updated: 2026-09-02 (M0.1 — documentation-only Candidate Memory refinement completed; still
+pre-implementation).
 
 ## Summary
 
 This repository is **pre-implementation**. The M0 planning baseline (requirements analysis,
-architecture, domain model, milestones, decisions log, test strategy, traceability matrix) has now
-undergone product-owner review. Several decisions were approved (with modification, in most
-cases), one new decision was added and approved (D-014, structured AJ→AC→AB traceability), and
-`requirements.md` was explicitly amended by the product owner to capture the new/clarified
-requirements (see its own Amendment Log). There is still no Django project, no database, no
-dependencies installed, no migrations, no tests, and no application code of any kind. No LLM
-provider has been called.
+architecture, domain model, milestones, decisions log, test strategy, traceability matrix)
+underwent product-owner review, and a follow-up **M0.1 documentation-only refinement** of the
+Candidate Memory prerequisite has now also been completed. Across both reviews: several decisions
+were approved (with modification, in most cases), two new decisions were added and approved
+(D-014, structured AJ→AC→AB traceability; D-015, operator-approved Candidate Memory bootstrap/
+classification/reference export), and `requirements.md` was explicitly amended by the product
+owner both times to capture the new/clarified requirements (see its own Amendment Log). Three
+candidate-profile markdown files now exist in the repository as **committed, operator-approved
+bootstrap evidence sources** (`docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`,
+`docs/AC/AC-profile_german.md`); they have not been modified by this review, only read and
+referenced. The Candidate Memory bootstrap command and its UI are **designed, not implemented** —
+there is still no Django project, no database, no dependencies installed, no migrations, no
+models, no tests, and no application code of any kind. No LLM provider has been called.
 
 ## What exists
 
@@ -33,7 +39,16 @@ provider has been called.
   Contains no candidate-specific factual content — structural/content-design reference only.
 - `CLAUDE.md` — durable repository instructions, updated for the newly approved invariants
   (`JobApplication` aggregate, structured traceability, Django admin auth clarification,
-  token-first observability).
+  token-first observability, and now the Candidate Memory bootstrap/classification/reference-export
+  rules from D-015).
+- `docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`, `docs/AC/AC-profile_german.md`
+  — **new**: committed, operator-approved candidate-profile source files that will serve as the
+  initial Candidate Memory bootstrap evidence in Milestone M3. Read in full during this review;
+  not modified.
+- `docs/CANDIDATE_MEMORY_SNAPSHOT.md` — **new**: a concise, pre-M3, human-readable reference
+  synthesized from the three source files above. Explicitly marked as not an evidence source, not
+  authoritative runtime state, not default LLM context, and never to be re-ingested — it will
+  later be regenerated from the activated PostgreSQL Candidate Memory revision once M3 exists.
 
 ## What does not exist
 
@@ -72,15 +87,25 @@ provider has been called.
 - **D-012** `JobApplication` aggregate — APPROVED.
 - **D-013** — SUPERSEDED by D-010 (merged).
 - **D-014** Structured AJ→AC→AB traceability — new decision, APPROVED.
+- **D-015** Operator-approved Candidate Memory bootstrap, content classification, and reference
+  export — new decision (M0.1), APPROVED. Names the three bootstrap files and their precedence,
+  requires English-canonical claims with multi-language provenance support, requires evidence/
+  constraint/positioning content classification, requires explicit contradiction detection and
+  blocking, requires an explicit (never automatic) bootstrap command, and confirms no vector
+  database is required for v1.
 
 No decision remains blocking for Milestone M1. Milestones M2–M7 have no unresolved blocking
-decisions either — D-004's library choice is deferred to M4 by design, not blocked.
+decisions either — D-004's library choice is deferred to M4 by design, not blocked. Milestone M3
+now has a substantially more detailed, D-015-driven design (bootstrap command, classification,
+conflict handling, multi-support provenance, ongoing-update UI) but is likewise not blocked.
 
 ## Next action
 
-Milestone M1 (Django/PostgreSQL application foundation) is the next implementation milestone, to
-begin only after this M0 review/commit. Follow `docs/IMPLEMENTATION_PLAN.md`'s corrected
-dependency graph and milestone-by-milestone acceptance criteria.
+Milestone M1 (Django/PostgreSQL application foundation) remains the next implementation milestone,
+to begin only after this M0.1 review/commit. Follow `docs/IMPLEMENTATION_PLAN.md`'s corrected
+dependency graph and milestone-by-milestone acceptance criteria. Milestone M3's expanded scope
+(D-015) is ready to implement against once M1/M2 are done — no further product-owner input is
+required to begin M3, since the three bootstrap source files already exist in the repository.
 
 ## Maintenance rule for this file
 

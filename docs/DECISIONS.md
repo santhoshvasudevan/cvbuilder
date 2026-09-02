@@ -284,3 +284,92 @@ requirement text there).
   `candidate_matching`, and `resume_builder` (Milestones M4, M5, M6 respectively) — not a
   documentation-only change. It directly strengthens NFR-001 and NFR-002 from "prompted for" to
   "validated."
+
+## D-015: Operator-approved Candidate Memory bootstrap, content classification, and reference export
+
+- **Status**: **APPROVED** (2026-09-02) — new decision, added during M0.1 product-owner review.
+  Governs the topics below as one decision; where a topic is a direct extension of an existing
+  decision it is cross-referenced rather than re-decided from scratch.
+- **Requirement**: extends MEM-001..006 (requirements.md §4); see also D-002 (revision semantics)
+  and D-003 (provenance representation), both of which this decision builds on rather than
+  supersedes.
+
+### Bootstrap sources (new)
+
+- Three committed markdown files are **operator-approved source evidence**:
+  `docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`, `docs/AC/AC-profile_german.md`.
+- Source precedence/order: `AC-MEMORY_PROFILE.md` is the primary curated profile and
+  highest-precedence source for limitations, safe wording, and profile policy;
+  `AC-profile_english.md` is operator-approved English evidence and expression corpus;
+  `AC-profile_german.md` is operator-approved German evidence and expression corpus.
+- Non-conflicting factual claims correctly extracted and deterministically traceable to these
+  sources may begin `confirmed` during the initial bootstrap. Any contradictory claim must remain
+  ineligible and unconfirmed (`BLOCKED_CONFLICT` or equivalent) until the operator resolves it in
+  the UI. Source approval does **not** allow a malformed, unsupported, incorrectly classified, or
+  non-traceable LLM extraction to become confirmed — approval status of the *source* never
+  substitutes for validation of the *extraction*.
+
+### Canonical language (new)
+
+- English is the canonical language for stored `MemoryClaim` facts. German-language evidence may
+  support the same canonical English claim (see `MemoryClaimSupport` in
+  `docs/ARCHITECTURE.md` §4). German resume wording is generated only for the relevant selected
+  claims when required — the complete memory does not need to be translated on every build. A
+  separate stored translation table is optional, not mandatory, for v1; the default is
+  translate-on-demand for selected claims.
+
+### Revision semantics (extends D-002, does not replace it)
+
+- D-002's snapshot + incremental model applies unchanged: unchanged source documents (matched by
+  content hash) are not reprocessed; new/changed documents are (re)processed; conservative
+  reconfirmation applies when claim identity can't be safely established across a change. D-015
+  adds nothing new here beyond naming the three bootstrap files as the initial source set this
+  model runs against.
+
+### Provenance (extends D-003, does not replace it)
+
+- D-003's guarantees (immutable source identity, SHA-256, exact quotation, deterministic line
+  range, no semantic-similarity provenance) are preserved unchanged. D-015 extends the
+  *cardinality*: a canonical claim may have multiple exact supporting passages (see
+  `MemoryClaimSupport`, `docs/ARCHITECTURE.md` §4), rather than the single-FK model originally
+  sketched — needed because German corroborating evidence and English primary evidence for the
+  same canonical claim are different passages in different documents.
+
+### Job title vs. positioning (new)
+
+- Actual job titles (factual role-history evidence, e.g. "System Engineer" at Continental) and
+  suggested target/resume titles (positioning guidance, e.g. "Senior Solutions Architect" as a
+  suggested title for a specific application) serve different purposes and must not be conflated.
+  There is no general rule that actual employment titles "win" over suggested titles, or
+  vice versa — they answer different questions (what happened vs. how to position it). A suggested
+  target title must never be presented as a historical employment title unless separately
+  supported as fact.
+
+### Operational memory vs. reference export (new)
+
+- PostgreSQL Candidate Memory is the operational memory; the three markdown files remain immutable
+  evidence sources. `docs/CANDIDATE_MEMORY_SNAPSHOT.md` is a concise human-readable export/
+  reference, not an authoritative evidence source and not default runtime LLM context. The
+  snapshot must never be re-ingested as Candidate Memory evidence.
+
+### No vector database for v1 (new)
+
+- No vector database or embedding-based memory is required for v1. PostgreSQL structured retrieval
+  plus a bounded LLM relevance-ranking step is sufficient. `pgvector` remains a possible future
+  optimization only if measured retrieval quality requires it — not adopted now, not a default to
+  revisit without evidence of a real retrieval-quality problem.
+
+### Bootstrap mechanism (new)
+
+- Initial bootstrap is an explicit, repeatable Django management command (conceptually
+  `bootstrap_candidate_memory --primary <path> --english <path> --german <path>`), implemented in
+  Milestone M3 — **not** automatic import during startup, migration, or deployment. Ongoing
+  additions/corrections go through the M3 Candidate Memory UI, creating a new immutable
+  `OPERATOR_UPDATE` source document and a new `CandidateMemory` revision (per D-002's snapshot +
+  incremental model) — direct database editing is not the normal update workflow.
+
+- **Consequence**: this is a real, non-trivial design and implementation scope inside Milestone
+  M3 (see `docs/IMPLEMENTATION_PLAN.md` M3), not a documentation-only change. It is the governing
+  decision for the domain-model refinement in `docs/ARCHITECTURE.md` §4
+  (`MemoryClaimSupport`, `CandidateRule`, `MemoryConflict`, and the strengthened `CandidateMemory`/
+  `MemorySourceDocument`/`MemoryClaim` fields).

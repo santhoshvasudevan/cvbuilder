@@ -23,6 +23,19 @@ Related project: `career-intelligence` (this repo) — architectural lessons cit
   upstream version identity, not timestamps. Added a new job-application tracking dashboard
   requirement (new Section 17) built on a `JobApplication` aggregate root. The rest of this
   document is unchanged from the original draft.
+- **v1.1.1 / "M0.1" (2026-09-02)** — documentation-only refinement of the Candidate Memory
+  prerequisite (Section 4), following product-owner authorization and the addition of three
+  committed, operator-approved candidate-profile source files
+  (`docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`,
+  `docs/AC/AC-profile_german.md`). Section 4 now names these files as the initial bootstrap
+  evidence, states their precedence, requires English as the canonical claim language with German
+  evidence attached as supporting expressions, requires content to be classified into evidence /
+  constraint / positioning planes before anything becomes a resume-eligible claim, requires
+  multiple exact provenance supports per claim (not one), requires explicit contradiction
+  detection that blocks affected claims until operator resolution, and requires bootstrap to be an
+  explicit, repeatable management command rather than automatic import. See `docs/DECISIONS.md`
+  D-015, `docs/ARCHITECTURE.md` §4/§8/§9, and `docs/CANDIDATE_MEMORY_SNAPSHOT.md` for full detail.
+  No other section of this document was changed in this pass.
 
 ## 1. Overview & Goals
 
@@ -110,6 +123,51 @@ This step is done once (and revisited/updated over time, not per job application
   profile evolved and roll back a bad extraction.
 
 This mirrors the exact separation `career-intelligence` draws between `apps.evidence` (verified facts) and `apps.memory_profile` (narrative/positioning claims derived from those facts) — the same discipline applies here even though this app has only one source (the markdown docs) rather than two.
+
+**(M0.1) Operator-approved bootstrap sources**: three committed markdown files are the initial,
+operator-approved bootstrap evidence for Candidate Memory — `docs/AC/AC-MEMORY_PROFILE.md`
+(primary curated profile; highest-precedence source for limitations, safe wording, and profile
+policy), `docs/AC/AC-profile_english.md` (operator-approved English evidence and expression
+corpus), and `docs/AC/AC-profile_german.md` (operator-approved German evidence and expression
+corpus), in that precedence order. Non-conflicting factual claims correctly extracted and
+deterministically traceable to these sources may begin `confirmed` during the initial bootstrap;
+any contradictory claim must remain ineligible and unconfirmed until the operator resolves it.
+Source approval never substitutes for extraction validation — a malformed, unsupported,
+incorrectly classified, or non-traceable extraction must not become confirmed merely because its
+source is approved.
+
+**(M0.1) Canonical language**: English is the canonical language for stored `MemoryClaim` facts.
+German-language evidence may support the same canonical English claim; German resume wording is
+generated only for the relevant selected claims when required, not by translating the complete
+memory on every build.
+
+**(M0.1) Content classification**: the memory-build step must classify source content into three
+planes before anything becomes a resume-eligible claim — an **evidence plane** (role history,
+responsibilities, delivered projects, skills used, supported achievements/metrics, education,
+certifications, language proficiency) that may become resume-eligible claims; a **constraint
+plane** (awareness-only limitations, "currently learning" notes, explicit prohibitions against
+overclaiming, lack of formal ownership, safe-wording restrictions) that becomes non-evidence rules
+or conflict/limitation records and can never independently support a match against a job
+requirement; and a **positioning plane** (suggested target titles, alternative summaries,
+company-specific fit statements, resume ordering guidance, target-role keywords, tailoring
+instructions) that may guide generation but is never factual evidence. The initial importer must
+not flatten every source bullet into a factual claim. An actual job title and a suggested target
+title serve different purposes and must never be conflated — a suggested title must never be
+presented as a historical employment title unless separately supported as fact.
+
+**(M0.1) Provenance, contradictions, and bootstrap mechanism**: a canonical claim may have
+multiple exact supporting passages (e.g. an English primary passage and a German corroborating
+passage), preserving the existing provenance guarantees (immutable source identity, content hash,
+exact quotation, deterministic line range) per claim-support rather than per claim. Contradictions
+across sources must be detected and represented explicitly; an unresolved contradiction makes the
+affected claim ineligible until the operator resolves it. Initial bootstrap is an explicit,
+repeatable command the operator runs deliberately — never automatic import during application
+startup, database migration, or deployment. Ongoing additions or corrections happen through the
+Candidate Memory review UI (Section 4's confirmation UI), which creates a new immutable source
+occurrence and a new `CandidateMemory` revision rather than editing the database directly. See
+`docs/DECISIONS.md` D-015 and `docs/ARCHITECTURE.md` §4/§8/§9 for full design detail, and
+`docs/CANDIDATE_MEMORY_SNAPSHOT.md` for the human-readable, non-authoritative reference export
+this bootstrap produces (never re-ingested as evidence, never default runtime LLM context).
 
 ## 5. Step 1 — Agent Jobber (AJ)
 

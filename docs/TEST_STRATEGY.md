@@ -33,11 +33,76 @@ milestone scope):
   bodies, and records safe `LLMCallLog` metadata where appropriate. A provider with no configured
   credential is reported as **not live-verified**, never as a failure of the deterministic suite —
   passing mocked tests must never be reported as "this provider is operationally verified."
-- **M3 (`candidate_memory`)**: `confirmation_status` state transitions (`unconfirmed` →
-  `confirmed`/`retired`, and that retrieval excludes non-confirmed claims); versioning invariants
-  (a new `CandidateMemory` revision leaves prior versions' claims untouched); the claim-
-  traceability validator (a claim whose text isn't supported by its stored source quote is
-  flagged).
+- **M3 (`candidate_memory`, D-015)**: `confirmation_status` state transitions (`unconfirmed` →
+  `confirmed`/`retired`/`BLOCKED_CONFLICT`, and that retrieval excludes anything not
+  `confirmed`+`resume_eligible`); versioning invariants (a new `CandidateMemory` revision leaves
+  prior revisions' claims untouched); the claim-traceability validator (a claim whose
+  `MemoryClaimSupport` quotation isn't an exact substring at its stated line range is flagged) —
+  plus the following D-015-specific items:
+  - exact source quotation and line-range resolution for `MemoryClaimSupport` (quotation matches
+    `MemorySourceDocument.raw_content` at `start_line`/`end_line`, and `quotation_hash` matches).
+  - source `content_sha256` validation (a mutated fixture document's hash no longer matches).
+  - multiple support passages for one claim (a fixture claim with one `PRIMARY` English support
+    and one `GERMAN_EXPRESSION` support persists both, not just one).
+  - English/German duplicate grouping (two fixture expressions of the same underlying fact share
+    one `duplicate_group_key`).
+  - canonical English storage (a claim built from a German-only source still has an English
+    `canonical_text`).
+  - evidence vs. constraint vs. positioning classification (a fixture evidence sentence becomes a
+    `MemoryClaim`; a fixture constraint sentence — e.g. "currently learning Go" — becomes a
+    `CandidateRule` with `rule_type = LEARNING_STATUS`, not a claim; a fixture positioning sentence
+    — e.g. a suggested target title — becomes a `CandidateRule` with `rule_type = POSITIONING`,
+    never a claim).
+  - a recommended/suggested target title is never treated as a historical employment title (a
+    fixture with both present in source material keeps them as distinct `claim_type`/`rule_type`
+    records).
+  - awareness/learning `experience_level` never becomes `PROFESSIONAL_DELIVERY` or higher (a
+    fixture claim tagged `AWARENESS` is rejected if an extraction attempts to store it as
+    `PROFESSIONAL_DELIVERY`).
+  - unresolved `MemoryConflict` blocks claim eligibility (a fixture conflict with `status = OPEN`
+    makes both involved claims read `BLOCKED_CONFLICT` and excludes them from retrieval; resolving
+    the conflict restores eligibility for the resolved claim only).
+  - a non-conflicting factual claim from an `OPERATOR_APPROVED` bootstrap source becomes
+    `confirmed` automatically, per D-015's auto-confirm rule.
+  - an unsupported or malformed extraction remains `unconfirmed`/rejected **despite** its source
+    being `OPERATOR_APPROVED` — source approval is not extraction approval.
+  - the snapshot file (`docs/CANDIDATE_MEMORY_SNAPSHOT.md`) is excluded from import — running the
+    bootstrap command must not treat the snapshot as a fourth source document.
+  - unchanged-source reuse (a fixture revision with one unchanged and one changed document only
+    reprocesses the changed one, per D-002).
+  - a new `OPERATOR_UPDATE` through the M3 UI creates a new `CandidateMemory` revision rather than
+    mutating the active one.
+  - bounded AC retrieval (M5) excludes the full source documents and reference-only content — a
+    retrieval-service unit test asserts only claim/rule records are returned, never raw source
+    document content or the snapshot.
+
+  **(M0.1 audit fix) Revision lifecycle and activation tests** — planned for M3, not yet
+  implemented, closing the blocking gap found in the M0.1 pre-implementation audit
+  (`docs/ARCHITECTURE.md` §4 `CandidateMemory`, `docs/IMPLEMENTATION_PLAN.md` M3):
+  - an `ACTIVE` (or `SUPERSEDED`) revision's `MemoryClaim`, `MemoryClaimSupport`, `CandidateRule`,
+    and `MemoryConflict` rows cannot be edited — confirming/correcting/retiring/restoring a claim,
+    or resolving a conflict, against such a revision is rejected by the service layer.
+  - using the "add/update profile" workflow against the current `ACTIVE` revision always creates a
+    new revision (`base_revision` pointing at it) rather than editing it in place.
+  - activating a revision atomically supersedes the previously-`ACTIVE` one — a fixture check
+    confirms both transitions happen together, never leaving two revisions `ACTIVE`.
+  - only one revision can be `ACTIVE` at a time — enforced as a service/DB-level invariant, not
+    just a convention.
+  - a revision with an unresolved `MemoryConflict` may activate only if every claim it affects
+    remains `BLOCKED_CONFLICT`/ineligible; the activation view surfaces an explicit warning
+    listing what's being excluded.
+  - resolving a conflict that was left open at activation, once the revision is `ACTIVE`, requires
+    creating a new revision — there is no path that mutates `MemoryConflict.status` on an `ACTIVE`
+    revision directly.
+  - a revision with a failing provenance validation (quotation/hash mismatch) or failing
+    classification/eligibility validation cannot be activated until the failure is fixed.
+
+  All of the above are ordinary deterministic Django/Python tests against fixture markdown and a
+  fake LLM adapter, consistent with Phase 1. This M0.1 addition does **not** introduce cassette
+  tests, live-provider tests, or vector-search tests — those remain out of scope for the reasons
+  already stated above (cassette: TEST-002, deliberately deferred; live-provider: the M2 opt-in
+  manual smoke path only, never the automated suite; vector-search: no vector database is
+  required for v1, per D-015).
 - **M4 (`job_intake`, `job_applications`)**: fetch-success vs. fetch-failure branching (a fixture
   returning an unparseable/too-short body triggers the fallback-to-paste UI path, not a silent
   low-quality result); `source_type` + raw input always persisted regardless of path taken; every

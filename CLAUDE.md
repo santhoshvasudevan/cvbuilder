@@ -61,6 +61,44 @@ rationale, cited to explain *why*, not permission to create a code dependency on
   record input/cached-input/output/total tokens per call; dollar-cost calculation is optional and
   deferred, and must never block a milestone. If pricing is added later, historical cost uses
   pricing snapshotted at call time, not recalculated against a changed future price.
+- **Candidate Memory bootstrap sources are named and precedence-ordered**: `docs/AC/
+  AC-MEMORY_PROFILE.md` (highest precedence, safe-wording/policy authority), `docs/AC/
+  AC-profile_english.md`, and `docs/AC/AC-profile_german.md` are operator-approved evidence — never
+  edit these three files. English is the canonical language for stored `MemoryClaim` facts; German
+  evidence supports the same canonical claim rather than creating a separate one.
+- **Classify before storing as a claim**: source content splits into an evidence plane (may become
+  a resume-eligible `MemoryClaim`), a constraint plane (cautions/limitations — becomes a
+  `CandidateRule`, never resume evidence), and a positioning plane (suggested titles, tailoring
+  guidance — also a `CandidateRule`, never resume evidence). Don't flatten every source bullet into
+  a factual claim, and never let a suggested target title be stored or presented as an actual
+  historical job title.
+- **Provenance is multi-support, and contradictions block, not guess**: a claim can have more than
+  one exact supporting quotation (`MemoryClaimSupport`); an unresolved contradiction
+  (`MemoryConflict`, `OPEN`) makes every claim it involves ineligible until the operator resolves
+  it — never silently prefer one source over another.
+- **Bootstrap is explicit, never automatic**: Candidate Memory bootstrap runs only via a
+  deliberate, operator-invoked management command — never on `migrate`, `runserver`, app startup,
+  or `manage.py test`. Ongoing corrections go through the Candidate Memory UI (a new source + a
+  new revision), never direct database edits.
+- **A `CandidateMemory` revision's mutability is a function of its `status`, not of whether it has
+  been "created" yet**: while `status` is `BUILDING` or `NEEDS_REVIEW`, its claims, supports,
+  rules, and conflicts may be freely confirmed, corrected, retired, restored, or resolved — that is
+  the normal review workflow, not an exception to immutability. The moment a revision becomes
+  `ACTIVE`, all of that content freezes permanently; the UI/service layer must refuse further edits
+  to it. Activation is always an explicit operator action, with exactly one `ACTIVE` revision at a
+  time; it is blocked if a validation failure could let unsupported content become eligible, but an
+  unresolved conflict does **not** have to block activation as long as every claim it affects stays
+  `BLOCKED_CONFLICT` — the activation UI must warn the operator when that's happening. Any
+  correction after activation — including resolving a conflict left open at activation time —
+  happens by creating a **new** revision through the ongoing-update workflow, never by mutating the
+  `ACTIVE` one. Treat any design or code that edits an `ACTIVE` revision's factual content in place
+  as a bug, not a shortcut.
+- **`docs/CANDIDATE_MEMORY_SNAPSHOT.md` is a reference export, not evidence**: do not load it by
+  default, treat it as Candidate Memory evidence, re-ingest it, or pass it to a runtime pipeline
+  prompt unless the product owner explicitly requests that for a specific task. Runtime retrieval
+  (Agent Candidate/Agent Builder) must stay bounded and explainable — never the complete source
+  documents, never a full memory dump, never the snapshot, and no vector database/embedding
+  infrastructure for v1 (PostgreSQL structured retrieval + bounded LLM ranking is sufficient).
 
 ## Working process
 

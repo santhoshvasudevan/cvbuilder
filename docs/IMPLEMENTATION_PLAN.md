@@ -140,44 +140,146 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 
 ## M3 — Candidate Memory build and confirmation workflow
 
-- **Objective**: the `candidate_memory` app fully implemented — markdown ingestion through
-  confirmed, versioned `CandidateMemory`.
-- **Requirements covered**: MEM-001..006, PIPE-001, GOAL-003 (first review checkpoint).
-- **Scope**: `CandidateMemory`/`MemorySourceDocument`/`MemoryClaim` models (with `content_sha256`,
-  `source_start_line`/`source_end_line` per D-003, **approved**); upload view; memory-build service
-  calling `llm_provider` (via the fake adapter in tests, a real one via the M2 manual smoke path);
-  claim confirmation UI (confirm/retire); **snapshot + incremental** revisioning per D-002
-  (**approved**) — content-hash-based unchanged/changed detection, confirmed-status carry-forward
-  when claim identity is demonstrably unchanged, conservative reconfirmation otherwise.
-- **Out of scope**: retrieval by Agent Candidate (M5 consumes this app's output, doesn't build it).
-- **Dependencies**: M2. D-002 and D-003 are both **approved**, so this milestone is not blocked on
-  further decisions.
-- **Expected files**: `candidate_memory/models.py`, `.../services/memory_build.py`,
-  `.../services/revision.py` (content-hash comparison and claim-identity carry-forward logic),
-  `.../views.py`, `.../templates/candidate_memory/*.html`, `.../tests/`.
-- **Acceptance criteria**: uploading a markdown fixture produces `MemoryClaim` rows each with a
-  resolvable `source_document` + `content_sha256` + quote + start/end line; every new claim starts
-  `unconfirmed`; confirming/retiring a claim persists; supplying an **unchanged** source document
-  as part of a new revision does not trigger re-extraction and may carry its claims' `confirmed`
-  status forward; supplying a **changed** or **new** document reprocesses only that document and
-  its new claims begin `unconfirmed`; when claim identity cannot be safely established across a
-  change, the claim requires reconfirmation rather than silently inheriting `confirmed`; prior
-  `CandidateMemory` versions remain untouched; a validator rejects (or flags) a claim whose text
-  isn't traceable to its stored quote.
-- **Verification**: `manage.py test candidate_memory` passing; manual walkthrough — upload a real
-  sample career-history markdown file, review the resulting claims in the UI, confirm/retire a
-  few, create a second revision with one unchanged and one changed document, confirm the unchanged
-  document's claims kept their confirmation and the changed document's claims are freshly
-  `unconfirmed`.
+- **Objective**: the `candidate_memory` app fully implemented — explicit bootstrap from the three
+  operator-approved source files, through content classification, conflict detection, confirmed
+  and versioned `CandidateMemory`, the ongoing-update workflow, and the full Candidate Memory UI
+  (D-015).
+- **Requirements covered**: MEM-001..006, PIPE-001, GOAL-003 (first review checkpoint), D-015 in
+  full (bootstrap sources/precedence, canonical English + German expressions, evidence/constraint/
+  positioning classification, multi-provenance supports, contradiction detection, explicit
+  management-command bootstrap, ongoing UI updates, snapshot generation, bounded retrieval).
+- **Scope**:
+  - **Models**: `CandidateMemory` (UUID, version, `status`, `base_revision`, `activated_at`,
+    `build_summary`), `MemorySourceDocument` (`logical_source_key`, `source_role`, `language`,
+    `trust_status`, `precedence`, `content_sha256`, `unchanged_from`), `MemoryClaim` (`claim_id`,
+    `stable_key`, `canonical_text` in English, `claim_type`, `subject_scope`, `experience_level`,
+    `resume_eligible`, `confirmation_status` incl. `BLOCKED_CONFLICT`, `duplicate_group_key`,
+    optional `valid_from`/`valid_to`), `MemoryClaimSupport` (claim FK, source-document FK, exact
+    quotation, start/end line, quotation hash, source language, support role), `CandidateRule`
+    (rule type, text, source, optional scope), `MemoryConflict` (conflict key, description,
+    involved claims/supports, status, operator resolution, optional resolved claim) — all per
+    `docs/ARCHITECTURE.md` §4/§8/§9 (D-015).
+  - **Bootstrap command**: `bootstrap_candidate_memory --primary <path> --english <path> --german
+    <path>` (name/args may be refined during implementation) — imports the three named committed
+    files (`docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`,
+    `docs/AC/AC-profile_german.md`), stores exact immutable content + `content_sha256`, classifies
+    content into evidence/constraint/positioning planes (§8), extracts atomic canonical English
+    `MemoryClaim`s, attaches one or more `MemoryClaimSupport` rows per claim, groups duplicate
+    English/German expressions via `duplicate_group_key`, detects contradictions
+    (`MemoryConflict`, `OPEN`) before activation, auto-confirms only non-conflicting
+    resume-eligible factual claims that (a) originate from an `OPERATOR_APPROVED` source, (b) pass
+    schema validation, (c) pass exact provenance validation (`MemoryClaimSupport` quotation/hash
+    check), and (d) pass classification validation (evidence-plane only); blocks conflicting claims
+    as `BLOCKED_CONFLICT`; leaves the revision in `NEEDS_REVIEW` for the operator to review
+    conflicts and build statistics in the UI; a separate, explicit operator action (not the command
+    itself) activates the revision (`status → ACTIVE`) — see the lifecycle/activation rules in
+    `docs/ARCHITECTURE.md` §4 (`CandidateMemory`): activation is blocked if any validation failure
+    could let unsupported/misclassified content become eligible, but an unresolved
+    `MemoryConflict` does **not** by itself block activation as long as every claim it affects
+    remains `BLOCKED_CONFLICT` — the activation UI warns the operator when this is the case; the
+    human-readable snapshot (`docs/CANDIDATE_MEMORY_SNAPSHOT.md`-shaped export) is generated from
+    the activated DB revision, not the other way around, and generating it is a read-only,
+    deterministic export that never mutates the revision it reads from. **Does not run on
+    `manage.py migrate`, `runserver`, `manage.py test`, or any startup path** — it is invoked
+    explicitly by the operator, per D-015.
+  - **Ongoing-update workflow** (UI, D-015): "Add experience or update profile" action **always
+    creates a new working revision based on the current `ACTIVE` one** — it is the only way to
+    change anything once a revision is `ACTIVE`, per the lifecycle rules in
+    `docs/ARCHITECTURE.md` §4. Concretely: operator enters/uploads a new factual statement
+    (context, employer/project, experience level, dates, actions, results, metrics) → stored as an
+    immutable `OPERATOR_UPDATE` `MemorySourceDocument` → a new `CandidateMemory` revision is
+    created in `status = BUILDING`, with `base_revision` pointing at the current `ACTIVE` one →
+    unchanged documents/claims are reused (D-002, keyed via `logical_source_key` +
+    `unchanged_from`) → only new/changed material is processed → the new revision moves to
+    `NEEDS_REVIEW` and new conflicts surface in the UI → operator confirms/resolves within this
+    new (still non-`ACTIVE`) revision → operator explicitly activates the new revision (subject to
+    the same activation preconditions as bootstrap) → snapshot regenerates → the **prior** `ACTIVE`
+    revision becomes `SUPERSEDED` and, like all revisions once they leave `NEEDS_REVIEW`, remains
+    immutable and available for audit/rollback. Direct database editing is not the normal update
+    path.
+  - **Candidate Memory UI**: overview + active revision (read-only view — see below); source
+    registry (filename, `source_role`, `language`, `trust_status`, `content_sha256`); build summary
+    counts; searchable/filterable claims (by `subject_scope`, `claim_type`, `experience_level`,
+    `confirmation_status`); claim detail showing every `MemoryClaimSupport` (exact quotation + line
+    range); conflict-resolution inbox; confirm/correct/retire/restore actions; explicit revision
+    activation; add/update profile workflow; snapshot export/regeneration action. **The
+    confirm/correct/retire/restore actions and the conflict-resolution inbox operate only on a
+    revision whose `status` is `BUILDING` or `NEEDS_REVIEW` (the current "working" revision) — the
+    UI must not expose them against a revision whose `status` is `ACTIVE` or `SUPERSEDED`. The
+    active revision's own screens are read-only: viewable and searchable, never editable in
+    place.** Snapshot export/regeneration, when run against the active revision, is a deterministic
+    read-only operation and must not alter that revision's stored content. Server-rendered Django
+    throughout (STACK-004) — no SPA.
+- **Out of scope**: retrieval by Agent Candidate (M5 consumes this app's output, doesn't build
+  it); any vector database or embedding-based retrieval (D-015 — not required for v1); a stored
+  translation table (optional per D-015 — v1 default is translate-on-demand for selected claims
+  at draft time, in `resume_builder`, not a `candidate_memory` build-time responsibility).
+- **Dependencies**: M2. D-002, D-003, and D-015 are all **approved**, so this milestone is not
+  blocked on further decisions. The three source files already exist in the repository
+  (`docs/AC/*.md`, committed) — no additional input is needed to begin.
+- **Expected files**: `candidate_memory/models.py`, `.../management/commands/
+  bootstrap_candidate_memory.py`, `.../services/classify.py` (evidence/constraint/positioning),
+  `.../services/extract.py` (canonical claim + support extraction), `.../services/conflicts.py`,
+  `.../services/revision.py` (content-hash comparison and carry-forward logic),
+  `.../services/snapshot_export.py`, `.../views.py`, `.../templates/candidate_memory/*.html`,
+  `.../tests/`.
+- **Acceptance criteria**: running the bootstrap command against the three real source files
+  produces a `NEEDS_REVIEW` revision whose `MemoryClaim`s each have at least one
+  `MemoryClaimSupport` with an exact quotation resolvable to its `start_line`/`end_line` in the
+  named source; every claim's `canonical_text` is English even when its support is a German
+  passage; a fixture claim built from two duplicate EN/DE expressions shares one
+  `duplicate_group_key`; a fixture positioning-plane sentence (e.g. a suggested target title) is
+  never stored as a `MemoryClaim`; a fixture constraint-plane sentence (e.g. "currently learning
+  Go") is stored as a `CandidateRule`, not a resume-eligible claim; a fixture with two
+  contradicting claims produces an `OPEN` `MemoryConflict` and both claims read
+  `BLOCKED_CONFLICT`, excluded from retrieval until resolved; a non-conflicting, well-supported,
+  correctly classified claim from an `OPERATOR_APPROVED` source is auto-`confirmed`; a fixture
+  extraction that is unsupported, malformed, or misclassified remains `unconfirmed`/rejected even
+  though its source is `OPERATOR_APPROVED` (source approval is not extraction approval); supplying
+  an **unchanged** source document as part of a new revision does not trigger re-extraction;
+  supplying a **changed** or **new** document reprocesses only that document; a new
+  `OPERATOR_UPDATE` through the UI creates a new revision, not an edit to the active one; prior
+  `CandidateMemory` revisions remain untouched; the generated snapshot excludes any internal
+  planning/positioning content per `docs/CANDIDATE_MEMORY_SNAPSHOT.md`'s own contract.
+  **Lifecycle/activation acceptance criteria (planned, not yet implemented):**
+  - an `ACTIVE` (or `SUPERSEDED`) revision's `MemoryClaim`, `MemoryClaimSupport`, `CandidateRule`,
+    and `MemoryConflict` rows cannot be edited through the UI or service layer — attempting to
+    confirm/correct/retire/restore a claim or resolve a conflict on such a revision is rejected;
+  - using "Add experience or update profile" against an `ACTIVE` revision always creates a new
+    `BUILDING` revision (`base_revision` pointing at the current `ACTIVE` one) rather than
+    mutating it;
+  - activating a revision atomically flips the previously-`ACTIVE` revision to `SUPERSEDED` in the
+    same operation — never leaving two revisions `ACTIVE` even transiently;
+  - a database-level/service-level invariant guarantees **at most one** `ACTIVE` revision at any
+    time;
+  - a fixture revision with an unresolved `MemoryConflict` may still be activated **only if** every
+    claim it affects is `BLOCKED_CONFLICT` (unconfirmed/ineligible) at activation time — the
+    activation view surfaces an explicit warning listing the excluded conflicts/claims;
+  - resolving a `MemoryConflict` that was left open on an already-`ACTIVE` revision requires
+    creating a new revision — there is no code path that mutates `MemoryConflict.status` on an
+    `ACTIVE` revision directly;
+  - a revision with a failing provenance validation (`MemoryClaimSupport` quotation/hash mismatch)
+    or failing classification/eligibility validation cannot be activated until fixed.
+  These are acceptance criteria to build toward in M3 — none of them are implemented yet.
+- **Verification**: `manage.py test candidate_memory` passing; manual walkthrough — run the
+  bootstrap command against the three real committed files, review the resulting claims,
+  conflicts, and build summary in the UI, resolve at least one conflict, activate the revision,
+  regenerate the snapshot, then create a second revision via one operator update and confirm
+  unchanged content was reused.
 - **Completion evidence**: passing tests + a recorded manual walkthrough note in
   `docs/CURRENT_STATE.md`.
-- **Risks**: memory-build prompt quality (getting section-keyed, atomic claims rather than one
-  blob) is a real risk — expect prompt iteration; this is exactly why TEST-002 (cassette tests) is
+- **Risks**: memory-build/classification prompt quality (correctly separating evidence from
+  constraint/positioning content, and getting section-keyed atomic claims rather than one blob) is
+  a real risk — expect prompt iteration; this is exactly why TEST-002 (cassette tests) is
   deliberately deferred until this stabilizes. The claim-identity comparison for D-002's
   carry-forward logic is a real correctness risk in its own right — an incorrect "unchanged" match
   would silently carry forward confirmation that shouldn't be trusted, so this comparison should
-  err conservative (require reconfirmation) whenever it's ambiguous, per D-002's explicit
-  instruction.
+  err conservative (require reconfirmation) whenever it's ambiguous. The source corpora
+  (`AC-profile_english.md`/`AC-profile_german.md`) are themselves consolidated tailored-resume
+  inputs full of alternative titles, alternative summaries, and per-job instructions — the
+  classification step has real work to do separating genuine evidence from the positioning noise
+  that dominates those two files by volume; treat any evidence/positioning misclassification found
+  during manual review as a correctness bug, not a style nitpick.
 
 ## M4 — Agent Jobber and job intake
 
@@ -220,7 +322,10 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   NFR-002, D-014's AC portion, D-012's `ANALYSIS`→`PREPARATION` transition on Gate-1 approval.
 - **Scope**: `FitAssessment` model + child `RequirementAssessment` rows (one per relevant
   `JobRequirement`, disposition `MATCH`/`PARTIAL`/`GAP`/`UNKNOWN` per D-014); retrieval service
-  (confirmed claims relevant to one `JobRequirementAnalysis`); AC LLM call; disposition-coverage
+  (confirmed **and** `resume_eligible` claims relevant to one `JobRequirementAnalysis`, from the
+  `ACTIVE` `CandidateMemory` revision only, plus applicable `CandidateRule`s — never the complete
+  source documents or the snapshot, per D-015's runtime-context boundaries in
+  `docs/ARCHITECTURE.md` §9); AC LLM call; disposition-coverage
   validator (every relevant requirement has exactly one disposition; `MATCH`/`PARTIAL` require
   confirmed-claim evidence; `GAP`/`UNKNOWN` never silently disappear) satisfying NFR-002/D-014;
   `ReviewFeedback` model; generic approve/feedback view logic in `reviews`; Gate 1 combined AJ+AC
