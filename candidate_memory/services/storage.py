@@ -9,6 +9,7 @@ from ..models import CandidateMemory, CandidateRule, MemoryClaim, MemoryClaimSup
 from ..schemas import ContentPlane, ExtractedItem
 from .classification import validate_item
 from .comparable_values import COMPARABLE_CLAIM_TYPES, comparison_payload_for_item
+from .subject_scope import normalize_subject_scope
 
 
 class ProvenanceError(Exception):
@@ -45,6 +46,14 @@ def store_extracted_item(
     candidate_memory: CandidateMemory,
     source_document: MemorySourceDocument,
 ) -> MemoryClaim | CandidateRule:
+    if item.plane == ContentPlane.EVIDENCE:
+        # Extraction-quality repair (2026-09-02): fill in or reshape subject_scope from the
+        # item's own structured/extracted fields when it is missing or non-canonical, before
+        # validation checks for its presence. Never invents a value -- see subject_scope.py.
+        normalized_scope = normalize_subject_scope(item)
+        if normalized_scope is not None:
+            item.subject_scope = normalized_scope
+
     validate_item(item)
 
     if not source_document.verify_content_hash():

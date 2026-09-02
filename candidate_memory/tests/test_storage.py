@@ -6,7 +6,8 @@ from __future__ import annotations
 from django.test import TestCase
 
 from ..models import CandidateRule, MemoryClaim, MemoryClaimSupport
-from ..schemas import ContentPlane, ExtractedItem, RuleType, SourcePassage
+from ..schemas import ContentPlane, EmploymentDatesValue, ExtractedItem, RuleType, SourcePassage
+from ..services.classification import ClassificationError
 from ..services.storage import ProvenanceError, duplicate_group_key, store_extracted_item
 from .factories import make_revision, make_source
 
@@ -189,3 +190,58 @@ class LegalEmployerClientSeparationTests(TestCase):
         claim = store_extracted_item(_evidence_item(), candidate_memory=rev, source_document=source)
         self.assertEqual(claim.legal_employer, "")
         self.assertEqual(claim.client_organization, "")
+
+
+class SubjectScopeNormalizationIntegrationTests(TestCase):
+    """Extraction-quality repair: `store_extracted_item` fills a genuinely missing subject_scope
+    from the item's own structured fields before validation/storage -- proven here through the
+    real production entry point, not just the pure `normalize_subject_scope` unit tests."""
+
+    def test_missing_scope_is_derived_from_client_organization_before_storage(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="Assigned to Globex Corporation, starting 2018.\n")
+        item = _evidence_item(
+            canonical_text_en="Assigned to Globex Corporation, starting 2018.",
+            support=SourcePassage(
+                quote="Assigned to Globex Corporation, starting 2018.",
+                start_line=1, end_line=1, language="en",
+            ),
+            claim_type="employment_dates",
+            subject_scope=None,
+            legal_employer="Fictional Consulting Group",
+            client_organization="Globex Corporation",
+            employment_dates=EmploymentDatesValue(start_year=2018),
+        )
+        claim = store_extracted_item(item, candidate_memory=rev, source_document=source)
+        self.assertEqual(claim.subject_scope, "organization:globex corporation")
+
+    def test_missing_scope_with_nothing_derivable_fails_closed(self):
+        """A skill claim with no subject_scope and no organization/language field to derive from
+        is genuinely ambiguous -- it must never silently become a claim with a fabricated or
+        empty scope."""
+        rev = make_revision()
+        source = make_source(rev, raw_content="Uses Python daily.\n")
+        item = _evidence_item(
+            canonical_text_en="Uses Python daily.",
+            support=SourcePassage(quote="Uses Python daily.", start_line=1, end_line=1, language="en"),
+            claim_type="skill",
+            subject_scope=None,
+        )
+        with self.assertRaises(ClassificationError):
+            store_extracted_item(item, candidate_memory=rev, source_document=source)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 0)
+
+    def test_already_valid_scope_is_never_overwritten(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="Continental client work, starting 2015.\n")
+        item = _evidence_item(
+            canonical_text_en="Continental client work, starting 2015.",
+            support=SourcePassage(
+                quote="Continental client work, starting 2015.", start_line=1, end_line=1, language="en"
+            ),
+            claim_type="employment_dates",
+            subject_scope="Continental",
+            employment_dates=EmploymentDatesValue(start_year=2015),
+        )
+        claim = store_extracted_item(item, candidate_memory=rev, source_document=source)
+        self.assertEqual(claim.subject_scope, "Continental")

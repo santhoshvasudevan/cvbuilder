@@ -418,3 +418,39 @@ requirement text there).
   `0003_alter_candidatememory_status`); `docs/ARCHITECTURE.md` §4's lifecycle diagram needs the
   same addition; `docs/REQUIREMENT_TRACEABILITY.md` needs a row/note for this if the product owner
   confirms the design.
+
+## D-017: Line-wrapped source sentences can fail exact-quote provenance verification
+
+- **Status**: **PROPOSED** — discovered during the second live NVIDIA qualification call of the
+  M3 extraction-quality repair (2026-09-02); not yet product-owner-approved, and not yet fixed.
+- **Requirement**: extends D-003's provenance representation; a gap that decision did not
+  originally cover.
+- **Issue**: `services/chunking.py::chunk_source` and `services/storage.py::_verify_quote_at_lines`
+  both treat a source document's physical newline-delimited lines as the unit of provenance --
+  correct and unambiguous when a logical sentence sits entirely on one physical line. During the
+  live qualification call, a synthetic excerpt containing a sentence that word-wraps across two
+  physical lines (e.g. "...assigned to\nclient Globex Corporation...", common in hand-wrapped
+  markdown prose) caused Nemotron to reconstruct its `support.quote` by joining the wrapped halves
+  with a space, while the source's `raw_content` has an actual newline at that point. The exact
+  substring check in `_verify_quote_at_lines` then correctly, deterministically rejects the item --
+  the item's semantic extraction (subject_scope, claim_type, structured payload) was otherwise
+  entirely correct; only the provenance re-verification step fails, silently discarding an
+  otherwise-valid claim. Because the same rejection was observed for every item whose supporting
+  sentence crossed a physical line-wrap boundary in that call (3 of 5 items), and predates any
+  Phase 2 change, this is a structural risk for the real bootstrap sources
+  (`docs/AC/AC-profile_english.md`/`AC-profile_german.md`) if they contain hard-wrapped paragraphs
+  -- not yet confirmed either way, since those files were not inspected for this specific question
+  during the repair (see `docs/CURRENT_STATE.md`'s M3 Phase 2 section).
+- **Not yet decided**: whether to (a) normalize wrapped-newline-vs-space equivalence in
+  `_verify_quote_at_lines`'s comparison (e.g. compare with internal whitespace collapsed), (b)
+  instruct the extraction prompt more explicitly to always emit an accurate multi-line
+  `start_line`/`end_line` span and a quote matching the source's actual line breaks, or (c) some
+  combination. Any change here must preserve D-003's "exact quotation, deterministic line range,
+  no semantic-similarity provenance" guarantee -- a whitespace-normalized comparison is still an
+  exact match on normalized content, not a fuzzy/similarity match, but the product owner should
+  confirm this reading before it's implemented.
+- **Consequence**: flagged as a known, unresolved gap rather than silently accepted; the real
+  four-source bootstrap may lose some otherwise-valid claims to this exact failure mode until
+  resolved. Not treated as blocking the M3 qualification's own pass/fail verdict, since it is
+  orthogonal to the subject_scope/legal-employer semantic-completeness defect that qualification
+  round was scoped to fix (operator decision, 2026-09-02).

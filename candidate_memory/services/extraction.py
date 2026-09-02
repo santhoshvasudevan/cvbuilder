@@ -78,15 +78,31 @@ Rules:
 - Do not invent facts. If the excerpt does not clearly support a claim, do not extract it.
 - A suggested/target job title is POSITIONING, never EVIDENCE -- never extract a suggested title
   as if it were an actual historical job title.
-- For EVIDENCE items, set claim_type and subject_scope (e.g. employer/client or project this is
-  about). If the excerpt clearly attributes a duplicate/equivalent fact you have already seen
+- For EVIDENCE items, always set claim_type and subject_scope. subject_scope is a normalized
+  identifier for what the item is about, never a sentence. Use exactly one of these forms:
+  "organization:<name>" for an employment_dates/employment_location claim or an
+  organization-scoped achievement (prefer the client organization over the legal employer when
+  both are set, e.g. "organization:globex corporation"); "language:<name>" for a
+  language_proficiency claim (e.g. "language:french"); "skill:<name>" for a skill/technology
+  claim (e.g. "skill:python"); or the literal "career" only when the item is genuinely
+  candidate-wide and no narrower subject applies.
+- Set experience_level (AWARENESS/LEARNING/PROTOTYPE/PROFESSIONAL_DELIVERY/PRODUCTION_OPERATION/
+  ARCHITECTURE_OWNERSHIP/LEADERSHIP) for a skill/technology claim when the excerpt indicates a
+  depth of experience; leave it null when depth is not indicated, or for claim types where it
+  does not apply (employment_dates/employment_location/language_proficiency already carry their
+  own depth semantics).
+- Every item must set resume_eligible explicitly: true only for EVIDENCE content usable in a
+  resume; false for any EVIDENCE item that should not appear (e.g. private/sensitive detail), and
+  always false for CONSTRAINT/POSITIONING items -- they become guidance, never resume text.
+- If the excerpt clearly attributes a duplicate/equivalent fact you have already seen
   (e.g. the same achievement stated in English and German), set duplicate_group_hint to the same
   short normalized key for both so they are grouped as one fact.
 - For CONSTRAINT/POSITIONING items, set rule_type.
 - If the excerpt distinguishes a staffing/consultancy legal employer from the client organization
   the work was actually performed for (e.g. "employed by X, assigned to client Y"), set both
-  legal_employer and client_organization. Never invent this split when the source does not state
-  it -- for an ordinary direct-employment claim, leave both unset.
+  legal_employer and client_organization together. Never invent this split when the source does
+  not state it, and never set only one of the two -- for an ordinary direct-employment claim,
+  leave both unset.
 
 Three claim_type values carry an additional structured payload used for deterministic contradiction
 detection across sources. Use the exact claim_type string shown and populate only the matching
@@ -106,6 +122,33 @@ guessing when the excerpt does not clearly state it:
   none is stated as attained), in_progress_level (a level explicitly described as being pursued/
   studied, separate from attained_level). Never fold an in-progress level into attained_level --
   "B1 attained, studying for B2" is attained_level=B1, in_progress_level=B2, never attained_level=B2.
+
+Worked example (fictional -- illustrates the conventions above; never reuse these specific facts
+for a real candidate):
+
+Excerpt:
+  3: Alex Doe worked as Senior Systems Analyst for Fictional Consulting Group, assigned to
+  3: client Globex Corporation, from March 2018 to September 2021, based in Springfield, Testland.
+  4: French: B1 confirmed; currently studying for C1.
+  5: Present Globex Corporation as the employer of record on the resume; do not name Fictional
+  5: Consulting Group unless the recruiter asks.
+  6: For backend-infrastructure roles, lead with the monitoring-dashboard achievement below.
+
+Expected items (fields that matter shown; support.quote must match the excerpt exactly):
+  1) plane=EVIDENCE, claim_type="employment_dates", subject_scope="organization:globex
+     corporation", legal_employer="Fictional Consulting Group", client_organization="Globex
+     Corporation", resume_eligible=true, employment_dates={start_year:2018, start_month:3,
+     end_status:"KNOWN", end_year:2021, end_month:9, precision:"YEAR_MONTH"}.
+  2) plane=EVIDENCE, claim_type="language_proficiency", subject_scope="language:french",
+     resume_eligible=true, language_proficiency={language:"French", attained_level:"B1",
+     in_progress_level:"C1"}.
+  3) plane=CONSTRAINT, rule_type="PREFERENCE", resume_eligible=false -- the employer-of-record
+     wording preference.
+  4) plane=POSITIONING, rule_type="POSITIONING", resume_eligible=false -- the tailoring guidance
+     for backend-infrastructure roles.
+
+Note that legal_employer and client_organization are set together, never just one; subject_scope
+uses the canonical prefix form; and resume_eligible is explicit on every item.
 """
 
 

@@ -82,6 +82,31 @@ class ConstraintPositioningPlaneValidationTests(SimpleTestCase):
         validate_item(item)
         self.assertEqual(item.plane, ContentPlane.POSITIONING)
 
+    def test_constraint_with_resume_eligible_true_rejected(self):
+        """Extraction-quality repair: a CONSTRAINT/POSITIONING item becomes a CandidateRule, never
+        resume content -- resume_eligible=True on one of these planes is a logical inconsistency
+        in the extraction, not something to silently correct."""
+        item = ExtractedItem(
+            plane=ContentPlane.CONSTRAINT,
+            canonical_text_en="Currently learning Go.",
+            support=_support(),
+            rule_type=RuleType.LEARNING_STATUS,
+            resume_eligible=True,
+        )
+        with self.assertRaises(ClassificationError):
+            validate_item(item)
+
+    def test_positioning_with_resume_eligible_true_rejected(self):
+        item = ExtractedItem(
+            plane=ContentPlane.POSITIONING,
+            canonical_text_en="Target title: Senior Solutions Architect",
+            support=_support(),
+            rule_type=RuleType.POSITIONING,
+            resume_eligible=True,
+        )
+        with self.assertRaises(ClassificationError):
+            validate_item(item)
+
 
 class ProvenanceShapeValidationTests(SimpleTestCase):
     def test_empty_quote_rejected(self):
@@ -151,5 +176,57 @@ class ExperienceLevelInflationTests(SimpleTestCase):
             claim_type="employment",
             subject_scope="Ford Motor Company",
             experience_level=ExperienceLevel.PROFESSIONAL_DELIVERY,
+        )
+        validate_item(item)  # must not raise
+
+
+class LegalEmployerClientConsistencyTests(SimpleTestCase):
+    """Extraction-quality repair: a staffing/consultancy split is only ever legitimate when the
+    source distinguishes BOTH the legal employer and the client -- exactly one of the two being
+    set is an inconsistent extraction, never silently completed from the other field."""
+
+    def test_only_legal_employer_set_rejected(self):
+        item = ExtractedItem(
+            plane=ContentPlane.EVIDENCE,
+            canonical_text_en="Employed by Ambigai Consultancy Services.",
+            support=_support(),
+            claim_type="employment",
+            subject_scope="Ambigai Consultancy Services",
+            legal_employer="Ambigai Consultancy Services",
+        )
+        with self.assertRaises(ClassificationError):
+            validate_item(item)
+
+    def test_only_client_organization_set_rejected(self):
+        item = ExtractedItem(
+            plane=ContentPlane.EVIDENCE,
+            canonical_text_en="Assigned to Ford Motor Company.",
+            support=_support(),
+            claim_type="employment",
+            subject_scope="Ford Motor Company",
+            client_organization="Ford Motor Company",
+        )
+        with self.assertRaises(ClassificationError):
+            validate_item(item)
+
+    def test_both_legal_employer_and_client_organization_set_accepted(self):
+        item = ExtractedItem(
+            plane=ContentPlane.EVIDENCE,
+            canonical_text_en="Employed by Ambigai, assigned to Ford client project.",
+            support=_support(),
+            claim_type="employment",
+            subject_scope="Ford Motor Company",
+            legal_employer="Ambigai Consultancy Services",
+            client_organization="Ford Motor Company",
+        )
+        validate_item(item)  # must not raise
+
+    def test_neither_legal_employer_nor_client_organization_set_accepted(self):
+        item = ExtractedItem(
+            plane=ContentPlane.EVIDENCE,
+            canonical_text_en="Built the Ford integration.",
+            support=_support(),
+            claim_type="employment",
+            subject_scope="Ford Motor Company",
         )
         validate_item(item)  # must not raise

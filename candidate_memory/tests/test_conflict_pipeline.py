@@ -228,6 +228,59 @@ class GermanProficiencyConflictPipelineTests(ConflictPipelineTestCase):
         self.assertEqual(accurate.structured_value["attained_level"], "B1")
 
 
+class SubjectScopeNormalizationConflictReachabilityTests(ConflictPipelineTestCase):
+    """Extraction-quality repair: two employment_dates claims with NO model-provided
+    subject_scope, but the same client_organization, must still be normalized to the same
+    derived scope and reach conflict detection through the real end-to-end pipeline -- proving
+    normalization runs early enough (before storage/grouping) for `services/conflicts.py`'s
+    (subject_scope, claim_type) grouping to actually see them together."""
+
+    def test_two_claims_missing_subject_scope_but_sharing_client_organization_conflict(self):
+        rev1 = self._bootstrap_corpus(
+            "Globex Corporation engagement started September 2018.\n",
+            _response(_item(
+                "Globex Corporation engagement started September 2018.",
+                subject_scope=None,
+                legal_employer="Fictional Consulting Group",
+                client_organization="Globex Corporation",
+                employment_dates={
+                    "start_year": 2018, "start_month": 9, "end_status": "ONGOING",
+                    "precision": "YEAR_MONTH",
+                },
+            )),
+        )
+        self._activate(rev1)
+
+        rev2 = self._apply_operator_update(
+            "Globex Corporation engagement actually started August 2018.",
+            _response(_item(
+                "Globex Corporation engagement actually started August 2018.",
+                quote="Context: Operator resolution\nGlobex Corporation engagement actually "
+                "started August 2018.",
+                end_line=2,
+                subject_scope=None,
+                legal_employer="Fictional Consulting Group",
+                client_organization="Globex Corporation",
+                employment_dates={
+                    "start_year": 2018, "start_month": 8, "end_status": "ONGOING",
+                    "precision": "YEAR_MONTH",
+                },
+            )),
+        )
+
+        claims = list(
+            rev2.claims.filter(
+                claim_type="employment_dates", subject_scope="organization:globex corporation"
+            )
+        )
+        self.assertEqual(len(claims), 2)
+        september = next(c for c in claims if c.structured_value.get("start_month") == 9)
+        august = next(c for c in claims if c.structured_value.get("start_month") == 8)
+        self.assertEqual(september.confirmation_status, MemoryClaim.ConfirmationStatus.RETIRED)
+        self.assertEqual(august.confirmation_status, MemoryClaim.ConfirmationStatus.CONFIRMED)
+        self.assertEqual(rev2.conflicts.count(), 1)
+
+
 class FordNoInventedEndDatePipelineTests(ConflictPipelineTestCase):
     def test_ford_start_date_stored_without_inventing_an_end_date(self):
         rev = self._bootstrap_corpus(

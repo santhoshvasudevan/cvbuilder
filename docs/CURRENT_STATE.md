@@ -1,21 +1,26 @@
 # Current State
 
-Last updated: 2026-09-02 (M3 — Candidate Memory build, review, activation and update workflow
-implemented and verified, then repaired against a read-only audit that found the deterministic
-conflict detector was disconnected from the real extraction pipeline; **not** live-provider-
-verified -- see the M3 verification and M3 post-audit-repair sections).
+Last updated: 2026-09-02 (M3 Candidate Memory live-qualified against NVIDIA Nemotron and
+extraction-quality-repaired -- subject_scope/legal-employer semantic-completeness defect fixed and
+verified live; a separate, orthogonal line-wrap provenance risk found and recorded as D-017,
+PROPOSED, not yet fixed. M4 Agent Jobber/job intake implemented and verified against the
+`FakeAdapter` only, **uncommitted** pending operator review -- see the M4 section below).
 
 ## Summary
 
-This repository has completed **Milestones M1, M2, and M3**. M1 established the Django/PostgreSQL
-application foundation (see git history for detail). M2 fully implements the `llm_provider` app.
-M3 implements the `candidate_memory` app end to end: relational models with an enforced
-`BUILDING -> NEEDS_REVIEW -> ACTIVE -> SUPERSEDED` lifecycle, an explicit bootstrap management
-command, deterministic conflict detection, an operator-facing server-rendered UI, and a
-deterministic snapshot export -- all routed through M2's `llm_provider` adapter interface, never a
-provider SDK directly. Milestones M4 through M8 remain **not implemented** (confirmed untouched in
-this session: `job_intake/`, `candidate_matching/`, `resume_builder/`, `reviews/`,
-`job_applications/` show no changes in `git status`).
+This repository has completed **Milestones M1, M2, and M3**, and has **implemented but not yet
+committed Milestone M4**. M1 established the Django/PostgreSQL application foundation (see git
+history for detail). M2 fully implements the `llm_provider` app. M3 implements the
+`candidate_memory` app end to end: relational models with an enforced `BUILDING -> NEEDS_REVIEW ->
+ACTIVE -> SUPERSEDED` lifecycle, an explicit bootstrap management command, deterministic conflict
+detection, an operator-facing server-rendered UI, and a deterministic snapshot export -- all routed
+through M2's `llm_provider` adapter interface, never a provider SDK directly; M3 has since been
+live-qualified against NVIDIA Nemotron (see the M3 extraction-quality repair section) but the real
+four-source bootstrap has still not been run. M4 implements the `job_intake` app (Agent Jobber) and
+the `job_applications.JobApplication` aggregate per `docs/IMPLEMENTATION_PLAN.md` -- implemented
+and tested against the `FakeAdapter` only, **not yet committed** (staged for operator review with a
+proposed commit message). Milestones M5 through M8 remain **not implemented** (confirmed untouched:
+`candidate_matching/`, `resume_builder/`, `reviews/` show no changes in `git status`).
 
 ## What exists (M3 — new)
 
@@ -219,6 +224,66 @@ several proportionate follow-ups, all now fixed:
   unexpectedly-reported "existing working revision") and fully cleaned up before proceeding; the
   development database was re-verified at zero rows across all affected tables afterward.
 
+## M3 extraction-quality repair (2026-09-02, second pass -- NVIDIA qualification hardening)
+
+Following the post-audit repair above, a live-provider qualification pass against NVIDIA Nemotron
+found and fixed a semantic-completeness defect: extracted EVIDENCE items frequently left
+`subject_scope`/`legal_employer`/`client_organization` null even when the source text clearly
+supported them, which would have silently lost or misfiled real claims during the real bootstrap.
+Fixed:
+
+- **`candidate_memory/services/subject_scope.py`** (new): a deterministic, conservative
+  `normalize_subject_scope()` that fills a genuinely missing/malformed `subject_scope` from the
+  item's own `client_organization`/`legal_employer` (employment claims) or `language_proficiency`
+  fields, using a documented canonical convention (`organization:<name>`, `language:<name>`,
+  `skill:<name>`, `career`). It never overwrites an already-valid model-provided value (even a
+  legacy plain-string one predating this convention) and never invents an employer/client/language
+  from world knowledge -- only reshapes what the item's own extracted fields already state. Wired
+  into `storage.store_extracted_item()` before classification validation.
+- **`services/classification.py`**: two new fail-closed rules -- a CONSTRAINT/POSITIONING item
+  with `resume_eligible=True` is now rejected (planes that become a `CandidateRule` can never be
+  resume content); `legal_employer`/`client_organization` must be set together or not at all
+  (exactly one set is treated as an inconsistent/invented split, never silently completed).
+- **`schemas.py`**: `EmploymentLocationValue.city`/`LanguageProficiencyValue.language` now reject a
+  blank string (previously any non-`None` string, including `""`, passed Pydantic's bare `str`
+  typing).
+- **`services/extraction.py`**'s `SYSTEM_PROMPT`: added explicit `subject_scope` convention
+  documentation, `experience_level`/`resume_eligible` guidance, and one concise fictional worked
+  example (Alex Doe / Fictional Consulting Group / Globex Corporation) covering the legal-employer/
+  client split, language attained-vs-in-progress levels, and CONSTRAINT/POSITIONING planes
+  together.
+- 40 new deterministic tests (`candidate_memory/tests/test_subject_scope.py`,
+  `test_comparable_values.py`, plus additions to `test_classification.py`, `test_storage.py`,
+  `test_conflict_pipeline.py`, `test_extraction.py`) -- full suite 284/284 passing at the time,
+  `ruff check .` clean, migrations clean.
+- **One final authorized live NVIDIA qualification call** (identical fictional excerpt,
+  `reasoning_enabled=false, temperature=1.0, top_p=0.95, max_output_tokens=4096`) confirmed the
+  fix: every EVIDENCE item's `subject_scope` populated correctly (`organization:globex
+  corporation`, `career`, `language:french`), `legal_employer`/`client_organization` correctly
+  separated, CONSTRAINT/POSITIONING both correctly `resume_eligible=false`. Latency 8286ms, tokens
+  2028 in/931 out/2959 total, `retry_count=0`, isolated-transaction storage pass rolled back with
+  zero residue (`CandidateMemory`/`MemorySourceDocument` counts both 0 afterward), `LLMCallLog`
+  count 4->5 (exactly the one authorized call).
+- **New finding, not yet fixed** (D-017, PROPOSED): that same live call's storage pass rejected 3
+  of 5 items at the provenance-verification step (not the semantic-extraction step) -- every
+  rejected item's supporting sentence happened to word-wrap across two physical lines in the test
+  excerpt, and Nemotron reconstructed the quote by joining the wrapped halves with a space where
+  the source has an actual newline, failing `_verify_quote_at_lines`'s exact-substring check. This
+  is orthogonal to the subject_scope defect this round targeted (pre-existing chunking/provenance
+  code, untouched by this repair) but is a real, structural risk for the actual bootstrap sources
+  if they contain hard-wrapped paragraphs -- not yet confirmed either way. See D-017 for full
+  detail and options. **Not fixed in this pass** -- flagged for a follow-up session, per operator
+  decision (2026-09-02) to treat the qualification round's own pass/fail verdict as scoped to the
+  subject_scope/legal-employer defect it was authorized to fix.
+- **Dry-run re-verified** against the real four `docs/AC/*.md` sources after this repair:
+  `--dry-run` reported 60 planned chunks/estimated provider calls across all four sources, zero
+  provider calls, zero database writes (`CandidateMemory.objects.count()` confirmed 0 afterward).
+- **Verdict**: subject_scope/legal-employer semantic-completeness defect -- FIXED and verified live.
+  Line-wrap provenance risk (D-017) -- OPEN, unresolved, not blocking this round's verdict per
+  operator decision, but should be investigated (does the real corpus actually contain hard-wrapped
+  paragraphs?) before or during the real bootstrap. The real four-source bootstrap has still **not**
+  been run -- only dry-run/synthetic/rolled-back qualification calls.
+
 ## M3 verification performed (2026-09-02, pre-audit-repair baseline)
 
 - `manage.py makemigrations --check` reports no pending model changes; `manage.py migrate` applies
@@ -307,12 +372,120 @@ several proportionate follow-ups, all now fixed:
   at the deterministic schema-translation level, not against real API behavior -- flagged
   honestly rather than claimed as fully proven.
 
+## What exists (M4 -- new, implemented but UNCOMMITTED as of this writing)
+
+`job_intake` (Agent Jobber) and the `job_applications` scaffolding are now implemented per
+`docs/IMPLEMENTATION_PLAN.md` M4. **Not yet committed** -- staged for operator review with a
+proposed commit message; a separate M3 extraction-quality-repair commit was made first (see git
+log). `candidate_matching`/`resume_builder`/`reviews` remain completely untouched (M5-M6).
+
+- **`job_applications/models.py`**: `JobApplication` (D-012) with only the M4-required shape --
+  `current_jra` FK (to `job_intake.JobRequirementAnalysis`), `pipeline_phase`
+  (`NEW`/`ANALYSIS`/`PREPARATION`/`READY`), `application_outcome`
+  (`NOT_APPLIED`/`APPLIED`/`INTERVIEWING`/`REJECTED`), `created_at`/`updated_at`.
+  `current_fit_assessment`/`current_resume_draft` are deliberately not added yet -- `FitAssessment`
+  (M5)/`ResumeDraft` (M6) don't exist, mirroring the same defer-until-the-owning-milestone pattern
+  M1 already used for this app itself. `advance_to_analysis()` is the one M4-owned transactional
+  phase transition (`NEW`->`ANALYSIS`), rejecting any other starting phase; `application_outcome`
+  is never touched by it.
+- **`job_intake/models.py`**: `JobRequirementAnalysis` (FK to `JobApplication`, `version`,
+  `source_type`, `source_url`, `original_input`, `extracted_text` + its sha256, AJ's structured
+  output fields, `screening_risks` as a JSON list) and child `JobRequirement` (`requirement_id`
+  e.g. `JR-001`, `order`, `category`, `text`, `source_context`) -- both append-only: `save()`/
+  `delete()` raise on an already-persisted instance (the same honest, application-layer-only
+  immutability pattern as `candidate_memory`'s frozen-revision guard -- a raw `QuerySet.update()`/
+  bulk-update/raw SQL would bypass it identically). `(job_application, version)` and
+  `(job_requirement_analysis, requirement_id)`/`(..., order)` are enforced as real DB unique
+  constraints.
+- **`job_intake/schemas.py`**: `AgentJobberAnalysis` Pydantic contract (employer, role_title,
+  posting_language required-non-blank, location, work_arrangement, `requirements` list of
+  `ExtractedRequirement` [category enum MANDATORY/PREFERRED/RESPONSIBILITY/ATS_SIGNAL/
+  IMPLIED_EXPECTATION, text, optional source_context], `screening_risks`). Deliberately has no
+  requirement-numbering field at all -- `JR-NNN` IDs are assigned purely from the `requirements`
+  list's order by application code (`services/intake.py`), so a model can never control its own
+  canonical ID even if it tried.
+- **`job_intake/services/fetch.py`**: bounded, defensive URL fetching (D-004) --
+  `readability-lxml` (D-004 follow-up, see below) for main-content extraction. HTTP(S)-only,
+  rejects embedded credentials, resolves and rejects private/loopback/link-local/reserved/
+  multicast destinations (checked for the original URL **and** every redirect hop, up to 5 hops),
+  finite connect/read timeouts, a 2MB response-size cap enforced both via `Content-Length` and
+  while streaming, an accepted-content-type allowlist, an explicit `User-Agent`, no credentials
+  ever forwarded, and a deterministic usability check (minimum length + a challenge/access-denied
+  keyword blocklist) before ever reaching an LLM call. Every failure raises `FetchError` with a
+  sanitized `safe_message` -- the only text ever shown to the operator; raw fetched bodies never
+  reach an exception message.
+- **`job_intake/services/analyze.py`**: the AJ LLM call, routed only through
+  `llm_provider.adapters.get_adapter_for_stage(AJ_ANALYZE)` -- no provider SDK import (confirmed by
+  grep). Prompt delimits the posting as `<job_posting>...</job_posting>` data, explicitly
+  instructing the model to ignore any instruction-like content inside it, mirroring
+  `candidate_memory.services.extraction`'s hardening pattern.
+- **`job_intake/services/intake.py`**: `resolve_posting_source()` (exactly-one-of-URL/pasted-text
+  validation, a 20-50,000 char bound on pasted text, `FetchError` propagates uncaught so the view
+  can offer the pasted-text fallback with zero LLM calls) and `run_intake()` (runs the AJ call
+  *outside* any transaction so its `LLMCallLog` audit row always commits regardless of what happens
+  next, then -- only once a valid structured result exists -- persists `JobApplication` +
+  `JobRequirementAnalysis` + `JobRequirement` rows + the `NEW`->`ANALYSIS` transition as one
+  all-or-nothing `transaction.atomic()` block; any failure after the call leaves nothing partial).
+- **UI** (`job_intake/views.py`/`urls.py`/`templates/job_intake/*.html`, mounted at
+  `/job-intake/`): an intake form (URL or pasted text) and a read-only analysis detail page
+  (employer/role/source/language/version/pipeline phase, categorized requirements with stable JR
+  IDs -- IMPLIED_EXPECTATION rows visibly labeled "inferred" -- and screening risks). POST/
+  redirect/GET on success; a fetch failure re-renders the form with the URL preserved and the
+  pasted-text fallback offered, making zero LLM calls; CSRF-protected via Django's standard
+  middleware (verified with `enforce_csrf_checks=True`); auto-escaping confirmed against an
+  injected `<script>` payload in a fixture AJ response. No Gate-1/candidate-matching/resume
+  controls exist on this page (M5/M6 are out of scope).
+- **Admin**: `JobRequirementAnalysisAdmin` (with an inline, read-only `JobRequirement` view) denies
+  add/change/delete -- a completed JRA version is append-only, admin cannot bypass that;
+  `JobApplicationAdmin` is a plain read-mostly registration (`current_jra`/timestamps read-only).
+- **D-004 (extraction library) resolved**: `readability-lxml` (import name `readability`), chosen
+  over heavier alternatives (e.g. `trafilatura`, which pulls in its own crawling/date-parsing
+  dependency chain aimed at bulk corpus scraping) as the smallest maintained option that performs
+  well at "strip chrome, keep the main posting body" for one URL at a time. Added to
+  `requirements.txt` (pulls in `lxml`/`cssselect`/`chardet` transitively); recorded in
+  `docs/DECISIONS.md` as a D-004 follow-up note, not a rewrite of D-004's original approved text.
+- **Automated test suite**: 68 new deterministic tests (`job_intake/tests/`,
+  `job_applications/tests/`) -- full project suite 352/352 passing, `ruff check .` clean,
+  `manage.py makemigrations --check` clean, `manage.py check` clean, `git diff --check` clean. All
+  network access is mocked (`requests.get`, `socket.getaddrinfo`) -- confirmed by code review, zero
+  real network calls in the automated suite. Covers: JRA version uniqueness/append-only
+  immutability, stable JR ID/ordering uniqueness constraints, phase-transition validity (including
+  rejecting a second `advance_to_analysis()` call and confirming `application_outcome` stays
+  independent), URL-fetch safety (scheme/credentials/private-loopback-link-local addresses
+  including redirect-hop validation/timeout/connection-error/bad-status/excessive-redirects/
+  unsupported-content-type/oversized-response-via-header-and-via-streaming/empty-or-short-
+  extraction/challenge-page/extraction-library-failure, each making zero LLM calls where
+  applicable), pasted-text intake (English and German fixtures, exact-text preservation, both-
+  sources and neither-source and too-short and too-long validation errors), AJ schema validation
+  (blank posting_language, blank requirement text, invalid category, model-supplied numbering
+  cannot control canonical IDs), atomic persistence (successful run, failed-analysis rollback
+  including confirming the LLMCallLog audit row survives the rollback, simulated storage-failure
+  rollback), and view-level CSRF/escaping/redirect/fallback/no-later-milestone-controls checks.
+- **Manual deterministic walkthrough performed** (Django test client, `manage.py shell`, zero real
+  network/provider calls -- see the automated test suite above, which exercises exactly these
+  paths): an English pasted posting and a German pasted posting each produced a `JobApplication`
+  with stable `JR-001.. JR-005` IDs and `pipeline_phase=ANALYSIS`; a mocked broken URL produced zero
+  LLM calls and rendered the pasted-text fallback with the URL preserved; `application.refresh_from_db()`
+  after each run confirms state read back from PostgreSQL matches what was written (durability
+  across a fresh query, not an in-memory assumption).
+- **Not done, reported honestly**: no real public job-posting URL and no real LLM provider call
+  were used for M4 -- every AJ analysis in this session used the `FakeAdapter` with a scripted
+  response, per the explicit "no live LLM calls" constraint for this milestone. `AJ_ANALYZE` has no
+  live-provider verification, matching M3's already-honest "not live-verified" pattern for `MEMORY_BUILD`
+  before its own qualification round. No `StageModelAssignment` row for `AJ_ANALYZE` was created or
+  changed in the persistent development database.
+
 ## What does not exist
 
-- Any model fields, migrations, views, or templates for `job_intake`, `candidate_matching`,
-  `resume_builder`, `reviews`, or `job_applications` (Milestones M4-M7).
-- Any pipeline stage other than Candidate Memory build (`MEMORY_BUILD`) actually calling
-  `get_adapter_for_stage()` -- `AJ_ANALYZE`/`AC_MATCH`/`AB_BUILD` remain unused until M4/M5/M6.
+- Any model fields, migrations, views, or templates for `candidate_matching`, `resume_builder`, or
+  `reviews` (Milestones M5-M6).
+- `JobApplication.current_fit_assessment`/`current_resume_draft` (M5/M6 scope, by design -- see
+  the M4 section above).
+- Any pipeline stage other than Candidate Memory build (`MEMORY_BUILD`) and Agent Jobber
+  (`AJ_ANALYZE`) actually calling `get_adapter_for_stage()` -- `AC_MATCH`/`AB_BUILD` remain unused
+  until M5/M6.
+- Any real-world URL fetch verification (only mocked HTTP responses have been exercised) or any
+  live NVIDIA/OpenAI/Gemini call for the `AJ_ANALYZE` stage.
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
   not performed in this environment -- no credentials configured), including for the M3 Candidate
   Memory extraction path specifically -- see the M3 verification section above.
@@ -323,15 +496,21 @@ several proportionate follow-ups, all now fixed:
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
 D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
-No decision remains blocking for any milestone through M7.
+D-016 (`FAILED` lifecycle state) and D-017 (line-wrap provenance risk, new this session) are both
+PROPOSED, not yet product-owner-approved. Neither is blocking for any milestone through M7 as
+currently scoped.
 
 ## Next action
 
-Milestone M4 (Agent Jobber) or M5 (Agent Candidate) may proceed next per
-`docs/IMPLEMENTATION_PLAN.md`'s dependency graph. Before either can produce a real result end to
-end, a live LLM provider credential needs to be configured (M3's Candidate Memory bootstrap is
-implemented but has only been run against the `FakeAdapter`); this is an operational prerequisite,
-not a code blocker.
+M4 is implemented and verified against the `FakeAdapter` but awaits operator review/commit (a
+proposed commit message was reported separately, not applied automatically per this session's
+explicit instruction). Once committed, Milestone M5 (Agent Candidate) may proceed per
+`docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on both M3 and M4. Two operational
+prerequisites remain, neither a code blocker: (1) the real four-source Candidate Memory bootstrap
+has still not been run against a live provider (M3's live qualification calls used synthetic
+fixtures in rolled-back transactions only); (2) D-017's line-wrap provenance risk should be
+investigated against the real `docs/AC/*.md` corpus before or during that real bootstrap, since it
+could silently drop otherwise-valid claims the same way the now-fixed subject_scope defect did.
 
 ## Maintenance rule for this file
 

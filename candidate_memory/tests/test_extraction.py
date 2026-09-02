@@ -22,6 +22,44 @@ from ..services.extraction import DEFAULT_MAX_OUTPUT_TOKENS, SYSTEM_PROMPT, buil
 from .factories import make_fake_stage_assignment, scripted_extraction
 
 
+class PromptWorkedExampleTests(SimpleTestCase):
+    """Extraction-quality repair: the prompt's worked example must use only fictional
+    placeholders, and must never contain a verbatim excerpt of the real, operator-approved
+    Candidate Memory bootstrap sources (docs/AC/*.md) -- those are never loaded into a hardcoded
+    prompt string (CLAUDE.md)."""
+
+    def test_worked_example_uses_only_designated_fictional_placeholders(self):
+        for marker in ("Alex Doe", "Fictional Consulting Group", "Globex Corporation"):
+            self.assertIn(marker, SYSTEM_PROMPT)
+        normalized = " ".join(SYSTEM_PROMPT.split())
+        self.assertIn("never reuse these specific facts for a real candidate", normalized)
+
+    def test_worked_example_explains_the_subject_scope_convention(self):
+        for marker in ("organization:", "language:", "skill:", '"career"'):
+            self.assertIn(marker, SYSTEM_PROMPT)
+
+    def test_prompt_contains_no_verbatim_line_from_the_real_bootstrap_sources(self):
+        real_source_paths = [
+            Path("docs/AC/AC-profile_english.md"),
+            Path("docs/AC/AC-profile_german.md"),
+            Path("docs/AC/AC-MEMORY_PROFILE.md"),
+        ]
+        checked_any = False
+        for path in real_source_paths:
+            if not path.exists():
+                continue
+            checked_any = True
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if len(stripped) < 40:
+                    continue  # short/boilerplate lines are not a meaningful leak signal
+                self.assertNotIn(
+                    stripped, SYSTEM_PROMPT,
+                    f"A real bootstrap source line leaked verbatim into SYSTEM_PROMPT: {stripped!r}",
+                )
+        self.assertTrue(checked_any, "No real bootstrap source files were found to check against.")
+
+
 class PromptDelimitingTests(SimpleTestCase):
     def test_excerpt_is_wrapped_in_explicit_data_delimiters(self):
         chunk = chunk_source("Some candidate evidence text.\n")[0]

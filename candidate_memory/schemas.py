@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ContentPlane(str, Enum):
@@ -72,6 +72,13 @@ class EmploymentLocationValue(BaseModel):
     country: str | None = None
     country_code: str | None = None
 
+    @field_validator("city")
+    @classmethod
+    def _city_must_be_non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("city must not be blank -- omit employment_location entirely if unknown.")
+        return value
+
 
 class LanguageProficiencyValue(BaseModel):
     """Structured comparison payload for `claim_type == "language_proficiency"`. `attained_level`
@@ -81,6 +88,15 @@ class LanguageProficiencyValue(BaseModel):
     language: str
     attained_level: str | None = None
     in_progress_level: str | None = None
+
+    @field_validator("language")
+    @classmethod
+    def _language_must_be_non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError(
+                "language must not be blank -- omit language_proficiency entirely if unknown."
+            )
+        return value
 
 
 class SourcePassage(BaseModel):

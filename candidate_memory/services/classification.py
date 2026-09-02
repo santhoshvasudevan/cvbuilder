@@ -45,11 +45,28 @@ def validate_item(item: ExtractedItem) -> None:
                     f"Experience level inflation: item is classified {item.experience_level.value} "
                     "but canonical_text_en uses professional-delivery phrasing."
                 )
+        # Extraction-quality repair (2026-09-02): a staffing/consultancy split is only ever
+        # legitimate when the source distinguishes BOTH the legal employer and the client it
+        # assigned the candidate to -- an item with exactly one of the two set is an inconsistent
+        # extraction (either a half-completed split or an invented client/employer), never
+        # silently completed from the other field. Fail closed rather than guess.
+        if bool(item.legal_employer) != bool(item.client_organization):
+            raise ClassificationError(
+                "legal_employer and client_organization must both be set or both left unset -- "
+                "the source must explicitly distinguish a staffing/consultancy split before "
+                "either field is populated; never invent one from the other."
+            )
     else:
         if item.rule_type is None:
             raise ClassificationError(
                 f"{item.plane.value}-plane item is missing rule_type; cannot store as a "
                 "CandidateRule."
+            )
+        if item.resume_eligible:
+            raise ClassificationError(
+                f"{item.plane.value}-plane item must never be resume_eligible=True -- only an "
+                "EVIDENCE item can become a resume-eligible MemoryClaim; a CONSTRAINT/POSITIONING "
+                "item becomes a CandidateRule and is never itself resume content."
             )
 
     if not item.support.quote.strip():
