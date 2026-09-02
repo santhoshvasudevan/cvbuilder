@@ -57,8 +57,9 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 ## M1 — Django/PostgreSQL application foundation
 
 - **Objective**: a running Django project against a local Dockerized PostgreSQL, with the app
-  boundaries from ARCHITECTURE.md §2 scaffolded (empty apps, no business logic), including
-  `job_applications` (D-012 is approved, not pending) established early per its sequencing note.
+  boundaries from ARCHITECTURE.md §2 scaffolded (empty apps, no business logic), including the
+  `job_applications` app shell (D-012 is approved, not pending) created early — empty, like every
+  other app — so later milestones have it to FK into without retrofitting the app itself.
 - **Requirements covered**: STACK-001, STACK-002, STACK-003 (absence), STACK-004 (absence),
   STACK-006 (absence), STACK-007, STACK-008, NG-002 (product-level auth only — see clarification
   below), NG-004, NG-005, ACTOR-001.
@@ -71,10 +72,16 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   OpenAI/NVIDIA NIM/Gemini credential variable names) + `.gitignore` covering `.env`; empty
   `llm_provider`, `candidate_memory`, `job_intake`, `candidate_matching`, `resume_builder`,
   `reviews`, **`job_applications`** apps (models/views files present, no business-logic content
-  yet — `job_applications` may get its `JobApplication` model shape early since it's the aggregate
-  other apps will FK into); base template layout; repeatable **local** quality commands (Django
-  system check, `manage.py test`, lint/static validation).
-- **Out of scope**: any model fields beyond `job_applications`' skeleton, any business logic, any
+  yet). **Implementation decision (2026-09-02)**: `job_applications` is scaffolded empty like every
+  other app at M1, not given the `JobApplication` model's fields early — its
+  `current_jra`/`current_fit_assessment`/`current_resume_draft` FKs target models
+  (`JobRequirementAnalysis`/`FitAssessment`/`ResumeDraft`) that don't exist until M4/M5/M6, so
+  defining them at M1 would mean forward-referencing apps that aren't built yet. The
+  `JobApplication` model is built in M4 instead (see M4 below); this resolves the ambiguity in the
+  original "may get its model shape early" wording conservatively, in favor of keeping M1 pure
+  scaffolding. Base template layout; repeatable **local** quality commands (Django system check,
+  `manage.py test`, lint/static validation).
+- **Out of scope**: any model fields for any app (including `job_applications`), any business logic, any
   LLM calls.
 - **Dependencies**: M0.
 - **Expected files**: `manage.py`, project settings package, `docker-compose.yml`,

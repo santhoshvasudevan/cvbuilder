@@ -21,11 +21,11 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 | GOAL-002 provider independence (OpenAI/NVIDIA NIM/Gemini v1, extensible) | §1, §9 | llm_provider | M2 | adapter interface + 3 provider adapters | unit tests per adapter + registry-driven stage routing | Not implemented |
 | GOAL-003 human review at every meaningful checkpoint | §1 | reviews | M3, M5, M6 | gate views/templates | manual walkthrough of both gates | Not implemented |
 | NG-001 no PDF/DOCX, markdown only | §1, §14 | resume_builder | M6 | ResumeDraft renderer | code review confirms no rendering deps added | Not started |
-| NG-002 no *product-level* multi-tenant/auth (v1.1: Django admin auth is standard framework infra, not excluded) | §1 | project-wide | M1 | settings — `django.contrib.admin`/`auth`/`sessions`/`contenttypes` installed; no product-level account/tenant/role model | code review confirms no product-level user model, admin auth present and reachable | Not started |
+| NG-002 no *product-level* multi-tenant/auth (v1.1: Django admin auth is standard framework infra, not excluded) | §1 | project-wide | M1 | settings — `django.contrib.admin`/`auth`/`sessions`/`contenttypes` installed; no product-level account/tenant/role model | code review confirms no product-level user model, admin auth present and reachable | **Implemented** — admin verified reachable + login-capable 2026-09-02 |
 | NG-003 no cassette test suite in v1 | §1, §12 | test suite | M1–M8 | test directory | code review confirms no cassette/fixture infra added | Not started |
-| NG-004 no broker/worker infra | §1, §11 | project-wide | M1 | requirements/dependency file | code review confirms no Celery/Redis deps | Not started |
-| NG-005 no cloud deployment | §1, §11 | project-wide | M1 | absence of deploy config | code review | Not started |
-| ACTOR-001 single operator = candidate | §2 | project-wide | M1 | absence of product-level multi-user models (Django admin auth is present, per NG-002 v1.1 clarification) | code review | Not started |
+| NG-004 no broker/worker infra | §1, §11 | project-wide | M1 | requirements/dependency file | code review confirms no Celery/Redis deps | **Implemented** — requirements.txt contains no Celery/Redis dependency |
+| NG-005 no cloud deployment | §1, §11 | project-wide | M1 | absence of deploy config | code review | **Implemented** — no deploy config exists |
+| ACTOR-001 single operator = candidate | §2 | project-wide | M1 | absence of product-level multi-user models (Django admin auth is present, per NG-002 v1.1 clarification) | code review | **Implemented** — no product-level user model added |
 
 ## Candidate Memory (prerequisite)
 
@@ -85,7 +85,7 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 | DATA-007 ResumeDraft (+ child ResumeElement, v1.1/D-014; structured representation, not markdown-first) | §8, §16 | resume_builder | M6 | model | migration + admin check | Not implemented |
 | DATA-008 provider registry tables | §8 | llm_provider | M2 | models | migration + admin check | Not implemented |
 | DATA-009 LLMCallLog (v1.1: token-first fields — input/cached-input/output/total; no cost field at M2) | §8, §13 | llm_provider | M2 | model | migration + admin check | Not implemented |
-| DATA-010 (v1.1/D-012) JobApplication aggregate | §8, §17 | job_applications | M1 (scaffold), M4 (populated) | model | migration + admin check | Not implemented |
+| DATA-010 (v1.1/D-012) JobApplication aggregate | §8, §17 | job_applications | M4 (see M1 scope note in `docs/CURRENT_STATE.md`: the app is scaffolded at M1, empty; fields deferred to M4 since its FK targets don't exist before then) | model | migration + admin check | Not implemented |
 | DATA-011 (M0.1/D-015) MemoryClaimSupport — one or more exact supporting passages per claim | §8, §16 (M0.1) | candidate_memory | M3 | model | migration + admin check; unit test: multi-support fixture | Not implemented |
 | DATA-012 (M0.1/D-015) CandidateRule — constraint/positioning content, never resume evidence | §8, §16 (M0.1) | candidate_memory | M3 | model | migration + admin check | Not implemented |
 | DATA-013 (M0.1/D-015) MemoryConflict — explicit contradiction record, blocks affected claims while OPEN | §8, §16 (M0.1) | candidate_memory | M3 | model | migration + admin check; unit test: OPEN conflict blocks eligibility | Not implemented |
@@ -119,14 +119,14 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 
 | Requirement | Source | Component | Milestone | Artifact | Verification | Status |
 |---|---|---|---|---|---|---|
-| STACK-001 Django | §11 | project-wide | M1 | project skeleton | `manage.py check` | Not implemented |
-| STACK-002 PostgreSQL via Docker locally | §11 | project-wide | M1 | docker-compose.yml | `docker compose up` + migration succeeds | Not implemented |
-| STACK-003 no queue/broker; synchronous in-request LLM calls | §11 | project-wide | M1 | absence of Celery/Redis deps | code review | Not started |
-| STACK-004 server-rendered Django templates, no SPA | §11 | project-wide | M1 | templates directory | code review | Not started |
-| STACK-005 Pydantic for LLM-output validation | §11 | llm_provider | M2 | Pydantic models | unit test | Not implemented |
-| STACK-006 orchestration: plain sequence, LangGraph not adopted for v1 (D-001 approved; post-M7 re-evaluation checkpoint scheduled) | §11 | project-wide | M1 | service-function sequence | code review confirms no langgraph/langchain/agents-sdk dependency | Not started |
-| STACK-007 secrets via `.env`, never committed; DB stores references only | §11 | project-wide | M1 | `.env.example` + `.gitignore` | code review + git history check | Not implemented |
-| STACK-008 local-first; minimal CI (lint+test) worth adding early (v1.1: local repeatable quality commands are the hard M1 requirement; remote CI is not mandatory) | §11 | project-wide | M1 | local check/test/lint command(s); remote CI config optional | local quality commands run and pass | Not implemented |
+| STACK-001 Django | §11 | project-wide | M1 | `config/` project (Django 5.1) | `manage.py check` | **Implemented** — passes clean, 2026-09-02 |
+| STACK-002 PostgreSQL via Docker locally | §11 | project-wide | M1 | `docker-compose.yml` | `docker compose up` + migration succeeds | **Implemented** — `db` healthy, `manage.py migrate` applied cleanly |
+| STACK-003 no queue/broker; synchronous in-request LLM calls | §11 | project-wide | M1 | absence of Celery/Redis deps | code review | **Implemented** — `requirements.txt` has no queue/broker dependency |
+| STACK-004 server-rendered Django templates, no SPA | §11 | project-wide | M1 | `templates/base.html` | code review | **Implemented** — base template wired into `TEMPLATES[0]["DIRS"]` |
+| STACK-005 Pydantic for LLM-output validation | §11 | llm_provider | M2 | Pydantic models | unit test | Not implemented (pydantic dependency installed at M1, unused until M2) |
+| STACK-006 orchestration: plain sequence, LangGraph not adopted for v1 (D-001 approved; post-M7 re-evaluation checkpoint scheduled) | §11 | project-wide | M1 | service-function sequence | code review confirms no langgraph/langchain/agents-sdk dependency | **Implemented** — no such dependency in `requirements.txt` |
+| STACK-007 secrets via `.env`, never committed; DB stores references only | §11 | project-wide | M1 | `.env.example` + `.gitignore` | code review + git history check | **Implemented** — `.env` gitignored and never staged; settings read all secrets from environment |
+| STACK-008 local-first; minimal CI (lint+test) worth adding early (v1.1: local repeatable quality commands are the hard M1 requirement; remote CI is not mandatory) | §11 | project-wide | M1 | `Makefile` (`check`/`test`/`lint`) | local quality commands run and pass | **Implemented** — `make check`/`make test`/`make lint` all pass repeatably; no remote CI added, none required |
 
 ## Testing strategy (§12)
 
@@ -171,7 +171,7 @@ Columns: **Requirement** (ID + one-line summary) · **Source** (requirements.md 
 
 | Requirement | Source | Component | Milestone | Artifact | Verification | Status |
 |---|---|---|---|---|---|---|
-| DASH-001 JobApplication aggregate: current_jra/current_fit_assessment/current_resume_draft pointers, pipeline_phase, application_outcome | §17 | job_applications | M1 (scaffold), M4 (populated) | JobApplication model | unit test: pointers and both status dimensions persist independently | Not implemented |
+| DASH-001 JobApplication aggregate: current_jra/current_fit_assessment/current_resume_draft pointers, pipeline_phase, application_outcome | §17 | job_applications | M4 (app scaffolded empty at M1 — see `docs/CURRENT_STATE.md`) | JobApplication model | unit test: pointers and both status dimensions persist independently | Not implemented |
 | DASH-002 pipeline_phase (NEW/ANALYSIS/PREPARATION/READY) advances automatically at defined transition points, no impossible combinations | §17 | job_applications | M4, M5, M6, M7 | phase-transition service | unit test: each transition trigger (intake, Gate 1 approval, Gate 2 approval) advances phase correctly | Not implemented |
 | DASH-003 application_outcome (NOT_APPLIED/APPLIED/INTERVIEWING/REJECTED) set explicitly by operator, independent of pipeline_phase | §17 | job_applications | M7 | dashboard action view | unit test: setting APPLIED then regenerating a resume does not revert application_outcome | Not implemented |
 | DASH-004 dashboard list/detail view: company, title, dashboard status, pipeline_phase, application_outcome, dates, AJ/AC/draft existence-and-currency, review-required, staleness | §17 | job_applications | M7 | dashboard templates/views | manual walkthrough with fixture applications in different states | Not implemented |

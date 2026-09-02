@@ -1,0 +1,22 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Django
+staticfiles/
+media/
+*.sqlite3
+
+# Docker-managed Postgres data (bind-mounted volume, if ever switched from a named volume)
+postgres_data/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/

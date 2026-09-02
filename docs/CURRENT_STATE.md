@@ -1,111 +1,109 @@
 # Current State
 
-Last updated: 2026-09-02 (M0.1 — documentation-only Candidate Memory refinement completed; still
-pre-implementation).
+Last updated: 2026-09-02 (M1 — Django/PostgreSQL application foundation implemented and verified).
 
 ## Summary
 
-This repository is **pre-implementation**. The M0 planning baseline (requirements analysis,
-architecture, domain model, milestones, decisions log, test strategy, traceability matrix)
-underwent product-owner review, and a follow-up **M0.1 documentation-only refinement** of the
-Candidate Memory prerequisite has now also been completed. Across both reviews: several decisions
-were approved (with modification, in most cases), two new decisions were added and approved
-(D-014, structured AJ→AC→AB traceability; D-015, operator-approved Candidate Memory bootstrap/
-classification/reference export), and `requirements.md` was explicitly amended by the product
-owner both times to capture the new/clarified requirements (see its own Amendment Log). Three
-candidate-profile markdown files now exist in the repository as **committed, operator-approved
-bootstrap evidence sources** (`docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`,
-`docs/AC/AC-profile_german.md`); they have not been modified by this review, only read and
-referenced. The Candidate Memory bootstrap command and its UI are **designed, not implemented** —
-there is still no Django project, no database, no dependencies installed, no migrations, no
-models, no tests, and no application code of any kind. No LLM provider has been called.
+This repository has completed **Milestone M1**: a running Django project against a local
+Dockerized PostgreSQL, with the seven pipeline app boundaries from `docs/ARCHITECTURE.md` §2
+scaffolded. No business logic, no models beyond Django's own built-in apps, and no LLM provider
+calls exist yet — M1 is scaffolding only, exactly as scoped in `docs/IMPLEMENTATION_PLAN.md`.
+Milestones M2 (LLM provider abstraction) through M8 remain **not implemented**.
 
 ## What exists
 
-- `requirements.md` — the authoritative product requirements, now **v1.1** (amended 2026-09-02
-  with explicit product-owner authorization; see its Amendment Log for the exact diff summary).
-- `docs/ARCHITECTURE.md` — proposed architecture, component boundaries, domain model, provider-
-  abstraction design; updated for all approved decisions.
-- `docs/IMPLEMENTATION_PLAN.md` — milestone sequence M0–M8, corrected dependency graph (M3/M4 both
-  depend only on M2), a post-M7 architecture/orchestration review checkpoint, and the dashboard
-  requirement folded into M4/M7.
-- `docs/DECISIONS.md` — D-001 through D-014; see the "Decisions" section below for exact statuses.
-- `docs/TEST_STRATEGY.md` — phased testing strategy, now including an explicit opt-in manual
-  provider-smoke-test process (M2) kept separate from the deterministic automated suite.
-- `docs/REQUIREMENT_TRACEABILITY.md` — every requirement ID (including the new v1.1 ones) mapped
-  to a component/milestone/artifact/verification/status (all "Not implemented"/"Not started").
-- `docs/RESUME_OUTPUT_STRUCTURE.md` — **new**: the v1 structured resume representation and
-  deterministic markdown rendering contract, resolving the former M6 template blocker (D-007).
-  Contains no candidate-specific factual content — structural/content-design reference only.
-- `CLAUDE.md` — durable repository instructions, updated for the newly approved invariants
-  (`JobApplication` aggregate, structured traceability, Django admin auth clarification,
-  token-first observability, and now the Candidate Memory bootstrap/classification/reference-export
-  rules from D-015).
+### Planning documents (M0/M0.1)
+- `requirements.md` — the authoritative product requirements (v1.1.1 / "M0.1").
+- `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/DECISIONS.md` (D-001..D-015),
+  `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`, `docs/RESUME_OUTPUT_STRUCTURE.md`,
+  `docs/CANDIDATE_MEMORY_SNAPSHOT.md`, `CLAUDE.md` — see prior entries in this file's history
+  (git log) for what each covers; unchanged in substance by M1.
 - `docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`, `docs/AC/AC-profile_german.md`
-  — **new**: committed, operator-approved candidate-profile source files that will serve as the
-  initial Candidate Memory bootstrap evidence in Milestone M3. Read in full during this review;
-  not modified.
-- `docs/CANDIDATE_MEMORY_SNAPSHOT.md` — **new**: a concise, pre-M3, human-readable reference
-  synthesized from the three source files above. Explicitly marked as not an evidence source, not
-  authoritative runtime state, not default LLM context, and never to be re-ingested — it will
-  later be regenerated from the activated PostgreSQL Candidate Memory revision once M3 exists.
+  — committed, operator-approved Candidate Memory bootstrap evidence (still unused until M3).
+
+### Application foundation (M1 — new)
+- **Django project** (`config/`): `manage.py`, `config/settings.py`, `config/urls.py`,
+  `config/wsgi.py`, `config/asgi.py`. Django 5.1 on Python 3.11.
+- **Seven scaffolded apps**, one per `docs/ARCHITECTURE.md` §2 boundary, each with only the
+  default `apps.py`/`admin.py`/`models.py`/`views.py`/`tests.py`/`migrations/` Django generates —
+  **no model fields, no views, no business logic in any of them**: `llm_provider`,
+  `candidate_memory`, `job_intake`, `candidate_matching`, `resume_builder`, `reviews`,
+  `job_applications`. All seven are registered in `INSTALLED_APPS`.
+  - **Deliberate scope decision**: `job_applications` does **not** get the `JobApplication` model's
+    fields at M1, even though `docs/IMPLEMENTATION_PLAN.md` M1 named this as a possibility. Its
+    `current_jra`/`current_fit_assessment`/`current_resume_draft` foreign keys point at models
+    (`JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`) that don't exist until M4/M5/M6 —
+    defining them now would mean forward-referencing apps that aren't built yet. M1 keeps
+    `job_applications` scaffolding-only like every other app; the `JobApplication` model is built
+    in Milestone M4 instead, per `docs/IMPLEMENTATION_PLAN.md` M4's own "populated with real fields
+    if not already done at M1" phrasing. This is a documented interpretation of an ambiguous plan
+    sentence, not a scope violation — recorded here per `CLAUDE.md`'s instruction to report
+    deviations honestly.
+- **Settings** (`config/settings.py`): `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, and all four
+  `DATABASES` values are read from environment variables (via `python-dotenv` loading `.env`),
+  never hardcoded. `DEBUG` defaults on for local dev; a missing `DJANGO_SECRET_KEY` raises at
+  import time once `DJANGO_DEBUG` is false, rather than silently falling back to an insecure key
+  in a non-debug context. `DATABASES` targets PostgreSQL only — no SQLite fallback.
+- **`docker-compose.yml`**: a single `db` service (`postgres:16-alpine`), reading
+  `POSTGRES_DB`/`USER`/`PASSWORD`/`PORT` from the environment with local-dev defaults, a named
+  volume, and a healthcheck. No other services (no Redis, no broker — per STACK-003/NG-004).
+- **`.env.example`**: placeholders only (no real values) for Django config, Postgres config, and
+  the three provider credential variable names (`OPENAI_API_KEY`, `NVIDIA_NIM_API_KEY`,
+  `GEMINI_API_KEY`) that the M2 provider registry will reference by name. A real `.env` exists
+  locally for development and is gitignored — never committed.
+- **`.gitignore`**: covers `.env`, `.venv/`, Python bytecode/egg-info, Django `staticfiles/`/
+  `media/`/`*.sqlite3`, and `.DS_Store` (new occurrences only — the pre-existing tracked
+  `docs/.DS_Store` was deliberately left untouched, per explicit prior instruction not to handle
+  it as part of documentation work; it remains a known, harmless pre-existing artifact).
+- **`templates/base.html`**: a minimal server-rendered base template (STACK-004 — no SPA), wired
+  into `TEMPLATES[0]["DIRS"]`.
+- **`requirements.txt`** (Django, psycopg[binary], python-dotenv, pydantic) and
+  **`requirements-dev.txt`** (adds ruff). **`pyproject.toml`** holds ruff's configuration.
+- **`Makefile`**: `make check` (`manage.py check`), `make test` (`manage.py test`), `make lint`
+  (`ruff check .`), plus `migrate`/`makemigrations`/`run`/`superuser`/`up`/`down` — the repeatable
+  local quality commands M1 requires; no remote CI was added or is required to consider M1 done.
+- **`.venv/`** — local virtual environment (gitignored, not committed) with all of the above
+  installed.
 
 ## What does not exist
 
-- No Django project/settings, no `manage.py`, no apps (including no `job_applications` app yet,
-  even though it's now approved and scaffolded-early per D-012's sequencing note).
-- No `docker-compose.yml`, no PostgreSQL instance.
-- No dependency manifest (`requirements.txt`/`pyproject.toml`).
-- No `.env`/`.env.example`.
-- No migrations, no models, no admin registrations.
-- No LLM provider adapters, no registry data, no `LLMCallLog` rows.
-- No tests.
-- No CI configuration (and per the M1 correction, a remote CI "green link" is not required to
-  start — local repeatable quality commands are the hard M1 requirement).
+- Any model fields, migrations beyond Django's own built-in apps, views, or templates for any of
+  the seven pipeline apps.
+- Any LLM provider adapters, registry data, or `LLMCallLog` rows (Milestone M2).
+- Any Candidate Memory bootstrap command, source ingestion, or claims (Milestone M3).
+- Any tests beyond Django's default empty `tests.py` stubs (0 tests currently defined).
+- Any remote/CI configuration (not required for M1; may be added later without blocking anything).
+
+## M1 verification performed (2026-09-02)
+
+- `docker compose up -d` → `db` container reached `healthy` status (Postgres 16, local volume).
+- `python manage.py migrate` → applied all built-in Django migrations (contenttypes, auth, admin,
+  sessions) against the real Postgres instance cleanly, zero errors.
+- `python manage.py check` → "System check identified no issues (0 silenced)."
+- `make check`, `make lint` (ruff, after auto-fixing Django's own boilerplate unused-import
+  scaffolding across all seven apps), and `make test` (0 tests, exits 0) all pass repeatably.
+- Django admin verified reachable and login-capable end-to-end: created a throwaway local
+  superuser (`createsuperuser --noinput`, random password, local dev DB only, never committed),
+  started the dev server, confirmed `GET /admin/login/` → 200, `POST` with valid credentials → 302,
+  and the post-redirect `/admin/` page rendered "Site administration"/"Log out" — i.e. a real
+  logged-in session, not just a reachable page. Dev server was stopped afterward; verification
+  artifacts (cookies, HTML, password note) were not retained.
+- `git status`/manual review confirmed no secret value is staged or committed: `.env` is
+  gitignored and was never staged; a grep of all newly-created tracked-candidate files for
+  credential-shaped strings found nothing.
 
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
-- **D-001** Orchestration — APPROVED WITH FUTURE RE-EVALUATION (plain Django orchestration for v1;
-  no LangGraph/LangChain/Agents SDK until a post-M7 checkpoint finds concrete need).
-- **D-002** CandidateMemory revisioning — APPROVED WITH MODIFICATION (snapshot + incremental,
-  content-hash-based, not full reprocess).
-- **D-003** MemoryClaim provenance — APPROVED WITH MODIFICATION (hash + quote + start/end line,
-  not quote-only).
-- **D-004** URL fetch strategy — APPROVED IN PRINCIPLE (extraction library choice deferred to M4).
-- **D-005** Structured-output representation — APPROVED (Pydantic canonical, provider translation
-  isolated in `llm_provider`).
-- **D-006** Freshness mechanism — APPROVED WITH MODIFICATION (immutable version-identity
-  comparison via `JobApplication` current pointers, not timestamps; block-on-stale confirmed).
-- **D-007** Resume template — RESOLVED FOR V1 via `docs/RESUME_OUTPUT_STRUCTURE.md`; M6 unblocked.
-- **D-008** Token/cost visibility — APPROVED WITH REPRIORITIZATION (token consumption is the v1
-  requirement; dollar cost optional/deferred, not a blocker).
-- **D-009** Capability flags — APPROVED (as originally proposed).
-- **D-010** Stage-artifact versioning — APPROVED (append-only versioned JRA/FitAssessment/
-  ResumeDraft; consolidates the former D-013).
-- **D-011** Application lifecycle/abandonment — APPROVED, folded into the dashboard's
-  `pipeline_phase`/`application_outcome` model rather than a standalone flag.
-- **D-012** `JobApplication` aggregate — APPROVED.
-- **D-013** — SUPERSEDED by D-010 (merged).
-- **D-014** Structured AJ→AC→AB traceability — new decision, APPROVED.
-- **D-015** Operator-approved Candidate Memory bootstrap, content classification, and reference
-  export — new decision (M0.1), APPROVED. Names the three bootstrap files and their precedence,
-  requires English-canonical claims with multi-language provenance support, requires evidence/
-  constraint/positioning content classification, requires explicit contradiction detection and
-  blocking, requires an explicit (never automatic) bootstrap command, and confirms no vector
-  database is required for v1.
-
-No decision remains blocking for Milestone M1. Milestones M2–M7 have no unresolved blocking
-decisions either — D-004's library choice is deferred to M4 by design, not blocked. Milestone M3
-now has a substantially more detailed, D-015-driven design (bootstrap command, classification,
-conflict handling, multi-support provenance, ongoing-update UI) but is likewise not blocked.
+D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
+No decision remains blocking for any milestone through M7 — D-004's fetch-library choice is
+deferred to M4 by design, not blocked; the D-001 orchestration-framework re-evaluation is
+deliberately deferred to a post-M7 checkpoint.
 
 ## Next action
 
-Milestone M1 (Django/PostgreSQL application foundation) remains the next implementation milestone,
-to begin only after this M0.1 review/commit. Follow `docs/IMPLEMENTATION_PLAN.md`'s corrected
-dependency graph and milestone-by-milestone acceptance criteria. Milestone M3's expanded scope
-(D-015) is ready to implement against once M1/M2 are done — no further product-owner input is
-required to begin M3, since the three bootstrap source files already exist in the repository.
+Milestone M2 (LLM provider abstraction, registry, and audit foundation) is next, per
+`docs/IMPLEMENTATION_PLAN.md`. M3 and M4 both depend only on M2, not on each other, and may proceed
+in either order after M2 completes.
 
 ## Maintenance rule for this file
 
