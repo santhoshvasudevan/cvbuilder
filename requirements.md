@@ -1,8 +1,28 @@
 # Requirements: Agentic Resume Generation App
 
-Status: Draft v1 — for review
+Status: v1.1 — M0 planning baseline reviewed by product owner; amended 2026-09-02 (see Amendment Log below)
 Owner: Santhosh Kumar Vasudevan
 Related project: `career-intelligence` (this repo) — architectural lessons cited throughout are drawn from it, not copied wholesale
+
+## Amendment Log
+
+- **v1.1 (2026-09-02)** — product-owner review of the M0 planning baseline. Clarified that the
+  "no multi-tenant auth" non-goal does not exclude Django's own admin authentication framework
+  (Section 1). Replaced full-reprocessing `CandidateMemory` revisioning with snapshot+incremental
+  processing keyed by source-document content hashes (Section 4). Strengthened `MemoryClaim`
+  provenance beyond quote-only to include a content hash and source start/end line numbers
+  (Section 4). Added stable per-requirement identifiers to Agent Jobber output,
+  requirement-by-requirement disposition tracking to Agent Candidate output, and evidence-bearing
+  structured output to Agent Builder, so the no-concealment and no-fabrication invariants are
+  structurally enforceable, not just prompted for (Sections 5, 6, 7, and new Section 16). Resolved
+  the resume-template open question for v1 via a structured resume representation rendered to
+  markdown only after validation (Section 7, new Section 16, and
+  `docs/RESUME_OUTPUT_STRUCTURE.md`). Re-prioritized Section 13's cost/token visibility
+  requirement around token counts, with dollar-cost calculation now explicitly
+  optional/deferred. Clarified that freshness/staleness (Section 10) is determined by immutable
+  upstream version identity, not timestamps. Added a new job-application tracking dashboard
+  requirement (new Section 17) built on a `JobApplication` aggregate root. The rest of this
+  document is unchanged from the original draft.
 
 ## 1. Overview & Goals
 
@@ -17,7 +37,12 @@ This is a **from-scratch, exploratory build**. It intentionally does not yet hav
 ### Non-goals for v1
 
 - No PDF/DOCX rendering — output is a markdown file only.
-- No multi-tenant auth or multi-user support — single local operator, single candidate.
+- No multi-tenant auth or multi-user support **at the product level** — single local operator,
+  single candidate. **(v1.1 clarification)**: this excludes product-level accounts, tenants, and
+  roles; it does not exclude Django's own admin authentication — `django.contrib.auth`,
+  `django.contrib.admin`, `django.contrib.sessions`, and `django.contrib.contenttypes` are
+  standard local framework infrastructure, required for provider/model registry administration,
+  and are not excluded by this non-goal.
 - No deterministic/recorded-response test suite — noted as a future phase (Section 12).
 - No message broker (Redis/Celery) or background worker infrastructure.
 - No cloud deployment — local-first only.
@@ -64,7 +89,7 @@ This step is done once (and revisited/updated over time, not per job application
 
 **Input**: one or more markdown files supplied by the candidate, containing free-form career history — roles, projects, achievements, quantified impact, challenges overcome, skills, education, etc. No fixed format is imposed on the source docs; the agent's job is to make sense of unstructured input.
 
-**Processing requirement**: an LLM call (or set of calls) reads the source markdown and organizes its content into a **structured memory**, keyed by the resume sections it will eventually be used to populate (e.g. Summary, Experience — per role, Skills, Achievements, Education). Each extracted item should retain a pointer back to its source document/location so provenance is never lost.
+**Processing requirement**: an LLM call (or set of calls) reads the source markdown and organizes its content into a **structured memory**, keyed by the resume sections it will eventually be used to populate (e.g. Summary, Experience — per role, Skills, Achievements, Education). Each extracted item must retain a pointer back to its source document/location so provenance is never lost — **(v1.1)** at minimum an immutable content hash of the source document, a stored source quote/excerpt, and the source's start/end line numbers, not a quote alone (see new Section 16 and `docs/DECISIONS.md` D-003).
 
 **Output shape**: a `CandidateMemory`, composed of many small `MemoryClaim` records rather than one large blob — this makes later retrieval (Step 2) precise (Agent Candidate should pull only the claims relevant to a given job, not the whole profile) and makes human review/correction tractable at the level of a single fact.
 
@@ -72,7 +97,17 @@ This step is done once (and revisited/updated over time, not per job application
 
 - Every `MemoryClaim` has a `confirmation_status` (`unconfirmed` / `confirmed` / `retired`). Only `confirmed` claims are eligible for use in Steps 2–3.
 - The memory-build step is a **separate trust track from raw fact storage** — it organizes and phrases, it does not invent. If the source docs don't support a claim, the agent must not synthesize one to fill a gap.
-- Memory content is versioned (new markdown supplied later creates a new revision, old revisions are kept, not overwritten) so a candidate can see how their profile evolved and roll back a bad extraction.
+- Memory content is versioned: each `CandidateMemory` revision is a complete logical snapshot,
+  but **(v1.1)** building a new revision does not require reprocessing every source document from
+  scratch. Source documents are identified by an immutable content hash; unchanged documents are
+  not re-sent through Memory Build, and claims derived from unchanged source content may carry
+  their existing `confirmation_status` forward into the new snapshot when claim identity is
+  demonstrably unchanged. New or changed source documents are (re)processed through Memory Build,
+  and any claim arising from new/changed material begins `unconfirmed`. If safe claim identity
+  cannot be established after a source change, the system must require operator reconfirmation
+  rather than silently carrying confirmation forward — conservative trust behavior is preferred
+  over convenience. Old revisions are kept, never overwritten, so a candidate can see how their
+  profile evolved and roll back a bad extraction.
 
 This mirrors the exact separation `career-intelligence` draws between `apps.evidence` (verified facts) and `apps.memory_profile` (narrative/positioning claims derived from those facts) — the same discipline applies here even though this app has only one source (the markdown docs) rather than two.
 
@@ -85,7 +120,7 @@ This mirrors the exact separation `career-intelligence` draws between `apps.evid
 - Adopt a recruiter's mindset for the specific role, not a generic keyword extractor.
 - Identify and separate: mandatory requirements, preferred/nice-to-have requirements, core responsibilities, keywords likely used in ATS screening, screening risks (things that might get a candidate filtered out), and implied expectations not stated outright (e.g. seniority signals, team context, unstated tooling assumptions).
 
-**Output**: a structured `JobRequirementAnalysis` record capturing all of the above, tagged with `source_type` (`url` or `pasted`) and the original raw text/URL for traceability.
+**Output**: a structured `JobRequirementAnalysis` record capturing all of the above, tagged with `source_type` (`url` or `pasted`) and the original raw text/URL for traceability. **(v1.1)** Every material requirement extracted must be assigned a stable identifier (e.g. `JR-001`, `JR-002`, ...) that stays stable within that immutable `JobRequirementAnalysis` version, and categorized (mandatory / preferred / responsibility / ATS-signal / implied expectation) — see new Section 16 for why this is required.
 
 **Risk note — URL fetching**: fetching arbitrary job-posting URLs is inherently brittle — many boards render content via JavaScript, block scrapers, or change markup frequently. V1 must fetch on a best-effort basis and **always allow falling back to pasted text** when a fetch fails or produces unusable content; the UI should surface fetch failures clearly rather than silently producing a low-quality analysis from a broken scrape. Treat scraping robustness as an ongoing maintenance concern, not a one-time build.
 
@@ -97,7 +132,7 @@ This mirrors the exact separation `career-intelligence` draws between `apps.evid
 - Retrieve **only** the memory claims relevant to this specific job — not the candidate's entire history. This keeps later prompts smaller and keeps the positioning step (AB) focused.
 - Evaluate genuine fit: what matches well, and — just as importantly — what's missing. **The agent must not conceal or minimize genuine gaps.** A resume built on a dishonest fit assessment is worse than useless; the human reviewer needs the real picture to decide how (or whether) to proceed.
 
-**Output**: a `FitAssessment` — matched requirements with supporting evidence (which memory claims satisfy which job requirement), explicitly listed gaps, and any risk notes carried over from AJ's screening-risk analysis.
+**Output**: a `FitAssessment` — matched requirements with supporting evidence (which memory claims satisfy which job requirement), explicitly listed gaps, and any risk notes carried over from AJ's screening-risk analysis. **(v1.1)** This must not be only free-form strengths/gaps text: for every relevant `JobRequirement` identified by Agent Jobber, Agent Candidate must produce an explicit disposition (`MATCH` / `PARTIAL` / `GAP` / `UNKNOWN`) with supporting confirmed `MemoryClaim` IDs where applicable, so that absence of evidence can never silently become a `MATCH` — see new Section 16.
 
 **Human Review Gate 1**: before proceeding to Agent Builder, the UI must show the operator AJ's output and AC's output **together**, in readable form. The operator can:
 - Approve, proceeding to Step 3, or
@@ -111,7 +146,7 @@ This gate is a **database precondition, not a paused agent/graph state** — see
 
 **Processing requirement**: select the strongest **truthful** positioning of the candidate against this specific job — deciding what to lead with, what to de-emphasize, and how to phrase achievements — without introducing any claim not traceable to a confirmed memory claim. This is a hard invariant, not a style preference (see Section 13).
 
-**Output**: a markdown resume file in a defined structured format. (The exact section template — headings, ordering, formatting conventions — should be defined as a short appendix to this document or a separate template file once drafted; it is a content-design task, not an architectural one, and is left open here.)
+**Output**: **(v1.1)** Agent Builder first produces a structured resume representation, not raw markdown directly — every factual element (summary statements, experience bullets, achievements, skills, certifications, language proficiency) must carry explicit supporting `MemoryClaim` IDs (and, where relevant, matched `JobRequirement` IDs). Markdown is rendered from this structured representation only after it passes the no-fabrication validator (see new Section 16). The exact structure and the v1 markdown rendering contract are defined in `docs/RESUME_OUTPUT_STRUCTURE.md`, which resolves the template question originally left open in this section and in Section 14.
 
 **Human Review Gate 2**: the UI renders AB's output in readable form (rendered markdown, not raw source). The operator can give content feedback (wording, emphasis, corrections) which triggers regeneration incorporating that feedback. Once approved, the markdown file is the final deliverable for this job application.
 
@@ -121,13 +156,34 @@ This gate is a **database precondition, not a paused agent/graph state** — see
 
 This is a starting sketch, not a final schema — field-level detail should be worked out during implementation. Entities:
 
-- **`CandidateMemory`** — versioned container; **`MemorySourceDocument`** — one uploaded markdown file, linked to a memory version; **`MemoryClaim`** — one extracted fact/achievement, with `resume_section`, `confirmation_status`, `source_document` FK, and pointer/quote back to source text.
-- **`JobRequirementAnalysis`** — `source_type` (url/pasted), raw input, structured AJ output (mandatory/preferred requirements, responsibilities, keywords, risks, implied expectations).
-- **`FitAssessment`** — FK to `JobRequirementAnalysis`, matched-claims list (FK to `MemoryClaim`), gaps list, risk notes.
+- **`CandidateMemory`** — versioned container (snapshot+incremental revisioning per Section 4);
+  **`MemorySourceDocument`** — one uploaded markdown file, linked to a memory version, identified
+  by an immutable content hash; **`MemoryClaim`** — one extracted fact/achievement, with
+  `resume_section`, `confirmation_status`, `source_document` FK, a stored source quote, and
+  **(v1.1)** source start/end line numbers.
+- **`JobRequirementAnalysis`** — `source_type` (url/pasted), raw input, structured AJ output
+  (mandatory/preferred requirements, responsibilities, keywords, risks, implied expectations).
+  **(v1.1)** **`JobRequirement`** — one stably-identified (`JR-001`, ...) requirement within a
+  `JobRequirementAnalysis` version: `requirement_id`, `category`, `text`, source/context.
+- **`FitAssessment`** — FK to `JobRequirementAnalysis`, matched-claims list (FK to `MemoryClaim`),
+  gaps list, risk notes. **(v1.1)** **`RequirementAssessment`** — one disposition per relevant
+  `JobRequirement`: `requirement_id`, `disposition` (`MATCH`/`PARTIAL`/`GAP`/`UNKNOWN`),
+  `supporting_memory_claim_ids`, `explanation`, `gap_or_limitation`.
 - **`ReviewFeedback`** — free text + target step (`AJ`/`AC`/`AB`), FK to whichever record it's feedback on, timestamp, triggers a re-run when submitted.
-- **`ResumeDraft`** — FK to `FitAssessment`, markdown content, `status` (`draft` / `awaiting_review` / `confirmed`), `confirmed_at`.
+- **`ResumeDraft`** — FK to `FitAssessment`, a structured resume representation (see Section 7 and
+  `docs/RESUME_OUTPUT_STRUCTURE.md`) rendered to markdown after validation, `status` (`draft` /
+  `awaiting_review` / `confirmed`), `confirmed_at`. **(v1.1)** its structured elements
+  (**`ResumeElement`**) each carry `text`, `supporting_memory_claim_ids`, and
+  `matched_job_requirement_ids`.
+- **`JobApplication`** — **(v1.1 addition, see new Section 17)** the aggregate/root entity for
+  one tracked vacancy/application: current-version pointers (`current_jra`,
+  `current_fit_assessment`, `current_resume_draft`), `pipeline_phase`, `application_outcome`,
+  `created_at`/`updated_at`.
 - **Provider registry tables** — see Section 9.
-- **`LLMCallLog`** — one row per LLM call: provider, model, pipeline stage, token usage, latency, retry count, error category (sanitized — never raw response bodies). This is an audit ledger, not a cache.
+- **`LLMCallLog`** — one row per LLM call: provider, model, pipeline stage, token usage
+  (**(v1.1)** input / cached-input / output / total tokens where reported), latency, retry count,
+  error category (sanitized — never raw response bodies). This is an audit ledger, not a cache.
+  **(v1.1)** dollar-cost is optional/deferred — see Section 13.
 
 ## 9. LLM Provider Abstraction (core requirement)
 
@@ -183,7 +239,7 @@ This is a direct, deliberate borrow from `career-intelligence`'s ADR-0014, which
 
 Concretely: when the operator submits feedback at a review gate, that's a normal database write (a `ReviewFeedback` row, plus updating the target record's status back to something like `needs_rework`). The next pipeline run for that stage checks status fresh and either proceeds or re-runs with the feedback as additional input — no long-lived execution thread is kept waiting.
 
-Whenever upstream context changes after a draft was created (e.g. the operator edits the `FitAssessment` after Agent Builder already drafted a resume from the old version), the next step must re-validate freshness rather than silently building on stale input.
+Whenever upstream context changes after a draft was created (e.g. the operator edits the `FitAssessment` after Agent Builder already drafted a resume from the old version), the next step must re-validate freshness rather than silently building on stale input. **(v1.1)** Freshness is determined by immutable upstream version identity, not by timestamps: a downstream artifact records which upstream version it was built from (e.g. `ResumeDraft.based_on_fit_assessment_id`), and it is stale whenever that no longer equals the `JobApplication`'s current pointer for that stage (e.g. `JobApplication.current_fit_assessment_id`). Timestamps remain audit metadata only, never the freshness identity. On staleness, the operator must be shown that upstream context changed and must take an explicit next action — never a silent regeneration.
 
 ## 11. Tech Stack Recommendation
 
@@ -209,17 +265,28 @@ Whenever upstream context changes after a draft was created (e.g. the operator e
 - **No-fabrication invariant**: every claim that ends up in a generated resume must trace back to a `confirmed` `MemoryClaim`. This is non-negotiable and should be enforced by validation after generation (check that AB's output only references known claims), not just by prompting.
 - **No-concealment invariant**: Agent Candidate's gap analysis (Section 6) must surface genuine mismatches; the pipeline must never quietly hide a gap to make the fit look better than it is.
 - **Secrets management**: provider API keys/credentials live in environment variables or a secrets file, never in the database or version control.
-- **Cost/token visibility**: the `LLMCallLog` (Section 8) should be enough to answer "how many tokens/dollars did this job application cost, broken down by stage and provider" without extra instrumentation.
+- **Token visibility (v1.1: token-first, dollar-cost deferred)**: the `LLMCallLog` (Section 8)
+  must be enough to answer "how many tokens did this job application consume, broken down by
+  stage and provider" without extra instrumentation — input, cached-input, output, and total
+  tokens where reported by the provider. Dollar-cost calculation is optional and explicitly
+  deferred for v1; it must not block Milestone M2, and the design must allow pricing metadata to
+  be added later without reworking `LLMCallLog`. If pricing is added later, historical cost must
+  use pricing snapshotted at call time, not recalculated against a changed future price.
 - **Extensibility**: adding a new LLM provider should mean (a) implementing the adapter interface for it, and (b) adding rows to the provider/model registry — zero changes to AJ/AC/AB pipeline logic.
 
 ## 14. Open Questions / Future Phases
 
-- Exact markdown resume template/structure (headings, section order) — a content-design decision, not covered here.
+- ~~Exact markdown resume template/structure (headings, section order)~~ — **(v1.1) resolved**:
+  see Section 7, new Section 16, and `docs/RESUME_OUTPUT_STRUCTURE.md`.
 - PDF/DOCX rendering of the final resume.
 - Deterministic/cassette-based test suite (Section 12, Phase 2).
 - Multi-candidate support, if this ever needs to serve more than one person's profile.
 - Hardening URL-fetch reliability (headless rendering for JS-heavy job boards, retry/backoff on fetch failures) — deferred until real-world fetch failure rates are observed.
 - Streaming UI feedback while a generation is in progress (currently out of scope given synchronous, single-call-at-a-time execution).
+- Dollar-cost calculation for LLM usage — deferred; see Section 13 **(v1.1)**.
+- Whether an orchestration/agent framework (LangGraph, LangChain agents, OpenAI Agents SDK) is
+  worth adopting — deliberately not decided now; a review checkpoint is set for after Milestone
+  M7 (see `docs/DECISIONS.md` D-001 and `docs/ARCHITECTURE.md`) **(v1.1)**.
 
 ## 15. Appendix: Lessons Carried from `career-intelligence`
 
@@ -231,3 +298,144 @@ This section exists so the rationale behind several decisions above isn't lost t
 - **Memory as a separate trust track from raw facts** (Section 4): `apps/memory_profile`'s design (claims with `confirmation_status`, never a new source of facts, only phrasing/prioritization) is the model for how `CandidateMemory` should relate to the source markdown docs here.
 - **Stack minimalism**: `AGENTS.md` in `career-intelligence` states plainly — *"Introduce queues, Redis, async workers, or a separate frontend only when a milestone requires them."* This is the direct justification for Section 11's "no Redis/Celery, no SPA" recommendation.
 - **Audit ledger pays for itself early**: `career-intelligence`'s `AIWorkflowRun`/`AIWorkflowStage` models made debugging a multi-provider, multi-stage pipeline tractable. Section 9.6's `LLMCallLog` requirement is the same idea, scoped down for this app's needs.
+
+## 16. Structured AJ → AC → AB Traceability (v1.1 addition)
+
+This section is a new, explicit product requirement added after product-owner review of the M0
+planning baseline, to make the no-concealment (Section 6/13) and no-fabrication (Section 7/13)
+invariants **structurally** enforceable — checkable in code, not solely a property of how well the
+agents were prompted.
+
+### Agent Jobber: stable job requirement identities
+
+Agent Jobber must assign a stable identifier to every material job requirement extracted from a
+`JobRequirementAnalysis`. Conceptually:
+
+```
+JobRequirement
+    requirement_id   (e.g. JR-001, JR-002, ... — stable within this JRA version)
+    category         (mandatory / preferred / responsibility / ATS-signal / implied expectation)
+    text
+    source/context
+```
+
+The exact storage representation is an implementation detail to be finalized during Milestone M4;
+the requirement is that every downstream reference to "which job requirement" uses this stable ID.
+
+### Agent Candidate: requirement-by-requirement disposition
+
+Agent Candidate must not return only free-form strengths and gaps. For every relevant AJ
+requirement, it must produce an explicit structured assessment:
+
+```
+RequirementAssessment
+    requirement_id
+    disposition               (MATCH / PARTIAL / GAP / UNKNOWN)
+    supporting_memory_claim_ids[]
+    explanation
+    gap_or_limitation
+```
+
+Validation rules:
+
+- Every relevant AJ requirement receives exactly one disposition.
+- `MATCH` requires supporting confirmed `MemoryClaim` evidence.
+- `PARTIAL` must retain the limitation/gap explicitly.
+- `GAP` must remain explicitly visible.
+- `UNKNOWN` must remain visible and explained.
+- Absence of evidence must never silently become `MATCH`.
+- Only `confirmed` `MemoryClaim`s may be cited as supporting evidence.
+
+This structural coverage is a key deterministic component of the no-concealment invariant.
+
+### Agent Builder: evidence-bearing structured resume elements
+
+Agent Builder must produce structured resume elements before any markdown is rendered (see
+Section 7 and `docs/RESUME_OUTPUT_STRUCTURE.md`). Every factual generated resume element must
+explicitly reference one or more eligible confirmed `MemoryClaim` IDs:
+
+```
+ResumeElement
+    text
+    supporting_memory_claim_ids[]
+    matched_job_requirement_ids[]
+```
+
+This applies to factual elements including: professional-summary claims, experience bullets,
+achievements, skills, certifications, language proficiency statements, and other factual resume
+content.
+
+The no-fabrication validator must validate:
+
+1. Every referenced `MemoryClaim` exists.
+2. Every referenced `MemoryClaim` is `confirmed`.
+3. Every claim belongs to an eligible `CandidateMemory` revision.
+4. Every claim is allowed for this `FitAssessment`/job-application context.
+5. Every factual resume element contains evidence references.
+6. No evidence ID was fabricated by the LLM.
+
+Exact-text matching, near-text matching, embedding similarity, or other semantic-similarity checks
+must **not** be the fundamental truth test — the machine invariant guarantees **evidence
+attachment and eligibility** (does this ID exist, is it confirmed, is it in scope), not that the
+generated wording is a perfect paraphrase of the claim. Human review remains mandatory for whether
+the generated wording accurately and fairly expresses the underlying evidence; the operator
+remains responsible for approving final wording. Markdown is generated only after the structured
+representation passes this validation.
+
+## 17. Job Vacancy / Application Tracking Dashboard (v1.1 addition)
+
+This section is a new, explicit product requirement added after product-owner review of the M0
+planning baseline.
+
+The application must provide a maintainable dashboard that lets the operator track every job
+vacancy/application through its lifecycle. The user-facing dashboard must make statuses such as
+these immediately visible: **New, Analysis, Preparation, Applied, Interviewing, Rejected.**
+
+This must not be solved by mixing every kind of state into one overloaded database field.
+Internal pipeline progress and external application outcome are separate dimensions:
+
+```
+JobApplication
+    pipeline_phase             (NEW / ANALYSIS / PREPARATION / READY)
+    application_outcome        (NOT_APPLIED / APPLIED / INTERVIEWING / REJECTED)
+    current_jra_id
+    current_fit_assessment_id
+    current_resume_draft_id
+    created_at
+    updated_at
+```
+
+No speculative outcome states should be added beyond these unless justified. The dashboard
+derives one prominent human-readable status from these two dimensions (New / Analysis /
+Preparation / Applied / Interviewing / Rejected) so the operator experiences a single clear
+status, without corrupting workflow meaning when, for example, a resume is regenerated after an
+application has already been submitted.
+
+Pipeline-phase transition guidance (to avoid impossible combinations):
+
+- **NEW**: a `JobApplication` exists but analysis has not begun.
+- **ANALYSIS**: AJ/AC work is under way, or Gate 1 is pending.
+- **PREPARATION**: Gate 1 is approved and resume preparation/review is under way.
+- **READY**: the final resume has been approved but the operator has not yet marked the
+  application `APPLIED`.
+- **APPLIED / INTERVIEWING / REJECTED**: external application outcomes controlled explicitly by
+  the operator, independent of pipeline phase.
+
+Pipeline phases should normally change automatically based on application workflow state rather
+than requiring repetitive manual status maintenance; the operator explicitly sets
+`application_outcome` via a simple action (particularly to mark `APPLIED`, `INTERVIEWING`, or
+`REJECTED`).
+
+### Dashboard requirements
+
+- A clear table/list of job vacancies/applications, `JobApplication` as the aggregate/root entity.
+- At minimum, each item must make it easy to identify: company/employer, job title, current
+  dashboard status, pipeline phase, application outcome, date created/discovered, last updated,
+  whether AJ analysis exists/is current, whether a `FitAssessment` exists/is current, whether
+  resume preparation exists/is current, whether human review is required, and whether anything is
+  stale.
+- The dashboard must support opening a `JobApplication` to continue work from its actual current
+  state. Status is durable database state, not inferred from an in-memory agent session.
+- State should not be duplicated across unrelated models where it can instead be derived from
+  `JobApplication`'s current-version pointers and stage records.
+- The dashboard remains server-rendered Django — no SPA is introduced for this.
