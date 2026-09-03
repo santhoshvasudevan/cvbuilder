@@ -1,9 +1,8 @@
 """`JobApplication` (D-012, APPROVED): the aggregate/root entity for one tracked job vacancy.
 
-M4 added the shape needed for Agent Jobber (`current_jra`). M5 (this update) adds
-`current_fit_assessment`, following the same "add the pointer in the milestone that introduces the
-model it points to" precedent M1/M4 already set -- `current_resume_draft` remains deliberately
-unadded until M6 introduces `resume_builder.ResumeDraft`.
+M4 added `current_jra`, M5 added `current_fit_assessment`, and M6 (this update) adds
+`current_resume_draft` -- the last of the three current-version pointers D-012 describes,
+completing the aggregate.
 """
 
 from __future__ import annotations
@@ -48,6 +47,17 @@ class JobApplication(models.Model):
         "feedback re-run) -- 'current' tracks the latest version, not necessarily an "
         "operator-approved one. Freshness (D-006) compares this pointer's own current_jra_id "
         "against JobApplication.current_jra_id, never a timestamp.",
+    )
+    current_resume_draft = models.ForeignKey(
+        "resume_builder.ResumeDraft",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="The ResumeDraft version currently considered authoritative for this "
+        "application (M6). Set whenever a new version is built -- 'current' tracks the latest "
+        "version, not necessarily the confirmed one. Freshness (D-006) compares this pointer's "
+        "own based_on_fit_assessment_id against JobApplication.current_fit_assessment_id.",
     )
     pipeline_phase = models.CharField(
         max_length=20, choices=PipelinePhase.choices, default=PipelinePhase.NEW
@@ -112,6 +122,34 @@ class JobApplication(models.Model):
                 "version -- re-run Agent Candidate against the current analysis before approving."
             )
         self.pipeline_phase = self.PipelinePhase.PREPARATION
+        self.save(update_fields=["pipeline_phase", "updated_at"])
+
+    def record_resume_draft(self, resume_draft) -> None:
+        """Pointer update only, no phase check -- called whenever a new ResumeDraft version is
+        built (the initial Agent Builder run, or a Gate-2 feedback re-run)."""
+        self.current_resume_draft = resume_draft
+        self.save(update_fields=["current_resume_draft", "updated_at"])
+
+    def approve_gate2(self) -> None:
+        """Human Review Gate 2 approval (HITL-003): requires phase PREPARATION (never re-approved
+        from READY) and a `current_resume_draft` that is actually based on the current
+        `current_fit_assessment` (D-006 freshness) -- approving a stale draft is refused outright.
+        Confirms the draft itself (`ResumeDraft.confirm()`) in the same action, then advances the
+        phase -- Gate 2 approval means both things at once, never one without the other."""
+        if self.pipeline_phase != self.PipelinePhase.PREPARATION:
+            raise InvalidPhaseTransitionError(
+                f"Cannot approve Gate 2 from phase {self.pipeline_phase!r} -- only PREPARATION may "
+                "transition this way."
+            )
+        if self.current_resume_draft_id is None:
+            raise GateNotReadyError("No ResumeDraft exists yet -- run Agent Builder first.")
+        if self.current_resume_draft.based_on_fit_assessment_id != self.current_fit_assessment_id:
+            raise StaleAssessmentError(
+                "The current ResumeDraft is based on a superseded FitAssessment version -- "
+                "re-run Agent Builder against the current assessment before approving."
+            )
+        self.current_resume_draft.confirm()
+        self.pipeline_phase = self.PipelinePhase.READY
         self.save(update_fields=["pipeline_phase", "updated_at"])
 
 

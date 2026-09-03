@@ -393,6 +393,12 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 - **Verification**: `manage.py test candidate_matching reviews` passing; manual walkthrough of
   Gate 1 approve path and feedback-to-AC re-run path.
 - **Completion evidence**: passing tests + manual walkthrough note.
+- **Status (2026-09-03)**: implemented and committed (commit `aed6b32`). 147 new tests, full
+  project suite 664/664 passing (after M6), `ruff check .`/`manage.py check`/`makemigrations
+  --check`/`git diff --check` all clean. Verified against the `FakeAdapter` in the automated suite
+  and additionally against the real ACTIVE CandidateMemory/a real APPROVED CareerEngagement in a
+  rolled-back manual walkthrough (see `docs/CURRENT_STATE.md`). No live `AC_MATCH` provider call
+  was made or authorized this round.
 - **Risks**: no-concealment is a prompting *and* validation problem — the disposition-coverage
   validator alone can catch an omitted known-gap fixture in tests and structurally guarantees
   every requirement gets *some* disposition, but real-world under-reporting via an overly
@@ -444,6 +450,14 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   producing one real markdown resume from a real job posting and a real (test) CandidateMemory.
 - **Completion evidence**: passing tests + the produced sample markdown resume + manual walkthrough
   note.
+- **Status (2026-09-03)**: implemented and committed. 47 new tests, full project suite 664/664
+  passing, `ruff check .`/`manage.py check`/`makemigrations --check`/`git diff --check` all clean.
+  A real end-to-end manual walkthrough (pasted-text intake through an approved, confirmed
+  ResumeDraft) was run against the real ACTIVE CandidateMemory and a real APPROVED CareerEngagement
+  (CE-0003), using the `FakeAdapter` for `AC_MATCH`/`AB_BUILD` (no live provider call was made or
+  authorized), producing a real rendered markdown resume citing real claim text and real engagement
+  fields, inside a transaction rolled back at the end -- see `docs/CURRENT_STATE.md` for the full
+  walkthrough record and one incidental, pre-existing M3-era data-quality observation it surfaced.
 - **Risks**: this is the highest-stakes milestone for NFR-001 — per D-014, the validator's job is
   evidence attachment/eligibility (does the cited claim ID exist, is it confirmed, is it in
   scope), explicitly **not** text-similarity matching, so it cannot by itself catch a case where

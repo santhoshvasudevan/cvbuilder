@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Gate 2 -- {{ application }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">&larr; Gate 1</a></p>
+
+<h2>Human Review Gate 2 -- Resume Draft</h2>
+<p>Pipeline phase: <strong>{{ application.pipeline_phase }}</strong></p>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if upstream_stale %}
+<p class="error">The current Fit Assessment is based on a superseded JobRequirementAnalysis --
+resolve this at Gate 1 first.</p>
+{% endif %}
+
+{% if not draft %}
+<p>No Agent Builder draft exists yet.</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="run_ab">
+  <button type="submit">Run Agent Builder</button>
+</form>
+{% else %}
+
+{% if is_stale %}
+<p class="error">This draft (v{{ draft.version }}) is based on a superseded Fit Assessment version --
+re-run Agent Builder before approving.</p>
+{% endif %}
+
+<h3>Resume Draft v{{ draft.version }}{% if draft.is_confirmed %} (confirmed {{ draft.confirmed_at }}){% endif %}</h3>
+
+<h4>Rendered markdown</h4>
+<pre>{{ draft.rendered_markdown }}</pre>
+
+<h4>Evidence inspection</h4>
+<table>
+  <thead>
+    <tr><th>Section</th><th>Engagement</th><th>Text</th><th>Supporting claims</th><th>Matched requirements</th></tr>
+  </thead>
+  <tbody>
+    {% for element in elements %}
+    <tr>
+      <td>{{ element.get_section_display }}</td>
+      <td>{{ element.engagement_id }}</td>
+      <td>{{ element.text }}</td>
+      <td>{% for claim_id in element.supporting_memory_claim_ids %}{{ claim_id }} {% endfor %}</td>
+      <td>{% for jr_id in element.matched_job_requirement_ids %}{{ jr_id }} {% endfor %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="run_ab">
+  <button type="submit">Re-run Agent Builder</button>
+</form>
+
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="approve">
+  <button type="submit" {% if is_stale %}disabled{% endif %}>Approve Gate 2</button>
+</form>
+
+{% endif %}
+
+<h3>Send feedback</h3>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="feedback">
+  <p>Comments:<br><textarea name="comments" rows="4" cols="60"></textarea></p>
+  <button type="submit">Submit feedback and re-run Agent Builder</button>
+</form>
+
+<h3>Feedback history</h3>
+<ul>
+  {% for feedback in feedback_history %}
+  <li>{{ feedback.created_at }}: {{ feedback.comments }}</li>
+  {% empty %}
+  <li>None yet.</li>
+  {% endfor %}
+</ul>
+{% endblock %}

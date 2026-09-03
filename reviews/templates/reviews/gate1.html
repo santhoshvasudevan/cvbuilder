@@ -69,6 +69,10 @@ JobRequirementAnalysis version -- re-run Agent Candidate before approving.</p>
 
 {% endif %}
 
+{% if application.pipeline_phase != "NEW" and application.pipeline_phase != "ANALYSIS" %}
+<p><a href="{% url 'reviews:gate2' application_id=application.pk %}">Go to Gate 2 (Resume Draft)</a></p>
+{% endif %}
+
 <h3>Send feedback</h3>
 <form method="post">
   {% csrf_token %}

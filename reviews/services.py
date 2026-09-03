@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from candidate_matching.services.fit_assessment import build_fit_assessment
 from job_intake.services.intake import rerun_analysis
+from resume_builder.services.build import build_resume_draft
 
 from .models import ReviewFeedback
 
@@ -52,3 +53,28 @@ def submit_gate1_feedback(
 
 def approve_gate1(job_application) -> None:
     job_application.approve_gate1()
+
+
+def run_agent_builder(job_application):
+    """Explicit, operator-initiated Agent Builder run -- the initial run for this application, or
+    a plain re-run with no feedback attached. Always creates a new ResumeDraft version."""
+    return build_resume_draft(job_application)
+
+
+def submit_gate2_feedback(job_application, *, comments: str) -> ReviewFeedback:
+    """Gate 2 feedback always targets Agent Builder (AB) -- Gate 2 review is about resume content,
+    not the underlying fit assessment; feedback about a wrong disposition or missing evidence
+    belongs at Gate 1 instead. Records the feedback, then immediately reruns Agent Builder as one
+    synchronous action, producing a new, append-only ResumeDraft version (D-010)."""
+    feedback = ReviewFeedback.objects.create(
+        job_application=job_application,
+        gate=ReviewFeedback.Gate.GATE_2,
+        target=ReviewFeedback.Target.AB,
+        comments=comments,
+    )
+    build_resume_draft(job_application)
+    return feedback
+
+
+def approve_gate2(job_application) -> None:
+    job_application.approve_gate2()

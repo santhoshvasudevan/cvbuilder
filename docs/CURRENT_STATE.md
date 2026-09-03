@@ -1,32 +1,35 @@
 # Current State
 
-Last updated: 2026-09-03 (M3 Candidate Memory: the real four-source bootstrap has now been run
-live against NVIDIA Nemotron and fully activated. It produced revision 1 (v1/id=6, preserved as
-audit evidence, never activated -- see below) and, after targeted chunk/sentence-level recovery of
-every truncated chunk (never raising `max_output_tokens` beyond model-supported bounds, never
-re-enabling reasoning), revision 2 (v2/id=7), which passed activation validation with zero
-blockers and was **activated via `services/lifecycle.py::activate_revision`** as the sole `ACTIVE`
-CandidateMemory. M4 Agent Jobber/job intake is **implemented and committed** (audit corrections
-applied: D-004 follow-up note, cascade-delete/bulk-ORM bypass disclosure, admin `pipeline_phase`
-read-only).
+Last updated: 2026-09-03 (M5 and M6 implemented, tested, and committed as one coordinated work
+package. M5 -- Agent Candidate, matching, and Human Review Gate 1 -- and M6 -- Agent Builder and
+Human Review Gate 2 -- are both complete: real, deterministic retrieval and static-requirement
+assessment against the real ACTIVE CandidateMemory and real APPROVED CareerEngagements; LLM-backed
+narrative assessment/generation routed only through the FakeAdapter (no live provider calls were
+authorized or made this round); disposition-coverage and no-fabrication validators; deterministic
+markdown rendering; both human review gates wired end to end. A full end-to-end manual walkthrough
+(intake -> Agent Candidate -> Gate 1 feedback+approval -> Agent Builder -> Gate 2 feedback+approval)
+was run live against the real ACTIVE CandidateMemory (v2/id=7) and a real APPROVED CareerEngagement
+(CE-0003), inside a transaction rolled back at the end -- zero residue in the persistent
+development database (`JobApplication`/`FitAssessment`/`ResumeDraft` counts confirmed unchanged
+before and after).)
 
 ## Summary
 
-This repository has completed **Milestones M1, M2, and M3**, and has **implemented but not yet
-committed Milestone M4**. M1 established the Django/PostgreSQL application foundation (see git
-history for detail). M2 fully implements the `llm_provider` app. M3 implements the
-`candidate_memory` app end to end: relational models with an enforced `BUILDING -> NEEDS_REVIEW ->
-ACTIVE -> SUPERSEDED` lifecycle, an explicit bootstrap management command, deterministic conflict
-detection, an operator-facing server-rendered UI, and a deterministic snapshot export -- all routed
-through M2's `llm_provider` adapter interface, never a provider SDK directly; M3 has since been
-live-qualified against NVIDIA Nemotron (see the M3 extraction-quality repair section), the real
-four-source bootstrap has been run, and its recovered revision 2 (id=7) is now **ACTIVE** (see "The
-real four-source bootstrap" section below) -- M3 is complete end to end, including a real
-activation. M4 implements the `job_intake` app (Agent Jobber) and
-the `job_applications.JobApplication` aggregate per `docs/IMPLEMENTATION_PLAN.md` -- implemented
-and tested against the `FakeAdapter` only, **not yet committed** (staged for operator review with a
-proposed commit message). Milestones M5 through M8 remain **not implemented** (confirmed untouched:
-`candidate_matching/`, `resume_builder/`, `reviews/` show no changes in `git status`).
+This repository has completed **Milestones M1 through M6**. M1 established the Django/PostgreSQL
+application foundation. M2 fully implements the `llm_provider` app. M3 implements the
+`candidate_memory` app end to end, including a real, live-qualified four-source bootstrap whose
+recovered revision 2 (id=7) is the sole **ACTIVE** CandidateMemory. M4 implements the `job_intake`
+app (Agent Jobber) and the `job_applications.JobApplication` aggregate. Ahead of M5/M6, D-019
+implemented the deterministic static-profile boundary (`CareerEngagement`/`ClaimEngagementMapping`)
+and, in this session, three real engagements (CE-0001 Ford, CE-0002 Continental, CE-0003 Maruti
+Suzuki) were approved with operator-approved organization aliases/programme scopes, and 178
+narrative claim-engagement mappings are `APPROVED` (43 direct-match + 135 alias/programme-scope
+matches; 9 static-type mappings `REJECTED`; 944 global claims intentionally unmapped). M5
+(`candidate_matching` + `reviews` Gate 1) and M6 (`resume_builder` + `reviews` Gate 2) are now
+**implemented, tested, and committed** -- see their own sections below. Milestone M7 (integrated
+per-job workflow, freshness enforcement across the whole chain, and the dashboard) remains **not
+implemented** -- confirmed: no `job_applications` dashboard list/detail view exists, and no
+cross-app integration beyond the pointer-based freshness checks M5/M6 already enforce individually.
 
 ## What exists (M3 — new)
 
@@ -544,22 +547,161 @@ operator-editable). `candidate_matching`/`resume_builder`/`reviews` remain compl
   before its own qualification round. No `StageModelAssignment` row for `AJ_ANALYZE` was created or
   changed in the persistent development database.
 
+## What exists (M5 -- new, COMMITTED, commit `aed6b32`)
+
+`candidate_matching` (Agent Candidate) and the Gate-1 half of `reviews` are implemented and
+committed per `docs/IMPLEMENTATION_PLAN.md` M5.
+
+- **`candidate_matching/models.py`**: `FitAssessment` (append-only/versioned per D-010, FK to the
+  exact `JobRequirementAnalysis` version it was built from, `retrieved_claim_ids`/
+  `retrieved_engagement_ids` recording exactly which bounded context was provided) and child
+  `RequirementAssessment` (`requirement_id`, `disposition` MATCH/PARTIAL/GAP/UNKNOWN,
+  `supporting_memory_claim_ids`/`supporting_engagement_ids`, `explanation`, `gap_or_limitation`) --
+  both append-only, same honest application-layer-only immutability pattern as `job_intake`'s JRA.
+- **`services/retrieve.py`**: `retrieve_context()` returns a bounded subset of the ACTIVE
+  CandidateMemory -- every `CONFIRMED`+`resume_eligible` narrative (non-static-type) `MemoryClaim`
+  that either has an `APPROVED` `ClaimEngagementMapping` or has no mapping at all (a global claim),
+  every `APPROVED` `CareerEngagement`, and every `CandidateRule` -- and exposes exactly which
+  claim/engagement IDs were included. Never the full CandidateMemory, a source document, or the
+  reference snapshot.
+- **`services/static_requirements.py`**: a heuristic, regex-based (D-004-style, not a completeness
+  guarantee) classifier recognizing five static/structural requirement kinds -- total
+  non-overlapping experience, single-engagement tenure, current/past employment status, location,
+  and direct-employment-vs-consulting relationship -- each assessed purely from `CareerEngagement`
+  records via `candidate_memory.services.career_engagement`/`static_profile_boundary`, with zero
+  LLM involvement (D-019). A requirement this classifier does not recognize simply falls through to
+  the LLM-backed narrative path unchanged.
+- **`services/assess.py`**: the AC LLM call for genuinely narrative requirements only, routed
+  exclusively through `llm_provider.adapters.get_adapter_for_stage(AC_MATCH)` -- no provider SDK
+  import (confirmed by grep). Prompt gives narrative claims, engagement summaries (read-only, cited
+  by ID only), and candidate rules as context; instructs no-concealment and cites-real-IDs-only.
+- **`validators/disposition_coverage.py`**: `sanitize_items()` drops any cited claim/engagement ID
+  that was not part of the actual retrieved context (never trusting a fabricated ID) and downgrades
+  a MATCH/PARTIAL left with no surviving evidence to a disclosed UNKNOWN (the downgrade reason is
+  appended to the row's own `explanation`, visible at Gate 1 -- never a silent drop);
+  `ensure_full_coverage()` guarantees exactly one row per relevant `JobRequirement`, synthesizing an
+  explicit UNKNOWN row for anything the model never addressed. A known GAP is never softened or
+  removed by either function.
+- **`services/fit_assessment.py`**: orchestrates retrieval + local static assessment + LLM
+  narrative assessment + validation into one versioned `FitAssessment`, mirroring
+  `job_intake.services.intake.run_intake`'s shape (LLM call outside any transaction so its
+  `LLMCallLog` always commits; persistence as one all-or-nothing `transaction.atomic()` block).
+- **`job_applications/models.py`**: `current_fit_assessment` FK; `record_jra`/
+  `record_fit_assessment` (plain pointer updates, no phase check) and `approve_gate1()`
+  (`ANALYSIS -> PREPARATION`, requiring a `current_fit_assessment` whose `based_on_jra_id` matches
+  `current_jra_id` -- D-006 freshness, refuses a stale assessment outright).
+- **`job_intake/services/intake.py`**: `rerun_analysis()` (new) -- the Agent-Jobber side of a
+  Gate-1 feedback re-run; creates a new append-only JRA version and repoints `current_jra` via
+  `record_jra`, reusing the same original input by default or a fresh URL/pasted text if supplied.
+- **`reviews`**: `ReviewFeedback` model (gate, target AJ/AC, comments); `services.py`
+  (`run_agent_candidate`, `submit_gate1_feedback` -- records feedback and immediately performs the
+  targeted re-run as one synchronous action, `approve_gate1`); `views.py::gate1_view` + `templates/
+  reviews/gate1.html` -- combined AJ+AC display with per-requirement dispositions/evidence, a
+  staleness banner, run/re-run/approve/feedback actions, and feedback history. CSRF-protected
+  (verified with `enforce_csrf_checks=True`); GET/POST via `require_http_methods`.
+- **Automated test suite**: 147 new deterministic tests -- full project suite 664/664 (after M6,
+  see below), `ruff check .`/`manage.py check`/`makemigrations --check`/`git diff --check` all
+  clean. Covers retrieval boundary conditions, all five static-requirement kinds, the coverage
+  validator's sanitize/downgrade/fill-gap behavior, the full orchestrator (including a fabricated-
+  claim-id downgrade and a static requirement never reaching the LLM), Gate-1 view/service behavior
+  (run/approve/feedback/staleness/CSRF), and `JobApplication`'s new transition methods.
+- **Not done, reported honestly**: no live LLM call was made for `AC_MATCH` -- every assessment in
+  this session used the `FakeAdapter` with a scripted response, per the explicit "no live provider
+  calls" constraint for this work package. No `StageModelAssignment` row for `AC_MATCH` was created
+  or changed in the persistent development database (only in the rolled-back manual walkthrough,
+  see the top of this file).
+
+## What exists (M6 -- new, COMMITTED)
+
+`resume_builder` (Agent Builder) and the Gate-2 half of `reviews` are implemented and committed per
+`docs/IMPLEMENTATION_PLAN.md` M6, completing `JobApplication`'s three current-version pointers.
+
+- **`resume_builder/models.py`**: `ResumeDraft` (append-only/versioned per D-010, FK to the exact
+  `FitAssessment` version it was built from, `retrieved_claim_ids`/`retrieved_engagement_ids`,
+  `recommended_title`/`title_options`/`skill_categories`/`positioning_guidance` as planning-only
+  JSON, `rendered_markdown`) with exactly one further permitted mutation -- `confirm()`, setting
+  `confirmed_at` from `None` to a timestamp once, the same "one specific allowed transition, else
+  frozen" pattern `CandidateMemory` already uses for `ACTIVE -> SUPERSEDED`. `ResumeElement` (the
+  queryable, evidence-bearing structured content Gate 2 inspects: `section`, `engagement_id` for
+  experience bullets, `order`, `text`, `supporting_memory_claim_ids`, `matched_job_requirement_ids`)
+  -- also append-only.
+- **`resume_builder/schemas.py`**: `AgentBuilderOutput` and its nested models, every one
+  `extra="forbid"`, with no field anywhere for employer/client/role title/dates/location/
+  presentation mode (D-019) -- `BaseLLMAdapter.generate()`'s existing re-validation against this
+  schema means a provider that tried to smuggle one of those fields through fails schema
+  validation outright, not merely "gets ignored by convention" (proven by
+  `test_no_fabrication.py::test_forbidden_static_field_fails_schema_validation_before_reaching_this_validator`).
+- **`services/generate.py`**: the AB LLM call, routed exclusively through
+  `llm_provider.adapters.get_adapter_for_stage(AB_BUILD)` -- no provider SDK import. Prompt gives
+  the target job, Agent Candidate's own per-requirement dispositions/explanations, narrative
+  claims, and read-only engagement summaries; instructs selecting the strongest truthful
+  positioning and citing only real IDs from the given context.
+- **`validators/no_fabrication.py`**: `validate_and_flatten()` -- unlike M5's per-item downgrade
+  approach, this **fails the entire build closed** (raises `NoFabricationError` naming every
+  failure) on any element with no evidence, a fabricated claim ID, or an unknown/unapproved/
+  not-in-context `engagement_id` (via `resolve_approved_engagement`) -- nothing is ever persisted
+  for a build that fails validation, matching `docs/RESUME_OUTPUT_STRUCTURE.md` Sec 3/6's own
+  "rejected... before any markdown is ever rendered" contract.
+- **`rendering/markdown.py`**: deterministic v1 rendering per `docs/RESUME_OUTPUT_STRUCTURE.md`
+  Sec 4, run only after validation passes and entirely from already-validated in-memory data (no
+  DB round-trip needed before persistence). Every experience header comes exclusively from
+  `render_engagement_header`, resolved fresh by `engagement_id` -- never anything Agent Builder
+  produced. Experience sections are ordered deterministically by each engagement's own recorded
+  dates (most recent/current first), not by whatever order the LLM happened to list them in.
+  Achievement placement (explicitly left open as a future iteration in
+  `docs/RESUME_OUTPUT_STRUCTURE.md`) uses a documented v1 policy: an achievement already covered by
+  an existing bullet's evidence is skipped; an uncovered achievement resolving to exactly one
+  engagement (via its own claims' engagement mappings) is placed there; one resolving to zero or
+  multiple engagements is placed under Professional Summary instead of being silently dropped.
+- **`services/build.py`**: orchestrates the freshness/gate precondition (requires
+  `pipeline_phase` in PREPARATION/READY and a non-stale `current_fit_assessment`), retrieval
+  (reused directly from `candidate_matching.services.retrieve` -- the identical bounded, D-019-
+  respecting subset), generation, validation, rendering, and versioned persistence, mirroring
+  `build_fit_assessment`'s transaction shape.
+- **`job_applications/models.py`**: `current_resume_draft` FK (completing D-012's three pointers);
+  `record_resume_draft` (plain pointer update) and `approve_gate2()` (`PREPARATION -> READY`,
+  requiring a non-stale `current_resume_draft` -- D-006 -- and confirming the draft itself in the
+  same action).
+- **`reviews`**: `services.py` gains `run_agent_builder`, `submit_gate2_feedback` (feedback always
+  targets Agent Builder -- a wrong disposition belongs at Gate 1 instead, not re-litigated here),
+  `approve_gate2`; `views.py::gate2_view` + `templates/reviews/gate2.html` -- rendered markdown,
+  full per-element evidence inspection table, staleness banners (both draft-vs-assessment and the
+  transitive assessment-vs-JRA case), run/re-run/approve/feedback actions, feedback history.
+  CSRF-protected; a Gate-1-to-Gate-2 navigation link appears once past NEW/ANALYSIS.
+- **Automated test suite**: 47 new deterministic tests -- full project suite **664/664 passing**,
+  `ruff check .`/`manage.py check`/`makemigrations --check`/`git diff --check` all clean.
+- **Manual end-to-end walkthrough performed live** against the real ACTIVE CandidateMemory
+  (v2/id=7) and a real `APPROVED` `CareerEngagement` (CE-0003, Maruti Suzuki), using the
+  `FakeAdapter` for every LLM stage (no live provider calls): pasted-text intake -> Agent Candidate
+  (MATCH) -> Gate-1 feedback-triggered AC re-run (new `FitAssessment` v2) -> Gate 1 approved
+  (`PREPARATION`) -> Agent Builder produced a real rendered markdown resume citing the real
+  claim's text and the real engagement's title/organisation/dates/location -> Gate-2 feedback-
+  triggered AB re-run (new `ResumeDraft` v2) -> Gate 2 approved (`READY`, draft confirmed). The
+  whole walkthrough ran inside one transaction that was rolled back at the end --
+  `JobApplication`/`FitAssessment`/`ResumeDraft` counts confirmed at 0 both before and after, and
+  `LLMCallLog`'s count was unchanged (263), since the walkthrough's own calls rolled back with it.
+  One pre-existing, unrelated data-quality observation surfaced during this walkthrough: the real
+  claim `MC-7-0250`'s `canonical_text_en` itself begins with a literal `"- "` (an M3-era extraction
+  artifact, not an M5/M6 defect), which the deterministic renderer faithfully reproduces (rendering
+  exactly what is stored, never editing claim text) -- visible in the walkthrough's sample output as
+  a doubled leading dash. Flagged here for future correction via the normal Candidate Memory
+  correction workflow, not fixed silently as part of this work package.
+- **Not done, reported honestly**: no live LLM call was made for `AB_BUILD` -- every generation in
+  this session used the `FakeAdapter` with a scripted response. No `StageModelAssignment` row for
+  `AB_BUILD` was created or changed in the persistent development database (only in the rolled-back
+  manual walkthrough). M7 (the dashboard, cross-app integration beyond the pointer-based freshness
+  checks, and the final "download the resume" flow) was not started.
+
 ## What does not exist
 
-- Any model fields, migrations, views, or templates for `candidate_matching`, `resume_builder`, or
-  `reviews` (Milestones M5-M6).
-- `JobApplication.current_fit_assessment`/`current_resume_draft` (M5/M6 scope, by design -- see
-  the M4 section above).
-- Any pipeline stage other than Candidate Memory build (`MEMORY_BUILD`) and Agent Jobber
-  (`AJ_ANALYZE`) actually calling `get_adapter_for_stage()` -- `AC_MATCH`/`AB_BUILD` remain unused
-  until M5/M6.
-- Any real-world URL fetch verification (only mocked HTTP responses have been exercised) or any
-  live NVIDIA/OpenAI/Gemini call for the `AJ_ANALYZE` stage.
+- The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
+  wiring beyond the pointer-based freshness checks M5/M6 already enforce individually.
+- Any pipeline stage other than `MEMORY_BUILD`, `AJ_ANALYZE`, `AC_MATCH`, and `AB_BUILD` -- all four
+  now exist and are exercised by the automated suite via the `FakeAdapter`; none has been exercised
+  against a live provider (no credentials configured in this environment for any stage).
+- Any real-world URL fetch verification (only mocked HTTP responses have been exercised).
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
-  not performed in this environment -- no credentials configured), including for the M3 Candidate
-  Memory extraction path specifically -- see the M3 verification section above.
-- A bootstrapped real Candidate Memory built from the operator's actual four source documents
-  (only synthetic test fixtures have been processed in this environment).
+  not performed in this environment -- no credentials configured).
 - Any remote/CI configuration (not required; local quality commands remain the standard).
 
 ## Decisions (see `docs/DECISIONS.md` for full detail)
@@ -568,8 +710,14 @@ D-001 through D-015 are all APPROVED (several "with modification"); D-013 is sup
 D-016 (`FAILED` lifecycle state) remains PROPOSED, not yet product-owner-approved. D-017 (line-wrap
 provenance risk), D-018 (Candidate Memory recovery), and D-019 (the deterministic static-profile
 boundary — `CareerEngagement`/`ClaimEngagementMapping`, see below) are all **APPROVED AND
-IMPLEMENTED**. Neither D-016 nor anything else is blocking for any milestone through M7 as
-currently scoped.
+IMPLEMENTED**. M5 and M6 were implemented entirely within the boundaries of these already-approved
+decisions (principally D-006, D-010, D-014, D-019) -- no new architectural decision requiring
+product-owner approval arose; a small number of genuine implementation choices not dictated by any
+prior decision (the static-requirement classifier's specific heuristics, the achievement-placement
+policy `docs/RESUME_OUTPUT_STRUCTURE.md` itself left open, restricting Gate-2 feedback to target
+Agent Builder only) are documented in the M5/M6 sections above rather than recorded as separate
+DECISIONS.md entries, consistent with how D-004's extraction-library choice was handled. Neither
+D-016 nor anything else is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
@@ -589,19 +737,27 @@ experience across engagements (merging overlapping ranges so they are never doub
 static-requirement assessors (tenure, location) that make an LLM call unnecessary for that kind of
 disposition. Migration `candidate_memory.0006_careerengagement_claimengagementmapping`; tests in
 `test_career_engagement.py`, `test_engagement_mapping.py`, `test_static_profile_boundary.py`
-(53 new tests, all deterministic, no LLM adapter involved). **Not done, and deliberately deferred**:
-no real `CareerEngagement` row exists yet for the operator's actual employment history -- creating
-and approving those is future operator data-entry/review work through the normal admin/service
-workflow, never hardcoded into a migration or seed script; M5/M6 themselves remain not started.
+(53 new tests, all deterministic, no LLM adapter involved). Three real `CareerEngagement` rows
+(CE-0001 Ford, CE-0002 Continental, CE-0003 Maruti Suzuki) were subsequently created and approved
+by the operator, with operator-approved organization aliases/programme scopes, and 178 narrative
+`ClaimEngagementMapping` rows are `APPROVED` against them (see the aliases/mapping work recorded in
+this file's git history and `docs/DECISIONS.md` D-019's refinement) -- this real registry is what
+M5/M6's real end-to-end manual walkthrough (see the M6 section above) retrieved and rendered
+against.
 
 ## Next action
 
-M4 is implemented, committed, and verified against the `FakeAdapter`/mocked HTTP. The real
-four-source Candidate Memory bootstrap has been run live against NVIDIA Nemotron, recovered, and
-activated (CandidateMemory v2/id=7 is the sole `ACTIVE` revision -- see "The real four-source
-bootstrap" section above). Milestone M5 (Agent Candidate) may now proceed per
-`docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on both M3 and M4, both now complete
-with a real, activated Candidate Memory available to retrieve against. M5 has not been started.
+M1 through M6 are implemented, committed, and verified (M1-M4 against the `FakeAdapter`/mocked
+HTTP as already documented above; M5-M6 additionally verified in a real, rolled-back end-to-end
+walkthrough against the real ACTIVE CandidateMemory and a real APPROVED CareerEngagement). Per
+`docs/IMPLEMENTATION_PLAN.md`'s dependency graph, Milestone M7 (integrated per-job workflow,
+chain-wide freshness enforcement, and the dashboard) depends on M3, M4, M5, and M6, all now
+complete -- M7 may proceed. Per this work package's explicit instruction, M7 was **not started**
+in this session. Before any live M5->Gate1->M6->Gate2 run against a real provider, the operator
+must: configure a real credential in `.env` for whichever provider/model will serve `AC_MATCH` and
+`AB_BUILD`, create the corresponding `LLMProvider`/`LLMModel`/`StageModelAssignment` rows (none
+exist yet for either stage), and confirm CE-0001/CE-0002/CE-0003's mapped narrative claims are the
+intended evidence set for a real job application before approving either gate for real.
 
 ## Maintenance rule for this file
 

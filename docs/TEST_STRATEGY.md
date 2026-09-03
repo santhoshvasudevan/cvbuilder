@@ -115,12 +115,11 @@ milestone scope):
     regression guard — a mapping can be proposed and approved for a claim belonging to an
     already-`ACTIVE` `CandidateMemory` revision without violating that revision's frozen-content
     invariant. `services.static_profile_boundary`: `EngagementNarrativeOutput`/`EngagementBullet`
-    (the planned M6 output schema) reject any employer/title/location/date field via Pydantic's
+    (M6's real output schema, `resume_builder/schemas.py`, mirrors this shape) reject any employer/title/location/date field via Pydantic's
     `extra="forbid"`; `render_engagement_header` refuses an unknown or non-`APPROVED` `engagement_id`
     outright; a rendered header's title/organisation/dates exactly match the stored `CareerEngagement`
     fields and are never machine-translated regardless of the requested `language`; `assess_tenure_
-    requirement_locally`/`assess_location_requirement_locally` (the planned M5 static-requirement
-    assessors) and `RequirementEvidenceReference` (accepting `supporting_memory_claim_ids` and
+    requirement_locally`/`assess_location_requirement_locally` (used directly by M5's real `candidate_matching/services/static_requirements.py`) and `RequirementEvidenceReference` (accepting `supporting_memory_claim_ids` and
     `supporting_engagement_ids` together, rejecting unknown fields). All ordinary deterministic
     tests, no LLM adapter involved at all in this group.
 - **M4 (`job_intake`, `job_applications`)**: fetch-success vs. fetch-failure branching (a fixture
@@ -129,7 +128,7 @@ milestone scope):
   material requirement is assigned a stable, unique `JR-xxx` ID and category within one
   `JobRequirementAnalysis` version; a new `JobApplication` is created/attached on intake with
   `pipeline_phase` starting at `NEW`.
-- **M5 (`candidate_matching`, `reviews`)**: retrieval precision (irrelevant/unconfirmed claims
+- **M5 (`candidate_matching`, `reviews`), implemented 2026-09-03**: retrieval precision (irrelevant/unconfirmed claims
   excluded from a fixture memory); the disposition-coverage validator (every relevant
   `JobRequirement` in a fixture gets exactly one `RequirementAssessment`; a fixture with a known
   `GAP` always surfaces it, never silently upgraded to `MATCH`; a `MATCH`/`PARTIAL` lacking
@@ -140,7 +139,7 @@ milestone scope):
   requirement (tenure/dates/location/employment relationship) is assessed via
   `candidate_memory.services.static_profile_boundary`'s local assessors and cited by
   `supporting_engagement_ids` alone, with zero LLM calls made for that disposition.
-- **M6 (`resume_builder`)**: the no-fabrication validator running against the **structured**
+- **M6 (`resume_builder`), implemented 2026-09-03**: the no-fabrication validator running against the **structured**
   representation before any markdown is rendered (a fixture `ResumeElement` with no evidence, or
   with an ID that doesn't resolve to an existing/confirmed/eligible `MemoryClaim`, is rejected
   before rendering); **(D-019)** a fixture `ExperienceSection` referencing an unknown or
