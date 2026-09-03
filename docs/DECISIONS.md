@@ -438,8 +438,11 @@ requirement text there).
 
 ## D-017: Line-wrapped source sentences can fail exact-quote provenance verification
 
-- **Status**: **PROPOSED** — discovered during the second live NVIDIA qualification call of the
-  M3 extraction-quality repair (2026-09-02); not yet product-owner-approved, and not yet fixed.
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-02) — discovered during the second live
+  NVIDIA qualification call of the M3 extraction-quality repair; the repair below was explicitly
+  approved and implemented in the same session. The issue description immediately below is kept
+  as originally written for the reasoning trail; see **Resolution** further down for what was
+  actually built.
 - **Requirement**: extends D-003's provenance representation; a gap that decision did not
   originally cover.
 - **Issue**: `services/chunking.py::chunk_source` and `services/storage.py::_verify_quote_at_lines`
@@ -458,14 +461,53 @@ requirement text there).
   (`docs/AC/AC-profile_english.md`/`AC-profile_german.md`) if they contain hard-wrapped paragraphs
   -- not yet confirmed either way, since those files were not inspected for this specific question
   during the repair (see `docs/CURRENT_STATE.md`'s M3 Phase 2 section).
-- **Not yet decided**: whether to (a) normalize wrapped-newline-vs-space equivalence in
-  `_verify_quote_at_lines`'s comparison (e.g. compare with internal whitespace collapsed), (b)
-  instruct the extraction prompt more explicitly to always emit an accurate multi-line
-  `start_line`/`end_line` span and a quote matching the source's actual line breaks, or (c) some
-  combination. Any change here must preserve D-003's "exact quotation, deterministic line range,
-  no semantic-similarity provenance" guarantee -- a whitespace-normalized comparison is still an
-  exact match on normalized content, not a fuzzy/similarity match, but the product owner should
-  confirm this reading before it's implemented.
+- **Not yet decided** (superseded by the Resolution below): whether to (a) normalize wrapped-
+  newline-vs-space equivalence in `_verify_quote_at_lines`'s comparison (e.g. compare with internal
+  whitespace collapsed), (b) instruct the extraction prompt more explicitly to always emit an
+  accurate multi-line `start_line`/`end_line` span and a quote matching the source's actual line
+  breaks, or (c) some combination. Any change here must preserve D-003's "exact quotation,
+  deterministic line range, no semantic-similarity provenance" guarantee -- a whitespace-normalized
+  comparison is still an exact match on normalized content, not a fuzzy/similarity match.
+
+### Resolution: whitespace-normalized location, original-slice recovery (2026-09-02)
+
+Option (a) was implemented, precisely scoped to preserve D-003 exactly: `services/quote_recovery.py`
+(new) is a fallback path, tried only after `_verify_quote_at_lines`'s existing exact check has
+already failed. It normalizes runs of whitespace (including newlines) to a single space in both
+the model's quote and the source, and *locates* the quote in that normalized view -- but this is
+still an **exact** match on normalized content, never fuzzy or semantic, and only a match that is
+**unique** (exactly one occurrence) is ever accepted; zero or multiple normalized matches fail
+closed (`recover_quote()` returns `None`, and `store_extracted_item` raises `ProvenanceError`,
+never guessing). Once a unique location is found, the function maps back through an explicit
+character-offset map to recover the **exact original source slice** at that position -- real
+newlines and spacing intact, never the normalized string itself -- and computes real 1-based
+`start_line`/`end_line` from those recovered offsets. `services/storage.py::store_extracted_item`
+then re-runs the *same, unmodified* `_verify_quote_at_lines` validator against that recovered
+slice before trusting it at all, and only the recovered slice/line-range (never the model's
+original, inaccurate ones) is what gets persisted into `MemoryClaimSupport`/`CandidateRule`. The
+content-hash check (`source_document.verify_content_hash()`) is untouched and still runs first,
+unaffected by any of this. 17 new deterministic tests
+(`candidate_memory/tests/test_quote_recovery.py`, `test_wrapped_line_provenance.py`) cover exact-
+match-unchanged, multi-line wrapping (two and three physical lines), whitespace variety (spaces/
+tabs/multiple newlines), ambiguous-duplicate-match rejection, missing-quotation rejection,
+hash-tampering still rejected before recovery is attempted, a synthetic fixture matching
+`AC-OPERATOR_FACT_RESOLUTIONS.md`'s own confirmed hard-wrapped-at-~90-columns style (see the
+D-017 exposure audit below), and confirmation that the bulk corpus's own long-single-line style
+needs no recovery at all.
+
+### D-017 real-corpus exposure (read-only audit, 2026-09-02, prior to this fix)
+
+A read-only, non-destructive inspection of all four `docs/AC/*.md` files (line-length and
+wrap-boundary heuristics only -- no LLM call, no import, no bootstrap, no personal/contact content
+reproduced) found this risk is **not evenly distributed**: `AC-MEMORY_PROFILE.md`,
+`AC-profile_english.md`, and `AC-profile_german.md` each write one long logical paragraph/bullet
+per physical line (sampled longest lines up to 1240 characters, each ending in `.` or a markdown
+table `|`, never mid-word) -- **zero** confirmed mid-clause line-wrap boundaries found in any of
+the three. `AC-OPERATOR_FACT_RESOLUTIONS.md` (101 lines), by contrast, is conventionally wrapped
+at roughly 80-97 columns and showed **19** confirmed mid-word/mid-clause wrap boundaries -- a
+widespread density for that one file. Because that file is the highest-precedence `OPERATOR_UPDATE`
+source (precedence 0), this fix directly protects the exact content most at risk of being silently
+under-represented in a real bootstrap.
 - **Consequence**: flagged as a known, unresolved gap rather than silently accepted; the real
   four-source bootstrap may lose some otherwise-valid claims to this exact failure mode until
   resolved. Not treated as blocking the M3 qualification's own pass/fail verdict, since it is

@@ -2,9 +2,11 @@
 
 Last updated: 2026-09-02 (M3 Candidate Memory live-qualified against NVIDIA Nemotron and
 extraction-quality-repaired -- subject_scope/legal-employer semantic-completeness defect fixed and
-verified live; a separate, orthogonal line-wrap provenance risk found and recorded as D-017,
-PROPOSED, not yet fixed. M4 Agent Jobber/job intake implemented and verified against the
-`FakeAdapter` only, **uncommitted** pending operator review -- see the M4 section below).
+verified live; the separate, orthogonal line-wrap provenance risk (D-017) is now also **fixed** via
+whitespace-normalized quote-location recovery, committed separately from the M3 repair. M4 Agent
+Jobber/job intake is **implemented and committed** (audit corrections applied: D-004 follow-up
+note, cascade-delete/bulk-ORM bypass disclosure, admin `pipeline_phase` read-only). The real
+four-source Candidate Memory bootstrap has still not been run against a live provider.).
 
 ## Summary
 
@@ -264,25 +266,29 @@ Fixed:
   2028 in/931 out/2959 total, `retry_count=0`, isolated-transaction storage pass rolled back with
   zero residue (`CandidateMemory`/`MemorySourceDocument` counts both 0 afterward), `LLMCallLog`
   count 4->5 (exactly the one authorized call).
-- **New finding, not yet fixed** (D-017, PROPOSED): that same live call's storage pass rejected 3
-  of 5 items at the provenance-verification step (not the semantic-extraction step) -- every
-  rejected item's supporting sentence happened to word-wrap across two physical lines in the test
-  excerpt, and Nemotron reconstructed the quote by joining the wrapped halves with a space where
-  the source has an actual newline, failing `_verify_quote_at_lines`'s exact-substring check. This
-  is orthogonal to the subject_scope defect this round targeted (pre-existing chunking/provenance
-  code, untouched by this repair) but is a real, structural risk for the actual bootstrap sources
-  if they contain hard-wrapped paragraphs -- not yet confirmed either way. See D-017 for full
-  detail and options. **Not fixed in this pass** -- flagged for a follow-up session, per operator
-  decision (2026-09-02) to treat the qualification round's own pass/fail verdict as scoped to the
-  subject_scope/legal-employer defect it was authorized to fix.
-- **Dry-run re-verified** against the real four `docs/AC/*.md` sources after this repair:
-  `--dry-run` reported 60 planned chunks/estimated provider calls across all four sources, zero
-  provider calls, zero database writes (`CandidateMemory.objects.count()` confirmed 0 afterward).
-- **Verdict**: subject_scope/legal-employer semantic-completeness defect -- FIXED and verified live.
-  Line-wrap provenance risk (D-017) -- OPEN, unresolved, not blocking this round's verdict per
-  operator decision, but should be investigated (does the real corpus actually contain hard-wrapped
-  paragraphs?) before or during the real bootstrap. The real four-source bootstrap has still **not**
-  been run -- only dry-run/synthetic/rolled-back qualification calls.
+- **Finding, since fixed** (D-017, now APPROVED AND IMPLEMENTED): that same live call's storage
+  pass rejected 3 of 5 items at the provenance-verification step (not the semantic-extraction
+  step) -- every rejected item's supporting sentence happened to word-wrap across two physical
+  lines in the test excerpt, and Nemotron reconstructed the quote by joining the wrapped halves
+  with a space where the source has an actual newline, failing `_verify_quote_at_lines`'s
+  exact-substring check. This was orthogonal to the subject_scope defect this round targeted
+  (pre-existing chunking/provenance code) but was a real, structural risk for the actual bootstrap
+  sources. A read-only audit of all four `docs/AC/*.md` files subsequently confirmed the risk is
+  concentrated in `AC-OPERATOR_FACT_RESOLUTIONS.md` specifically (19 confirmed wrap boundaries in
+  101 lines) and effectively absent from the three bulk corpus files (0 each; see D-017 for the
+  full exposure analysis). **Fixed** in a follow-up session: `services/quote_recovery.py` (new)
+  recovers the exact original source slice via whitespace-normalized, uniqueness-required location
+  matching -- never fuzzy/semantic, never storing the normalized form itself, always re-verified by
+  the original exact-match validator before anything is trusted. See D-017 for full detail.
+- **Dry-run re-verified** against the real four `docs/AC/*.md` sources after the subject_scope
+  repair: `--dry-run` reported 60 planned chunks/estimated provider calls across all four sources,
+  zero provider calls, zero database writes (`CandidateMemory.objects.count()` confirmed 0
+  afterward).
+- **Verdict**: subject_scope/legal-employer semantic-completeness defect -- FIXED and verified
+  live. Line-wrap provenance risk (D-017) -- FIXED (deterministic, no live call needed to verify
+  the fix itself; 17 new deterministic tests cover it, including a synthetic fixture matching
+  `AC-OPERATOR_FACT_RESOLUTIONS.md`'s confirmed wrapping style). The real four-source bootstrap has
+  still **not** been run -- only dry-run/synthetic/rolled-back qualification calls.
 
 ## M3 verification performed (2026-09-02, pre-audit-repair baseline)
 
@@ -372,12 +378,14 @@ Fixed:
   at the deterministic schema-translation level, not against real API behavior -- flagged
   honestly rather than claimed as fully proven.
 
-## What exists (M4 -- new, implemented but UNCOMMITTED as of this writing)
+## What exists (M4 -- new, COMMITTED)
 
-`job_intake` (Agent Jobber) and the `job_applications` scaffolding are now implemented per
-`docs/IMPLEMENTATION_PLAN.md` M4. **Not yet committed** -- staged for operator review with a
-proposed commit message; a separate M3 extraction-quality-repair commit was made first (see git
-log). `candidate_matching`/`resume_builder`/`reviews` remain completely untouched (M5-M6).
+`job_intake` (Agent Jobber) and the `job_applications` scaffolding are implemented and committed
+per `docs/IMPLEMENTATION_PLAN.md` M4, after a read-only pre-commit audit and its corrections were
+applied (D-004 follow-up decision note, cascade-delete/bulk-ORM bypass disclosure in the JRA
+immutability comments, `pipeline_phase` made admin-read-only while `application_outcome` stays
+operator-editable). `candidate_matching`/`resume_builder`/`reviews` remain completely untouched
+(M5-M6).
 
 - **`job_applications/models.py`**: `JobApplication` (D-012) with only the M4-required shape --
   `current_jra` FK (to `job_intake.JobRequirementAnalysis`), `pipeline_phase`
@@ -496,21 +504,19 @@ log). `candidate_matching`/`resume_builder`/`reviews` remain completely untouche
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
 D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
-D-016 (`FAILED` lifecycle state) and D-017 (line-wrap provenance risk, new this session) are both
-PROPOSED, not yet product-owner-approved. Neither is blocking for any milestone through M7 as
-currently scoped.
+D-016 (`FAILED` lifecycle state) remains PROPOSED, not yet product-owner-approved. D-017 (line-wrap
+provenance risk) is now **APPROVED AND IMPLEMENTED**. Neither D-016 nor anything else is blocking
+for any milestone through M7 as currently scoped.
 
 ## Next action
 
-M4 is implemented and verified against the `FakeAdapter` but awaits operator review/commit (a
-proposed commit message was reported separately, not applied automatically per this session's
-explicit instruction). Once committed, Milestone M5 (Agent Candidate) may proceed per
-`docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on both M3 and M4. Two operational
-prerequisites remain, neither a code blocker: (1) the real four-source Candidate Memory bootstrap
-has still not been run against a live provider (M3's live qualification calls used synthetic
-fixtures in rolled-back transactions only); (2) D-017's line-wrap provenance risk should be
-investigated against the real `docs/AC/*.md` corpus before or during that real bootstrap, since it
-could silently drop otherwise-valid claims the same way the now-fixed subject_scope defect did.
+M4 is implemented, committed, and verified against the `FakeAdapter`/mocked HTTP. Milestone M5
+(Agent Candidate) may proceed per `docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on
+both M3 and M4, both now complete. One operational prerequisite remains, not a code blocker: the
+real four-source Candidate Memory bootstrap has still not been run against a live provider (M3's
+live qualification calls used synthetic fixtures in rolled-back transactions only; a `--dry-run`
+preflight against the real four sources has been re-verified after both the subject_scope and
+D-017 fixes, with zero provider calls/writes).
 
 ## Maintenance rule for this file
 

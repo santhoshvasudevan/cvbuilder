@@ -9,6 +9,7 @@ from ..models import CandidateMemory, CandidateRule, MemoryClaim, MemoryClaimSup
 from ..schemas import ContentPlane, ExtractedItem
 from .classification import validate_item
 from .comparable_values import COMPARABLE_CLAIM_TYPES, comparison_payload_for_item
+from .quote_recovery import recover_quote
 from .subject_scope import normalize_subject_scope
 
 
@@ -64,10 +65,35 @@ def store_extracted_item(
     if not _verify_quote_at_lines(
         source_document, item.support.quote, item.support.start_line, item.support.end_line
     ):
-        raise ProvenanceError(
-            f"Quote does not resolve to an exact substring of source lines "
-            f"{item.support.start_line}-{item.support.end_line} in {source_document.filename}."
-        )
+        # D-017 fix: the model-supplied quote/line-range didn't resolve exactly -- a known real
+        # failure mode when a supporting sentence word-wraps across two physical source lines and
+        # the model reconstructs its quote with a space where the source has an actual newline.
+        # Attempt a whitespace-normalized *location* of the quote (never a fuzzy/semantic match,
+        # and only accepted if it locates a *unique* position); recover the real original slice at
+        # that position and re-run the exact same validator against it before trusting anything.
+        recovered = recover_quote(source_document.raw_content, item.support.quote)
+        if recovered is None:
+            raise ProvenanceError(
+                f"Quote does not resolve to an exact substring of source lines "
+                f"{item.support.start_line}-{item.support.end_line} in {source_document.filename}, "
+                "and no unique whitespace-normalized match exists elsewhere in the source either."
+            )
+        if not _verify_quote_at_lines(
+            source_document, recovered.text, recovered.start_line, recovered.end_line
+        ):
+            # Defensive-in-depth: recovery is expected to always re-validate by construction: it
+            # never fires. If it somehow didn't, fail closed rather than trust an unverified
+            # recovery -- this is not a code path any test should be able to reach.
+            raise ProvenanceError(
+                f"Recovered quote failed re-validation against source lines "
+                f"{recovered.start_line}-{recovered.end_line} in {source_document.filename}."
+            )
+        # Use the recovered, verified-exact original text/line-range for everything stored below
+        # -- never the model's own possibly-inaccurate quote/line values, and never the
+        # whitespace-normalized string itself.
+        item.support.quote = recovered.text
+        item.support.start_line = recovered.start_line
+        item.support.end_line = recovered.end_line
 
     if item.plane == ContentPlane.EVIDENCE:
         return _store_claim(item, candidate_memory=candidate_memory, source_document=source_document)
