@@ -1,12 +1,14 @@
 # Current State
 
-Last updated: 2026-09-02 (M3 Candidate Memory live-qualified against NVIDIA Nemotron and
-extraction-quality-repaired -- subject_scope/legal-employer semantic-completeness defect fixed and
-verified live; the separate, orthogonal line-wrap provenance risk (D-017) is now also **fixed** via
-whitespace-normalized quote-location recovery, committed separately from the M3 repair. M4 Agent
-Jobber/job intake is **implemented and committed** (audit corrections applied: D-004 follow-up
-note, cascade-delete/bulk-ORM bypass disclosure, admin `pipeline_phase` read-only). The real
-four-source Candidate Memory bootstrap has still not been run against a live provider.).
+Last updated: 2026-09-03 (M3 Candidate Memory: the real four-source bootstrap has now been run
+live against NVIDIA Nemotron and fully activated. It produced revision 1 (v1/id=6, preserved as
+audit evidence, never activated -- see below) and, after targeted chunk/sentence-level recovery of
+every truncated chunk (never raising `max_output_tokens` beyond model-supported bounds, never
+re-enabling reasoning), revision 2 (v2/id=7), which passed activation validation with zero
+blockers and was **activated via `services/lifecycle.py::activate_revision`** as the sole `ACTIVE`
+CandidateMemory. M4 Agent Jobber/job intake is **implemented and committed** (audit corrections
+applied: D-004 follow-up note, cascade-delete/bulk-ORM bypass disclosure, admin `pipeline_phase`
+read-only).
 
 ## Summary
 
@@ -17,8 +19,10 @@ history for detail). M2 fully implements the `llm_provider` app. M3 implements t
 ACTIVE -> SUPERSEDED` lifecycle, an explicit bootstrap management command, deterministic conflict
 detection, an operator-facing server-rendered UI, and a deterministic snapshot export -- all routed
 through M2's `llm_provider` adapter interface, never a provider SDK directly; M3 has since been
-live-qualified against NVIDIA Nemotron (see the M3 extraction-quality repair section) but the real
-four-source bootstrap has still not been run. M4 implements the `job_intake` app (Agent Jobber) and
+live-qualified against NVIDIA Nemotron (see the M3 extraction-quality repair section), the real
+four-source bootstrap has been run, and its recovered revision 2 (id=7) is now **ACTIVE** (see "The
+real four-source bootstrap" section below) -- M3 is complete end to end, including a real
+activation. M4 implements the `job_intake` app (Agent Jobber) and
 the `job_applications.JobApplication` aggregate per `docs/IMPLEMENTATION_PLAN.md` -- implemented
 and tested against the `FakeAdapter` only, **not yet committed** (staged for operator review with a
 proposed commit message). Milestones M5 through M8 remain **not implemented** (confirmed untouched:
@@ -290,7 +294,7 @@ Fixed:
   `AC-OPERATOR_FACT_RESOLUTIONS.md`'s confirmed wrapping style). The real four-source bootstrap has
   still **not** been run -- only dry-run/synthetic/rolled-back qualification calls.
 
-## The real four-source bootstrap: revision 1 (v1/id=6) -- completed, NOT suitable for activation
+## The real four-source bootstrap: revision 1 (v1/id=6, audit evidence) and revision 2 (v2/id=7, ACTIVE)
 
 The real four-source bootstrap was subsequently authorized and run live against NVIDIA Nemotron,
 producing `CandidateMemory` version 1 (id=6, status `NEEDS_REVIEW`). A full read/write review
@@ -317,11 +321,35 @@ duplicate-grouping fallback for every claim type, and activation validation stre
 on any unresolved chunk attempt, any open conflict, or zero employment coverage (overridable only
 by an explicit, visible operator flag). **Revision 1 (v1/id=6) itself is preserved exactly as
 built, never activated, and not further edited** -- it remains valuable audit evidence of both
-defects. Recovery is a fresh, independent revision 2, built via
-`bootstrap_candidate_memory --force-reextract` (re-processes all four sources from scratch;
-inherits nothing from revision 1). As of this writing, only a `--dry-run --force-reextract`
-preview has been run (zero provider calls, zero writes) -- the real force-reextract build has not
-been authorized/run.
+defects.
+
+Recovery did not use `--force-reextract` (which would re-process all four sources from scratch,
+inheriting nothing from revision 1). Instead, revision 2 (v2/id=7) was recovered from its own
+original truncated chunks via three successive rounds of targeted, bounded recovery, each adding
+one deterministic tier only after the previous one proved insufficient, never raising
+`max_output_tokens` past a model-verified ceiling and never re-enabling reasoning:
+
+1. Recursive chunk-splitting on `finish_reason=length` down to a `MIN_SPLIT_CHUNK_LINES` floor,
+   then a further one-physical-line-per-chunk fallback once that floor still truncated (some source
+   lines are themselves entire alternate résumé-summary Markdown bullets, 600-1044 characters each).
+2. For the one remaining line that still truncated even at single-line granularity (`docs/AC/
+   AC-profile_english.md` line 37), a single manually-authorized retry at `max_output_tokens=8192`
+   (confirmed within the configured NVIDIA Nemotron model's real 16,384-token completion ceiling
+   before spending the call) -- this also still truncated.
+3. A deterministic, LLM-free sentence-boundary split of that same line (`chunking.
+   split_line_into_sentences`) into its six constituent sentences, each processed independently at
+   the normal `max_output_tokens=4096`; all six succeeded, and the entire historical failure lineage
+   for that line was marked `SUPERSEDED`.
+
+After this recovery, revision 2 had zero unresolved `FAILED` chunk attempts, zero `OPEN`
+conflicts, and confirmed employment coverage. Conflict detection and safe auto-confirmation were
+re-run (both verified idempotent across repeated runs) and produced no duplicate conflicts. Four
+`positioning_statement`-type claims (alternate résumé-summary framings, `resume_eligible=False` by
+design) remain `UNCONFIRMED` -- correctly excluded from any confirmed+resume_eligible downstream
+retrieval and correctly not an activation blocker. **Revision 2 (v2/id=7) passed activation
+validation with zero blockers and was activated on 2026-09-03** via
+`services/lifecycle.py::activate_revision` -- it is now the sole `ACTIVE` CandidateMemory; revision
+1 remains `NEEDS_REVIEW`, untouched, with `activated_at` still `None`.
 
 ## M3 verification performed (2026-09-02, pre-audit-repair baseline)
 
@@ -543,13 +571,12 @@ for any milestone through M7 as currently scoped.
 
 ## Next action
 
-M4 is implemented, committed, and verified against the `FakeAdapter`/mocked HTTP. Milestone M5
-(Agent Candidate) may proceed per `docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on
-both M3 and M4, both now complete. One operational prerequisite remains, not a code blocker: the
-real four-source Candidate Memory bootstrap has still not been run against a live provider (M3's
-live qualification calls used synthetic fixtures in rolled-back transactions only; a `--dry-run`
-preflight against the real four sources has been re-verified after both the subject_scope and
-D-017 fixes, with zero provider calls/writes).
+M4 is implemented, committed, and verified against the `FakeAdapter`/mocked HTTP. The real
+four-source Candidate Memory bootstrap has been run live against NVIDIA Nemotron, recovered, and
+activated (CandidateMemory v2/id=7 is the sole `ACTIVE` revision -- see "The real four-source
+bootstrap" section above). Milestone M5 (Agent Candidate) may now proceed per
+`docs/IMPLEMENTATION_PLAN.md`'s dependency graph -- it depends on both M3 and M4, both now complete
+with a real, activated Candidate Memory available to retrieve against. M5 has not been started.
 
 ## Maintenance rule for this file
 

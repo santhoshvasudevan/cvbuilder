@@ -267,12 +267,17 @@ graph is not an instruction to parallelize coding, only an accurate statement of
     `ACTIVE` revision directly;
   - a revision with a failing provenance validation (`MemoryClaimSupport` quotation/hash mismatch)
     or failing classification/eligibility validation cannot be activated until fixed.
-  These are acceptance criteria to build toward in M3 — none of them are implemented yet.
+  These acceptance criteria are now implemented and verified — see `services/lifecycle.py` and
+  `docs/REQUIREMENT_TRACEABILITY.md` (MEM-018/019/020).
 - **Verification**: `manage.py test candidate_memory` passing; manual walkthrough — run the
   bootstrap command against the three real committed files, review the resulting claims,
   conflicts, and build summary in the UI, resolve at least one conflict, activate the revision,
   regenerate the snapshot, then create a second revision via one operator update and confirm
-  unchanged content was reused.
+  unchanged content was reused. **Performed for real, not only as a fixture walkthrough**: the real
+  four-source bootstrap was run live against NVIDIA Nemotron, producing revision 1 (id=6,
+  preserved as audit evidence, never activated) and, after chunk/sentence-level recovery of every
+  truncated chunk, revision 2 (id=7) — activated on 2026-09-03 as the sole `ACTIVE` CandidateMemory
+  (see `docs/CURRENT_STATE.md`).
 - **Completion evidence**: passing tests + a recorded manual walkthrough note in
   `docs/CURRENT_STATE.md`.
 - **Risks**: memory-build/classification prompt quality (correctly separating evidence from
