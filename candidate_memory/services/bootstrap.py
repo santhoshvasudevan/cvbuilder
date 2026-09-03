@@ -165,6 +165,7 @@ def _record_chunk_attempt(
     status: str,
     error_category: str = "",
     llm_call_log: LLMCallLog | None,
+    attempt_number: int = 1,
 ) -> None:
     ChunkExtractionAttempt.objects.create(
         candidate_memory=new_revision,
@@ -175,6 +176,7 @@ def _record_chunk_attempt(
         status=status,
         error_category=error_category,
         llm_call_log=llm_call_log,
+        attempt_number=attempt_number,
     )
 
 
@@ -187,6 +189,8 @@ def _process_chunk_with_recovery(
     new_revision: CandidateMemory,
     build_summary: dict,
     depth: int = 0,
+    attempt_number: int = 1,
+    call_budget: dict | None = None,
 ) -> None:
     """Extracts one chunk, recursively halving and retrying *only* on a `finish_reason=length`
     truncation, bounded by `MAX_SPLIT_DEPTH`/`chunking.MIN_SPLIT_CHUNK_LINES` (Candidate Memory
@@ -198,7 +202,30 @@ def _process_chunk_with_recovery(
     anything in the first place; splitting can never duplicate an already-stored claim. Every
     attempt -- success, unresolved failure, or superseded-by-split -- gets exactly one
     `ChunkExtractionAttempt` row.
+
+    `attempt_number` distinguishes a genuine retry of the *same* line range (incremented by the
+    caller -- see `retry_failed_chunks`) from a range newly created by splitting (always 1, since
+    it has never been attempted before). `call_budget`, when given, is a shared, mutable
+    `{"remaining": N}` dict enforcing a hard cap on live provider calls across an entire retry
+    pass (targeted recovery, 2026-09-03) -- once exhausted, remaining chunks are recorded FAILED
+    with `error_category="BUDGET_EXHAUSTED"` *without* ever calling the provider again; `None`
+    means unlimited, which is what a normal full build still uses.
     """
+    if call_budget is not None and call_budget["remaining"] <= 0:
+        _record_chunk_attempt(
+            new_revision=new_revision,
+            source_document=source_document,
+            chunk=chunk,
+            status=ChunkExtractionAttempt.Status.FAILED,
+            error_category="BUDGET_EXHAUSTED",
+            llm_call_log=None,
+            attempt_number=attempt_number,
+        )
+        build_summary["extraction_errors"] += 1
+        return
+    if call_budget is not None:
+        call_budget["remaining"] -= 1
+
     before_id = _latest_memory_build_call_log_id()
     result = extract_chunk(chunk, source_role=source_role, language=language)
     call_log = (
@@ -222,6 +249,7 @@ def _process_chunk_with_recovery(
             status=ChunkExtractionAttempt.Status.SUPERSEDED,
             error_category=result.error.category.value,
             llm_call_log=call_log,
+            attempt_number=attempt_number,
         )
         for sub_chunk in split:
             _process_chunk_with_recovery(
@@ -232,6 +260,7 @@ def _process_chunk_with_recovery(
                 new_revision=new_revision,
                 build_summary=build_summary,
                 depth=depth + 1,
+                call_budget=call_budget,
             )
         return
 
@@ -245,6 +274,7 @@ def _process_chunk_with_recovery(
             status=ChunkExtractionAttempt.Status.FAILED,
             error_category=result.error.category.value,
             llm_call_log=call_log,
+            attempt_number=attempt_number,
         )
         build_summary["extraction_errors"] += 1
         return
@@ -255,6 +285,7 @@ def _process_chunk_with_recovery(
         chunk=chunk,
         status=ChunkExtractionAttempt.Status.SUCCESS,
         llm_call_log=call_log,
+        attempt_number=attempt_number,
     )
     for item in result.content.items:
         try:
@@ -268,6 +299,116 @@ def _process_chunk_with_recovery(
             build_summary["claims_extracted"] += 1
         else:
             build_summary["rules_extracted"] += 1
+
+
+@dataclasses.dataclass
+class ChunkRetrySummary:
+    failed_before: int
+    live_calls_made: int
+    recovered: int
+    still_failed: int
+    claims_extracted: int
+    rules_extracted: int
+    extraction_errors: int
+
+
+def retry_failed_chunks(candidate_memory: CandidateMemory, *, max_live_calls: int) -> ChunkRetrySummary:
+    """Targeted recovery (2026-09-03): retries only the currently-`FAILED`
+    `ChunkExtractionAttempt` rows for one *existing* revision, reconstructing each exact chunk
+    from the source document's own immutable content at the attempt's stored line range -- never
+    a full bootstrap re-run, never touching any other revision. Each retry reuses the same bounded
+    recursive-split recovery as a real build (`_process_chunk_with_recovery`), so reasoning stays
+    disabled and `max_output_tokens` stays at its configured value throughout.
+
+    Bounded by `max_live_calls`, a hard cap on real provider calls across this entire pass --
+    enforced via a shared `call_budget` dict threaded through every (possibly recursive) chunk
+    attempt, so a single retry's own splitting can never blow through the cap either. Once
+    exhausted, remaining un-retried `FAILED` attempts are left exactly as they already are.
+
+    A retried attempt's row is marked `SUPERSEDED` only once every new attempt its retry produced
+    (including any further splits) reaches a terminal state with zero remaining `FAILED` leaves --
+    i.e. only after a genuinely successful replacement. If the retry itself also fails (with or
+    without splitting), the original row is left untouched, still `FAILED` -- never deleted, never
+    silently reinterpreted, so attempt lineage stays fully auditable.
+    """
+    failed_attempts = list(
+        candidate_memory.chunk_attempts.filter(status=ChunkExtractionAttempt.Status.FAILED)
+        .select_related("source_document")
+    )
+    call_budget = {"remaining": max_live_calls}
+    build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
+    recovered = 0
+    still_failed = 0
+
+    for attempt in failed_attempts:
+        if call_budget["remaining"] <= 0:
+            still_failed += 1
+            continue
+
+        source_document = attempt.source_document
+        if source_document.content_sha256 != attempt.source_content_sha256:
+            # The source changed since this attempt was recorded -- never safe to retry against
+            # different content under the same attempt's stored provenance; leave it FAILED.
+            still_failed += 1
+            continue
+
+        lines = source_document.raw_content.splitlines()
+        chunk = SourceChunk(
+            start_line=attempt.start_line,
+            end_line=attempt.end_line,
+            lines=tuple(lines[attempt.start_line - 1 : attempt.end_line]),
+        )
+        before_ids = set(
+            ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory)
+            .values_list("id", flat=True)
+        )
+        _process_chunk_with_recovery(
+            chunk,
+            source_role=source_document.source_role,
+            language=source_document.language,
+            source_document=source_document,
+            new_revision=candidate_memory,
+            build_summary=build_summary,
+            attempt_number=attempt.attempt_number + 1,
+            call_budget=call_budget,
+        )
+        after_ids = set(
+            ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory)
+            .values_list("id", flat=True)
+        )
+        new_attempts = ChunkExtractionAttempt.objects.filter(id__in=after_ids - before_ids)
+        if new_attempts.exists() and not new_attempts.filter(
+            status=ChunkExtractionAttempt.Status.FAILED
+        ).exists():
+            attempt.status = ChunkExtractionAttempt.Status.SUPERSEDED
+            attempt.save()
+            recovered += 1
+        else:
+            still_failed += 1
+
+    candidate_memory.refresh_from_db()
+    summary = dict(candidate_memory.build_summary)
+    summary["claims_extracted"] = summary.get("claims_extracted", 0) + build_summary["claims_extracted"]
+    summary["rules_extracted"] = summary.get("rules_extracted", 0) + build_summary["rules_extracted"]
+    summary["extraction_errors"] = summary.get("extraction_errors", 0) + build_summary["extraction_errors"]
+    summary["chunk_attempts_failed"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.FAILED
+    ).count()
+    summary["chunk_attempts_superseded"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.SUPERSEDED
+    ).count()
+    candidate_memory.build_summary = summary
+    candidate_memory.save()
+
+    return ChunkRetrySummary(
+        failed_before=len(failed_attempts),
+        live_calls_made=max_live_calls - call_budget["remaining"],
+        recovered=recovered,
+        still_failed=still_failed,
+        claims_extracted=build_summary["claims_extracted"],
+        rules_extracted=build_summary["rules_extracted"],
+        extraction_errors=build_summary["extraction_errors"],
+    )
 
 
 def build_revision_from_sources(

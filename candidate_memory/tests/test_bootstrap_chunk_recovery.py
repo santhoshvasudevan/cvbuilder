@@ -312,3 +312,106 @@ class ForceReextractTests(TestCase):
             )
         self.assertEqual(rev.status, CandidateMemory.Status.NEEDS_REVIEW)
         self.assertEqual(rev.build_summary["sources_processed"], 1)
+
+
+class RetryFailedChunksTests(TestCase):
+    """Targeted recovery (2026-09-03): retries only currently-FAILED attempts of one existing
+    revision, using the exact stored source content/hash/line-range -- never a full rebuild."""
+
+    def _make_failed_attempt(self, rev, source, *, start_line, end_line, attempt_number=1):
+        return ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source,
+            source_content_sha256=source.content_sha256,
+            start_line=start_line, end_line=end_line,
+            status=ChunkExtractionAttempt.Status.FAILED, error_category="TIMEOUT",
+            attempt_number=attempt_number,
+        )
+
+    def test_retry_uses_stored_source_content_hash_and_line_range(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        self._make_failed_attempt(rev, source, start_line=3, end_line=7)
+
+        seen_chunks = []
+
+        def side_effect(chunk_arg, **kwargs):
+            seen_chunks.append((chunk_arg.start_line, chunk_arg.end_line, chunk_arg.lines))
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_failed_chunks(rev, max_live_calls=40)
+
+        self.assertEqual(summary.failed_before, 1)
+        self.assertEqual(summary.recovered, 1)
+        self.assertEqual(summary.still_failed, 0)
+        self.assertEqual(summary.live_calls_made, 1)
+        self.assertEqual(seen_chunks, [(3, 7, ("line 3", "line 4", "line 5", "line 6", "line 7"))])
+
+    def test_recovered_attempt_marks_original_superseded_only_after_success(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        original = self._make_failed_attempt(rev, source, start_line=1, end_line=10)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _success_result(),
+        ):
+            bootstrap_service.retry_failed_chunks(rev, max_live_calls=40)
+
+        original.refresh_from_db()
+        self.assertEqual(original.status, ChunkExtractionAttempt.Status.SUPERSEDED)
+
+    def test_still_failing_retry_leaves_the_original_attempt_failed_not_superseded(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        original = self._make_failed_attempt(rev, source, start_line=1, end_line=10)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _truncation_result(),
+        ):
+            summary = bootstrap_service.retry_failed_chunks(rev, max_live_calls=40)
+
+        original.refresh_from_db()
+        self.assertEqual(original.status, ChunkExtractionAttempt.Status.FAILED)
+        self.assertEqual(summary.recovered, 0)
+        self.assertEqual(summary.still_failed, 1)
+
+    def test_live_call_budget_is_enforced_and_never_exceeded(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        for i in range(5):
+            self._make_failed_attempt(rev, source, start_line=1, end_line=10, attempt_number=i + 1)
+
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_failed_chunks(rev, max_live_calls=3)
+
+        self.assertLessEqual(call_count["n"], 3)
+        self.assertEqual(summary.live_calls_made, 3)
+        self.assertEqual(summary.recovered, 3)
+        self.assertEqual(summary.still_failed, 2)
+
+    def test_retry_never_touches_a_different_revision(self):
+        other_rev = make_revision()
+        other_source = make_source(other_rev, raw_content="untouched\n")
+        self._make_failed_attempt(other_rev, other_source, start_line=1, end_line=1)
+
+        rev = make_revision()
+        source = make_source(rev, raw_content="line 1\nline 2\n")
+        self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _success_result(),
+        ):
+            bootstrap_service.retry_failed_chunks(rev, max_live_calls=40)
+
+        self.assertEqual(
+            other_rev.chunk_attempts.filter(status=ChunkExtractionAttempt.Status.FAILED).count(), 1
+        )
