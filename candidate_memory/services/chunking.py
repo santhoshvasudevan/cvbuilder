@@ -21,6 +21,13 @@ import dataclasses
 DEFAULT_CHUNK_LINES = 80
 DEFAULT_MAX_CHUNK_CHARS = 8000
 
+# Candidate Memory recovery (2026-09-03): the smallest a truncation-triggered split is ever
+# allowed to shrink a chunk to. Below this, splitting further stops being a meaningful recovery
+# strategy (a handful of lines truncating at 4096 output tokens signals a genuine
+# per-item/model-behavior problem, not a chunk-size problem) -- the caller must fail closed
+# rather than split forever.
+MIN_SPLIT_CHUNK_LINES = 5
+
 
 @dataclasses.dataclass(frozen=True)
 class SourceChunk:
@@ -83,6 +90,31 @@ def chunk_source(
 
     flush()
     return chunks
+
+
+def split_chunk_in_half(chunk: SourceChunk) -> tuple[SourceChunk, SourceChunk] | None:
+    """Splits `chunk` into two smaller `SourceChunk`s by line count, each preserving its own
+    original-document line numbers exactly (provenance is never affected by how a chunk was
+    split -- `storage.py::_verify_quote_at_lines` always re-derives from the source document's
+    own immutable content at the stated lines, never from a chunk's rendered text).
+
+    Returns `None` when `chunk` is already at or below `MIN_SPLIT_CHUNK_LINES` and cannot be
+    safely split further -- the caller must then fail closed rather than split forever.
+    """
+    if len(chunk.lines) <= MIN_SPLIT_CHUNK_LINES:
+        return None
+    midpoint = len(chunk.lines) // 2
+    first = SourceChunk(
+        start_line=chunk.start_line,
+        end_line=chunk.start_line + midpoint - 1,
+        lines=chunk.lines[:midpoint],
+    )
+    second = SourceChunk(
+        start_line=chunk.start_line + midpoint,
+        end_line=chunk.end_line,
+        lines=chunk.lines[midpoint:],
+    )
+    return first, second
 
 
 def render_chunk_for_prompt(chunk: SourceChunk) -> str:

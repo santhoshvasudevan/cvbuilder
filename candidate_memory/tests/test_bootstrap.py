@@ -79,7 +79,7 @@ class BootstrapFileBasedTests(TestCase):
             rev1 = build_revision([spec])
         claim = MemoryClaim.objects.get(candidate_memory=rev1)
         lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev1)
+        lifecycle_service.activate_revision(rev1, acknowledge_zero_employment_coverage=True)
 
         calls_before_rerun = LLMCallLog.objects.count()
         with scripted_extraction(_ONE_ITEM_RESPONSE):
@@ -97,7 +97,7 @@ class BootstrapFileBasedTests(TestCase):
             rev1 = build_revision([spec])
         claim = MemoryClaim.objects.get(candidate_memory=rev1)
         lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev1)
+        lifecycle_service.activate_revision(rev1, acknowledge_zero_employment_coverage=True)
 
         calls_before_rerun = LLMCallLog.objects.count()
         path.write_text("Built the Ford integration.\nAlso led a new initiative.\n", encoding="utf-8")
@@ -113,7 +113,7 @@ class BootstrapFileBasedTests(TestCase):
             rev1 = build_revision([spec])
         claim = MemoryClaim.objects.get(candidate_memory=rev1)
         lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev1)
+        lifecycle_service.activate_revision(rev1, acknowledge_zero_employment_coverage=True)
 
         with scripted_extraction(_ONE_ITEM_RESPONSE):
             build_revision([spec])
@@ -137,7 +137,7 @@ class BootstrapOperatorTextUpdateTests(TestCase):
             rev1 = build_revision([spec])
         claim = MemoryClaim.objects.get(candidate_memory=rev1)
         lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev1)
+        lifecycle_service.activate_revision(rev1, acknowledge_zero_employment_coverage=True)
 
         new_item_response = {
             "items": [

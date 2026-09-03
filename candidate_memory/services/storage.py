@@ -8,7 +8,7 @@ import uuid
 from ..models import CandidateMemory, CandidateRule, MemoryClaim, MemoryClaimSupport, MemorySourceDocument
 from ..schemas import ContentPlane, ExtractedItem
 from .classification import validate_item
-from .comparable_values import COMPARABLE_CLAIM_TYPES, comparison_payload_for_item
+from .comparable_values import comparison_payload_for_item
 from .quote_recovery import recover_quote
 from .subject_scope import normalize_subject_scope
 
@@ -18,19 +18,19 @@ class ProvenanceError(Exception):
 
 
 def duplicate_group_key(item: ExtractedItem) -> str:
+    """Candidate Memory recovery (2026-09-03): no claim_type -- comparable or not -- ever falls
+    back to a coarse `subject_scope::claim_type` merge key. The real bootstrap of revision 1
+    proved this fallback conflates genuinely distinct facts that merely happen to share a scope
+    and type: ~30 distinct "responsibility" bullets, two distinct certifications, and two distinct
+    degrees were each silently merged into a single claim, with all but the first item's own text
+    surviving only as an anonymous extra support quote. Only an explicit `duplicate_group_hint`
+    (the model's own, deliberate "these are the same underlying fact across languages/passages"
+    signal, e.g. for an EN/DE restatement of one achievement) may merge two items -- there is no
+    other identity test here, and in particular never a fuzzy/semantic-similarity one.
+    """
     if item.duplicate_group_hint:
         return item.duplicate_group_hint.strip().lower().replace(" ", "_")
-    if item.claim_type in COMPARABLE_CLAIM_TYPES:
-        # Audit repair: two employment_dates/employment_location/language_proficiency items
-        # about the same subject_scope are not necessarily the same fact restated -- they may be
-        # genuinely different candidate values (e.g. a stale corpus date range vs. a corrected
-        # operator-update date range) that the conflict detector needs as *separate* MemoryClaim
-        # rows to compare. Falling back to the coarse scope+type key here would silently merge
-        # them into one claim's supports before conflict detection ever runs, which is exactly the
-        # kind of hidden bug the fixture-only tests never caught. Only an explicit
-        # duplicate_group_hint (checked above) may say "these are the same underlying fact."
-        return f"__no_fallback_merge__::{uuid.uuid4()}"
-    return f"{(item.subject_scope or '').strip().lower()}::{(item.claim_type or '').strip().lower()}"
+    return f"__no_fallback_merge__::{uuid.uuid4()}"
 
 
 def _verify_quote_at_lines(

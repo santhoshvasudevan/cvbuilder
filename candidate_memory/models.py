@@ -320,6 +320,55 @@ class MemoryClaimSupport(_RevisionScopedModel):
         )
 
 
+class ChunkExtractionAttempt(_RevisionScopedModel):
+    """Durable per-chunk extraction-attempt audit trail (Candidate Memory recovery, 2026-09-03).
+
+    Every attempt to extract one bounded chunk -- or sub-chunk, after a `finish_reason=length`
+    truncation split -- through the `MEMORY_BUILD` stage gets exactly one row here, regardless of
+    outcome. This is what lets activation validation see "was every part of every source document
+    actually, successfully covered" without trying to re-derive it from `LLMCallLog` (which has no
+    source/line reference at all) or from stored claims (which say nothing about a chunk that
+    produced zero claims). `FAILED` rows are unresolved and block activation; `SUCCESS` and
+    `SUPERSEDED` rows are historical/covered and never block (see `services/lifecycle.py`).
+    """
+
+    class Status(models.TextChoices):
+        SUCCESS = "SUCCESS", "Success"
+        FAILED = "FAILED", "Failed"
+        SUPERSEDED = "SUPERSEDED", "Superseded"
+
+    candidate_memory = models.ForeignKey(
+        CandidateMemory, on_delete=models.CASCADE, related_name="chunk_attempts"
+    )
+    source_document = models.ForeignKey(
+        MemorySourceDocument, on_delete=models.CASCADE, related_name="chunk_attempts"
+    )
+    source_content_sha256 = models.CharField(
+        max_length=64, editable=False,
+        help_text="Snapshot of the source document's content hash at attempt time.",
+    )
+    start_line = models.PositiveIntegerField()
+    end_line = models.PositiveIntegerField()
+    attempt_number = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=Status.choices)
+    error_category = models.CharField(max_length=40, blank=True)
+    llm_call_log = models.ForeignKey(
+        "llm_provider.LLMCallLog", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="chunk_attempts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["source_document_id", "start_line", "-created_at"]
+
+    def __str__(self) -> str:
+        filename = self.source_document.filename if self.source_document_id else "?"
+        return (
+            f"ChunkExtractionAttempt(rev={self.candidate_memory_id}, {filename} "
+            f"L{self.start_line}-{self.end_line}, {self.status})"
+        )
+
+
 class CandidateRule(_RevisionScopedModel):
     """Constraint-plane and positioning-plane content (D-015) -- never resume evidence, never
     independently sufficient to satisfy a MATCH or PARTIAL disposition."""

@@ -53,19 +53,30 @@ class BootstrapPreflightReport:
     would_make_live_call: bool
     configured_max_output_tokens: int
     max_theoretical_output_tokens: int
+    force_reextract: bool = False
 
 
-def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflightReport:
+def build_preflight_report(
+    source_specs: list[SourceSpec], *, force_reextract: bool = False
+) -> BootstrapPreflightReport:
     """Pure read: touches the filesystem (to hash/count the named source files, exactly as a real
     build would) and the database (read-only queries against existing revisions/registry rows).
     Never writes anything, never calls `llm_provider.adapters.get_adapter_for_stage`.
+
+    `force_reextract` mirrors `services.bootstrap.build_revision_from_sources`'s own flag exactly
+    (Candidate Memory recovery, 2026-09-03): when set, every source is reported as needing full
+    reprocessing regardless of any existing revision's content -- never treated as "reuse
+    unchanged" -- so the dry-run output honestly matches what the real force-reextract run would
+    do (all four sources processed again, nothing carried forward).
     """
     existing_working = current_working_revision()
     existing_label = (
         f"v{existing_working.version} ({existing_working.status})" if existing_working else None
     )
 
-    if existing_working is not None:
+    if force_reextract:
+        old_by_key: dict = {}
+    elif existing_working is not None:
         old_by_key = {s.logical_source_key: s for s in existing_working.source_documents.all()}
     else:
         active = current_active_revision()
@@ -124,7 +135,7 @@ def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflight
     max_theoretical_output_tokens = configured_max_output_tokens * total_chunks
 
     would_make_live_call = (
-        existing_working is None
+        (force_reextract or existing_working is None)
         and stage_configured
         and provider_type != LLMProvider.ProviderType.FAKE
         and credential_configured
@@ -146,4 +157,5 @@ def build_preflight_report(source_specs: list[SourceSpec]) -> BootstrapPreflight
         would_make_live_call=would_make_live_call,
         configured_max_output_tokens=configured_max_output_tokens,
         max_theoretical_output_tokens=max_theoretical_output_tokens,
+        force_reextract=force_reextract,
     )

@@ -290,6 +290,39 @@ Fixed:
   `AC-OPERATOR_FACT_RESOLUTIONS.md`'s confirmed wrapping style). The real four-source bootstrap has
   still **not** been run -- only dry-run/synthetic/rolled-back qualification calls.
 
+## The real four-source bootstrap: revision 1 (v1/id=6) -- completed, NOT suitable for activation
+
+The real four-source bootstrap was subsequently authorized and run live against NVIDIA Nemotron,
+producing `CandidateMemory` version 1 (id=6, status `NEEDS_REVIEW`). A full read/write review
+(applying only the application's own `services/lifecycle.py` actions -- no raw SQL) resolved its
+one genuine conflict (a German B1-attained/B2-in-progress false-positive split across two claims,
+merged onto one) and corrected one misclassified claim. That review also surfaced two further
+defects, neither fixable by claim-level review actions alone:
+
+- **65% chunk truncation**: 39 of 60 chunks failed with `finish_reason=length` at the (then-fixed)
+  `max_output_tokens=4096` ceiling, concentrated in the bulk corpus (primary/English/German), and
+  the operator-approved Ford/Continental/Maruti employment-history facts are **entirely absent**
+  from the extracted claims as a result (only a corrected, still-location-less Ambigai
+  legal-employer-identity claim survives).
+- **Coarse duplicate-grouping conflation** (pre-existing since M3, not introduced this session):
+  `storage.duplicate_group_key()`'s `subject_scope::claim_type` fallback silently merged distinct
+  facts sharing a scope+type -- one `responsibility` claim ended up with 39 supports representing
+  ~30 different actual responsibilities; one `education` and one `certification` claim each
+  silently merged two genuinely distinct degrees/certifications.
+
+**Both defects are now fixed** (D-018): bounded recursive chunk-splitting on truncation (never
+raising `max_output_tokens`, never re-enabling reasoning, only shrinking chunk size, bounded and
+fail-closed), a durable `ChunkExtractionAttempt` audit trail, removal of the coarse
+duplicate-grouping fallback for every claim type, and activation validation strengthened to block
+on any unresolved chunk attempt, any open conflict, or zero employment coverage (overridable only
+by an explicit, visible operator flag). **Revision 1 (v1/id=6) itself is preserved exactly as
+built, never activated, and not further edited** -- it remains valuable audit evidence of both
+defects. Recovery is a fresh, independent revision 2, built via
+`bootstrap_candidate_memory --force-reextract` (re-processes all four sources from scratch;
+inherits nothing from revision 1). As of this writing, only a `--dry-run --force-reextract`
+preview has been run (zero provider calls, zero writes) -- the real force-reextract build has not
+been authorized/run.
+
 ## M3 verification performed (2026-09-02, pre-audit-repair baseline)
 
 - `manage.py makemigrations --check` reports no pending model changes; `manage.py migrate` applies

@@ -513,3 +513,65 @@ under-represented in a real bootstrap.
   resolved. Not treated as blocking the M3 qualification's own pass/fail verdict, since it is
   orthogonal to the subject_scope/legal-employer semantic-completeness defect that qualification
   round was scoped to fix (operator decision, 2026-09-02).
+
+## D-018: Candidate Memory recovery -- durable chunk-attempt tracking, bounded truncation
+## recovery, coarse-duplicate-grouping fix, and strengthened activation validation
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-03) -- directed and approved in the same
+  session, following a full read-only review of the real revision-1 bootstrap (v1/id=6). That
+  review found `max_output_tokens=4096` truncated 39 of 60 chunks (65%), and separately found that
+  the coarse `subject_scope::claim_type` duplicate-grouping fallback (pre-existing since M3, not
+  introduced by this session) had silently merged distinct facts sharing a scope+type -- most
+  visibly ~30 distinct "responsibility" bullets, two distinct certifications, and two distinct
+  degrees collapsed into single claims. Revision 1 (v1) is kept, unmodified and never activated,
+  as audit evidence of both defects; recovery happens via a fresh, independent revision 2.
+- **Requirement**: extends D-003 (provenance), D-015 (bootstrap mechanism/activation rules), and
+  the M3 audit-repair's original (narrower) duplicate-grouping fix.
+- **Decision, four parts**:
+  1. **Durable per-chunk extraction-attempt tracking** (`ChunkExtractionAttempt`, new model):
+     every chunk or sub-chunk attempt gets one row -- revision, source document, source content
+     hash, start/end lines, attempt number, status (`SUCCESS`/`FAILED`/`SUPERSEDED`), sanitized
+     error category, and the associated `LLMCallLog` row where one exists. This is what lets
+     activation validation see "was every part of every source actually covered" without
+     re-deriving it from `LLMCallLog` (no source/line reference) or stored claims (silent about a
+     chunk that produced zero claims).
+  2. **Bounded recursive truncation recovery**: a `finish_reason=length` failure now triggers
+     splitting the chunk in half (preserving each half's own original-document line numbers
+     exactly) and retrying each half independently, recursively, bounded by
+     `MAX_SPLIT_DEPTH=4` and `chunking.MIN_SPLIT_CHUNK_LINES=5` -- reasoning stays disabled and
+     `max_output_tokens` stays at its configured value throughout; only chunk size shrinks. A
+     minimum-size chunk that still truncates fails closed (`FAILED`, blocks activation) rather
+     than splitting forever or silently dropping the gap. A truncated response never has any
+     parseable content, so a split chunk can never have already stored anything -- splitting can
+     never duplicate a claim.
+  3. **Coarse duplicate-grouping fix, extended to all claim types**: `services/storage.py::
+     duplicate_group_key` no longer has *any* scope+type fallback, for comparable or non-comparable
+     claim types alike -- only an explicit `duplicate_group_hint` (the model's own "same underlying
+     fact across languages/passages" signal) merges two items. This is deliberately conservative
+     (more, smaller claims, never a fuzzy/semantic identity test) and directly fixes the
+     responsibility/certification/degree conflation found in revision 1.
+  4. **Strengthened activation validation** (`services/lifecycle.py::activation_blockers`): (a) any
+     unresolved (`FAILED`) `ChunkExtractionAttempt` now blocks activation outright --
+     `SUCCESS`/`SUPERSEDED` never block; (b) **every** `OPEN` `MemoryConflict` now blocks activation
+     outright, superseding D-015's earlier allowance that let one through (with only a warning) as
+     long as its claims stayed ineligible -- that allowance is retired, not merely narrowed; (c)
+     zero `CONFIRMED` `employment_dates`/`employment_location` coverage now blocks activation unless
+     the caller explicitly passes `acknowledge_zero_employment_coverage=True` to
+     `activation_blockers()`/`activate_revision()` -- a visible, intentional operator override,
+     never a silent default.
+  5. **Recovery/force-reprocess path**: `bootstrap_candidate_memory --force-reextract` (with
+     `--dry-run` for preview) builds a completely independent new revision, bypassing the existing-
+     working-revision guard *without* abandoning, editing, or reading from whatever revision
+     already exists -- every supplied source is reprocessed from scratch regardless of content-hash
+     match, and nothing is ever carried forward, so a prior revision's defects can never leak into
+     the new one via carry-forward.
+- **Alternative considered for (4b)**: keep D-015's original "open conflict + ineligible claims is
+  only a warning" allowance and rely solely on the new employment-coverage/chunk-attempt blockers.
+  Not adopted -- the real bootstrap's own German B1/B2 false-positive conflict (see D-017's
+  companion review) showed that "warning only" is too easy for an operator to click past without
+  actually reading; a hard block forces an explicit resolve/dismiss action first.
+- **Consequence**: `candidate_memory.0004_chunkextractionattempt` migration adds the new model.
+  `docs/CURRENT_STATE.md` records revision 1 (v1/id=6) as a completed-but-not-activatable audit
+  artifact. Existing tests exercising activation without employment coverage now pass
+  `acknowledge_zero_employment_coverage=True` explicitly (recorded as an intentional test update,
+  not a weakening, since the check itself is new and correctly firing).

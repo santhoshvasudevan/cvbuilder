@@ -59,11 +59,17 @@ class DuplicateGroupKeyTests(TestCase):
         item = _evidence_item(duplicate_group_hint="  Ford Solutions Architect Role  ")
         self.assertEqual(duplicate_group_key(item), "ford_solutions_architect_role")
 
-    def test_fallback_key_from_scope_and_type(self):
+    def test_no_hint_never_produces_a_stable_coarse_fallback_key(self):
+        """Candidate Memory recovery (2026-09-03): without an explicit duplicate_group_hint, two
+        items sharing subject_scope+claim_type must never be treated as the same fact -- each
+        call gets its own unique key, so distinct facts sharing a scope/type are never merged."""
         item = _evidence_item(
             duplicate_group_hint=None, subject_scope="Ford Motor Company", claim_type="Employment"
         )
-        self.assertEqual(duplicate_group_key(item), "ford motor company::employment")
+        key_a = duplicate_group_key(item)
+        key_b = duplicate_group_key(item)
+        self.assertNotEqual(key_a, key_b)
+        self.assertNotEqual(key_a, "ford motor company::employment")
 
 
 class ClaimStorageRoutingTests(TestCase):

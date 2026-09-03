@@ -67,10 +67,29 @@ class Command(BaseCommand):
                 "database writes. Never prints source excerpts or candidate content."
             ),
         )
+        parser.add_argument(
+            "--force-reextract",
+            action="store_true",
+            default=False,
+            help=(
+                "Recovery path (2026-09-03): build a completely independent new revision, "
+                "reprocessing every supplied source from scratch regardless of content-hash "
+                "match or any existing revision's claims -- never reuses/carries forward "
+                "anything, and never touches, edits, or abandons an existing BUILDING/"
+                "NEEDS_REVIEW/ACTIVE revision. Combine with --dry-run to preview only."
+            ),
+        )
 
-    def _print_dry_run(self, specs: list[SourceSpec]) -> None:
-        report = build_preflight_report(specs)
+    def _print_dry_run(self, specs: list[SourceSpec], *, force_reextract: bool) -> None:
+        report = build_preflight_report(specs, force_reextract=force_reextract)
         self.stdout.write(self.style.WARNING("DRY RUN -- no provider call, no database write."))
+        if force_reextract:
+            self.stdout.write(
+                self.style.WARNING(
+                    "FORCE RE-EXTRACT: all sources below will be processed again from scratch, "
+                    "regardless of unchanged status. Any existing revision will NOT be modified."
+                )
+            )
         self.stdout.write(
             f"Existing working revision: {report.existing_working_revision or 'none'}"
         )
@@ -156,11 +175,15 @@ class Command(BaseCommand):
                 raise CommandError(f"Source file does not exist: {spec.path}")
 
         if options["dry_run"]:
-            self._print_dry_run(specs)
+            self._print_dry_run(specs, force_reextract=options["force_reextract"])
             return
 
         try:
-            revision = build_revision(specs, abandon_existing=options["abandon_existing"])
+            revision = build_revision(
+                specs,
+                abandon_existing=options["abandon_existing"],
+                force_reextract=options["force_reextract"],
+            )
         except ExistingWorkingRevisionError as exc:
             raise CommandError(str(exc)) from exc
         except Exception as exc:

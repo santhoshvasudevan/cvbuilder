@@ -179,6 +179,11 @@ class ActivationFlowTests(TestCase):
         claim = make_claim(
             rev, canonical_text_en="Built the Ford integration.", resume_eligible=True,
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
+            claim_type="employment_dates",
+            structured_value={
+                "start_year": 2018, "start_month": None, "end_status": "ONGOING",
+                "end_year": None, "end_month": None, "precision": "YEAR",
+            },
         )
         MemoryClaimSupport.objects.create(
             memory_claim=claim, memory_source_document=source,

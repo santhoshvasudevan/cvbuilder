@@ -24,16 +24,25 @@ import datetime
 import hashlib
 from pathlib import Path
 
-from ..models import CandidateMemory, MemoryClaim, MemorySourceDocument
+from llm_provider.errors import LLMErrorCategory
+from llm_provider.models import LLMCallLog, StageModelAssignment
+
+from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, MemorySourceDocument
 from . import revision as revision_service
 from . import storage as storage_service
-from .chunking import chunk_source
+from .chunking import SourceChunk, chunk_source, split_chunk_in_half
 from .comparable_values import COMPARABLE_CLAIM_TYPES, has_valid_structured_value
 from .confirmation import evaluate_auto_confirmation
 from .conflicts import detect_and_resolve_conflicts
 from .extraction import extract_chunk
 
 SNAPSHOT_FILENAME = "CANDIDATE_MEMORY_SNAPSHOT.md"
+
+# Candidate Memory recovery (2026-09-03): how many times a single top-level chunk may be
+# recursively halved in response to a finish_reason=length truncation before giving up and
+# failing closed (see chunking.MIN_SPLIT_CHUNK_LINES for the companion size bound -- whichever
+# bound is hit first stops the recursion).
+MAX_SPLIT_DEPTH = 4
 
 
 class SnapshotImportRefusedError(Exception):
@@ -80,7 +89,9 @@ def _read_source_from_spec(spec: SourceSpec) -> ReadSource:
     )
 
 
-def build_revision(source_specs: list[SourceSpec], *, abandon_existing: bool = False) -> CandidateMemory:
+def build_revision(
+    source_specs: list[SourceSpec], *, abandon_existing: bool = False, force_reextract: bool = False
+) -> CandidateMemory:
     for spec in source_specs:
         if spec.path.name == SNAPSHOT_FILENAME:
             raise SnapshotImportRefusedError(
@@ -88,7 +99,9 @@ def build_revision(source_specs: list[SourceSpec], *, abandon_existing: bool = F
                 "generated reference, never evidence (D-015)."
             )
     return build_revision_from_sources(
-        [_read_source_from_spec(spec) for spec in source_specs], abandon_existing=abandon_existing
+        [_read_source_from_spec(spec) for spec in source_specs],
+        abandon_existing=abandon_existing,
+        force_reextract=force_reextract,
     )
 
 
@@ -135,8 +148,130 @@ def build_revision_from_operator_text(
     return build_revision_from_sources([read_source], abandon_existing=abandon_existing)
 
 
+def _latest_memory_build_call_log_id() -> int:
+    last = (
+        LLMCallLog.objects.filter(stage=StageModelAssignment.Stage.MEMORY_BUILD)
+        .order_by("-id")
+        .first()
+    )
+    return last.id if last is not None else 0
+
+
+def _record_chunk_attempt(
+    *,
+    new_revision: CandidateMemory,
+    source_document: MemorySourceDocument,
+    chunk: SourceChunk,
+    status: str,
+    error_category: str = "",
+    llm_call_log: LLMCallLog | None,
+) -> None:
+    ChunkExtractionAttempt.objects.create(
+        candidate_memory=new_revision,
+        source_document=source_document,
+        source_content_sha256=source_document.content_sha256,
+        start_line=chunk.start_line,
+        end_line=chunk.end_line,
+        status=status,
+        error_category=error_category,
+        llm_call_log=llm_call_log,
+    )
+
+
+def _process_chunk_with_recovery(
+    chunk: SourceChunk,
+    *,
+    source_role: str,
+    language: str,
+    source_document: MemorySourceDocument,
+    new_revision: CandidateMemory,
+    build_summary: dict,
+    depth: int = 0,
+) -> None:
+    """Extracts one chunk, recursively halving and retrying *only* on a `finish_reason=length`
+    truncation, bounded by `MAX_SPLIT_DEPTH`/`chunking.MIN_SPLIT_CHUNK_LINES` (Candidate Memory
+    recovery, 2026-09-03) -- reasoning stays disabled and `max_output_tokens` stays at its
+    configured value throughout; only the chunk's own size shrinks. A truncated response never
+    has any parseable content (JSON parsing fails on incomplete output, which is exactly what
+    makes it classify as `finish_reason=length` in the first place -- see
+    `llm_provider/adapters/openai.py`), so a chunk that gets split was never able to store
+    anything in the first place; splitting can never duplicate an already-stored claim. Every
+    attempt -- success, unresolved failure, or superseded-by-split -- gets exactly one
+    `ChunkExtractionAttempt` row.
+    """
+    before_id = _latest_memory_build_call_log_id()
+    result = extract_chunk(chunk, source_role=source_role, language=language)
+    call_log = (
+        LLMCallLog.objects.filter(stage=StageModelAssignment.Stage.MEMORY_BUILD, id__gt=before_id)
+        .order_by("id")
+        .first()
+    )
+
+    is_truncation = (
+        result.is_error
+        and result.error.category == LLMErrorCategory.CONFIGURATION
+        and "finish_reason=length" in result.error.message
+    )
+    split = split_chunk_in_half(chunk) if (is_truncation and depth < MAX_SPLIT_DEPTH) else None
+
+    if is_truncation and split is not None:
+        _record_chunk_attempt(
+            new_revision=new_revision,
+            source_document=source_document,
+            chunk=chunk,
+            status=ChunkExtractionAttempt.Status.SUPERSEDED,
+            error_category=result.error.category.value,
+            llm_call_log=call_log,
+        )
+        for sub_chunk in split:
+            _process_chunk_with_recovery(
+                sub_chunk,
+                source_role=source_role,
+                language=language,
+                source_document=source_document,
+                new_revision=new_revision,
+                build_summary=build_summary,
+                depth=depth + 1,
+            )
+        return
+
+    if result.is_error:
+        # Either not a truncation, or a truncation that has already hit the split/size bound --
+        # fail closed rather than split forever or silently drop the coverage gap.
+        _record_chunk_attempt(
+            new_revision=new_revision,
+            source_document=source_document,
+            chunk=chunk,
+            status=ChunkExtractionAttempt.Status.FAILED,
+            error_category=result.error.category.value,
+            llm_call_log=call_log,
+        )
+        build_summary["extraction_errors"] += 1
+        return
+
+    _record_chunk_attempt(
+        new_revision=new_revision,
+        source_document=source_document,
+        chunk=chunk,
+        status=ChunkExtractionAttempt.Status.SUCCESS,
+        llm_call_log=call_log,
+    )
+    for item in result.content.items:
+        try:
+            stored = storage_service.store_extracted_item(
+                item, candidate_memory=new_revision, source_document=source_document
+            )
+        except Exception:
+            build_summary["extraction_errors"] += 1
+            continue
+        if isinstance(stored, MemoryClaim):
+            build_summary["claims_extracted"] += 1
+        else:
+            build_summary["rules_extracted"] += 1
+
+
 def build_revision_from_sources(
-    read_sources: list[ReadSource], *, abandon_existing: bool = False
+    read_sources: list[ReadSource], *, abandon_existing: bool = False, force_reextract: bool = False
 ) -> CandidateMemory:
     for rs in read_sources:
         if rs.filename == SNAPSHOT_FILENAME:
@@ -145,19 +280,28 @@ def build_revision_from_sources(
                 "generated reference, never evidence (D-015)."
             )
 
-    # Audit repair: never silently create a second working revision. A caller that actually wants
-    # to discard a stuck/unwanted one must say so explicitly (abandon_existing=True), which is a
-    # deliberate, auditable action (services/revision.py::abandon_revision), not a side effect of
-    # just running the build again.
-    existing_working = revision_service.current_working_revision()
-    if existing_working is not None:
-        if not abandon_existing:
-            revision_service.require_no_working_revision()  # raises ExistingWorkingRevisionError
-        revision_service.abandon_revision(
-            existing_working, reason="Abandoned automatically: a new build was explicitly requested."
-        )
+    if force_reextract:
+        # Candidate Memory recovery (2026-09-03): deliberately build a completely independent
+        # revision, bypassing the existing-working-revision guard *without* touching whatever
+        # BUILDING/NEEDS_REVIEW/ACTIVE revision already exists -- never abandons it, never edits
+        # it, never reads its sources or claims for reuse. Every supplied source is fully
+        # reprocessed from scratch, so a prior revision's defects (e.g. incorrectly-merged
+        # claims) can never leak into this new one via carry-forward.
+        old_revision = None
+    else:
+        # Audit repair: never silently create a second working revision. A caller that actually
+        # wants to discard a stuck/unwanted one must say so explicitly (abandon_existing=True),
+        # which is a deliberate, auditable action (services/revision.py::abandon_revision), not a
+        # side effect of just running the build again.
+        existing_working = revision_service.current_working_revision()
+        if existing_working is not None:
+            if not abandon_existing:
+                revision_service.require_no_working_revision()  # raises ExistingWorkingRevisionError
+            revision_service.abandon_revision(
+                existing_working, reason="Abandoned automatically: a new build was explicitly requested."
+            )
+        old_revision = revision_service.current_active_revision()
 
-    old_revision = revision_service.current_active_revision()
     new_revision = revision_service.start_new_revision(base_revision=old_revision)
 
     supplied_by_key = {rs.logical_source_key: rs for rs in read_sources}
@@ -214,22 +358,14 @@ def build_revision_from_sources(
                 raw_content=rs.content,
             )
             for chunk in chunk_source(rs.content):
-                result = extract_chunk(chunk, source_role=rs.source_role, language=rs.language)
-                if result.is_error:
-                    build_summary["extraction_errors"] += 1
-                    continue
-                for item in result.content.items:
-                    try:
-                        stored = storage_service.store_extracted_item(
-                            item, candidate_memory=new_revision, source_document=source_document
-                        )
-                    except Exception:
-                        build_summary["extraction_errors"] += 1
-                        continue
-                    if isinstance(stored, MemoryClaim):
-                        build_summary["claims_extracted"] += 1
-                    else:
-                        build_summary["rules_extracted"] += 1
+                _process_chunk_with_recovery(
+                    chunk,
+                    source_role=rs.source_role,
+                    language=rs.language,
+                    source_document=source_document,
+                    new_revision=new_revision,
+                    build_summary=build_summary,
+                )
 
         detect_and_resolve_conflicts(new_revision)
         build_summary["conflicts_detected"] = new_revision.conflicts.count()
@@ -244,6 +380,16 @@ def build_revision_from_sources(
             for claim in new_revision.claims.filter(claim_type__in=COMPARABLE_CLAIM_TYPES)
             if not has_valid_structured_value(claim)
         )
+        # Candidate Memory recovery (2026-09-03): visible, revision-level counts of the durable
+        # per-chunk attempt trail -- FAILED is exactly what blocks activation (services/
+        # lifecycle.py); SUPERSEDED chunks were truncated but their content was fully recovered by
+        # smaller sub-chunk attempts, so they are informational only, never a blocker.
+        build_summary["chunk_attempts_failed"] = new_revision.chunk_attempts.filter(
+            status=ChunkExtractionAttempt.Status.FAILED
+        ).count()
+        build_summary["chunk_attempts_superseded"] = new_revision.chunk_attempts.filter(
+            status=ChunkExtractionAttempt.Status.SUPERSEDED
+        ).count()
     except Exception as exc:
         # A genuinely unexpected failure (DB error, missing MEMORY_BUILD stage assignment, etc.)
         # -- never leave this looking review-ready. build_summary reflects whatever progress was

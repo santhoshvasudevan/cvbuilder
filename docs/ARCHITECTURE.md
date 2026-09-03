@@ -294,16 +294,20 @@ semantics and invariants come first.
     on the revision must actually pass provenance validation (§4's `MemoryClaimSupport` checks)
     and classification validation (§8); a revision with such a failure is blocked from activation
     until fixed, same as any other `NEEDS_REVIEW` item.
-  - An **unresolved `MemoryConflict` does not have to block activation of the whole revision**, as
-    long as every claim it affects remains `BLOCKED_CONFLICT` — unconfirmed and ineligible — on
-    activation. The activation UI must show the operator a clear warning that N unresolved
-    conflicts (and the claims they affect) are being excluded from this activation, not silently
-    activating around them. Once such a revision is `ACTIVE`, resolving those remaining conflicts
-    follows the same rule as any other post-activation correction: it requires the ongoing-update
-    workflow to create a new revision — the `ACTIVE` revision itself is never mutated to resolve
-    them in place.
-  - Alternatively, the operator may simply stay in `NEEDS_REVIEW` and resolve every conflict
-    before activating at all — both paths are valid; neither is mandatory.
+  - **Superseded by D-018 (2026-09-03, Candidate Memory recovery)**: this D-015 allowance ("an
+    unresolved `MemoryConflict` does not have to block activation, as long as every claim it
+    affects stays `BLOCKED_CONFLICT`") is retired. **Every `OPEN` `MemoryConflict` now blocks
+    activation outright**, regardless of the eligibility state of its involved claims — the real
+    revision-1 bootstrap showed a warning-only conflict was too easy to click past unread. The
+    operator must resolve or dismiss each conflict (`services/lifecycle.py::resolve_conflict`/
+    `dismiss_conflict`) before activating; there is no "activate with N excluded" path anymore.
+  - Activation is also now blocked by (a) any unresolved (`FAILED`) `ChunkExtractionAttempt` — a
+    durable per-chunk audit row (revision, source document, source hash, start/end lines, attempt
+    number, status `SUCCESS`/`FAILED`/`SUPERSEDED`, sanitized error category, associated
+    `LLMCallLog`) recorded for every extraction attempt, including sub-chunk attempts created by
+    recursively splitting a chunk that hit `finish_reason=length` — and (b) zero `CONFIRMED`
+    `employment_dates`/`employment_location` coverage, unless the caller explicitly passes
+    `acknowledge_zero_employment_coverage=True` as a visible operator override.
 - **Versioning** (D-002, approved; sources named by D-015): a new revision is a **snapshot +
   incremental** process, not a full reprocess, run against `base_revision`. Source documents are
   matched by immutable content hash (D-003); unchanged documents are not re-sent through

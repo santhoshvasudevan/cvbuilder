@@ -164,7 +164,7 @@ class BootstrapPartialFailureTests(TestCase):
             active = build_revision([spec])
         claim = active.claims.first()
         lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(active)
+        lifecycle_service.activate_revision(active, acknowledge_zero_employment_coverage=True)
         active.refresh_from_db()
         self.assertEqual(active.status, CandidateMemory.Status.ACTIVE)
 

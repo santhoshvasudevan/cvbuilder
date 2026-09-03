@@ -1,0 +1,314 @@
+"""Candidate Memory recovery (2026-09-03): bounded recursive chunk-splitting on a
+finish_reason=length truncation, the durable per-chunk ChunkExtractionAttempt trail, the fix to
+coarse duplicate-grouping, and the force-reextract recovery path."""
+
+from __future__ import annotations
+
+import hashlib
+from unittest import mock
+
+from django.test import SimpleTestCase, TestCase
+
+from llm_provider.errors import LLMErrorCategory, NormalizedLLMError
+from llm_provider.types import NormalizedLLMResult, TokenUsage
+
+from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, MemorySourceDocument
+from ..schemas import ChunkExtractionResult, ContentPlane, ExtractedItem, SourcePassage
+from ..services import bootstrap as bootstrap_service
+from ..services.bootstrap import ReadSource
+from ..services.chunking import SourceChunk, split_chunk_in_half
+from ..services.storage import store_extracted_item
+from .factories import make_revision, make_source, scripted_extraction
+
+
+def _truncation_result():
+    return NormalizedLLMResult(
+        error=NormalizedLLMError(
+            category=LLMErrorCategory.CONFIGURATION,
+            message="Provider truncated output at the configured token limit before producing "
+            "valid content (finish_reason=length). Raise max_output_tokens or reduce reasoning.",
+        ),
+        usage=TokenUsage(input_tokens=10, output_tokens=4096, total_tokens=4106),
+    )
+
+
+def _success_result(items=None):
+    return NormalizedLLMResult(
+        content=ChunkExtractionResult(items=items or []),
+        usage=TokenUsage(input_tokens=10, output_tokens=5, total_tokens=15),
+    )
+
+
+class SplitChunkInHalfTests(SimpleTestCase):
+    def test_splits_preserve_original_line_numbers(self):
+        chunk = SourceChunk(start_line=10, end_line=29, lines=tuple(f"line{i}" for i in range(20)))
+        first, second = split_chunk_in_half(chunk)
+        self.assertEqual((first.start_line, first.end_line), (10, 19))
+        self.assertEqual((second.start_line, second.end_line), (20, 29))
+        self.assertEqual(first.lines + second.lines, chunk.lines)
+
+    def test_returns_none_at_or_below_minimum_size(self):
+        chunk = SourceChunk(start_line=1, end_line=5, lines=tuple(f"line{i}" for i in range(5)))
+        self.assertIsNone(split_chunk_in_half(chunk))
+
+
+class RecursiveSplitOnTruncationTests(TestCase):
+    def _chunk(self, n_lines: int, start_line: int = 1) -> SourceChunk:
+        return SourceChunk(
+            start_line=start_line, end_line=start_line + n_lines - 1,
+            lines=tuple(f"line {i}" for i in range(n_lines)),
+        )
+
+    def _run(self, chunk, side_effect):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(chunk.lines) + "\n")
+        build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            bootstrap_service._process_chunk_with_recovery(
+                chunk, source_role="ENGLISH_CORPUS", language="en",
+                source_document=source, new_revision=rev, build_summary=build_summary,
+            )
+        return rev, build_summary
+
+    def test_truncation_causes_bounded_recursive_splitting_until_success(self):
+        chunk = self._chunk(20)
+
+        def side_effect(chunk_arg, **kwargs):
+            return _truncation_result() if len(chunk_arg.lines) > 5 else _success_result()
+
+        rev, build_summary = self._run(chunk, side_effect)
+
+        # 20 -> 10+10 (both truncate) -> 5+5+5+5 (all succeed): 1 + 2 SUPERSEDED, 4 SUCCESS.
+        attempts = list(ChunkExtractionAttempt.objects.filter(candidate_memory=rev))
+        self.assertEqual(len(attempts), 7)
+        self.assertEqual(
+            sum(1 for a in attempts if a.status == ChunkExtractionAttempt.Status.SUPERSEDED), 3
+        )
+        self.assertEqual(
+            sum(1 for a in attempts if a.status == ChunkExtractionAttempt.Status.SUCCESS), 4
+        )
+        self.assertEqual(build_summary["extraction_errors"], 0)
+
+    def test_fails_closed_when_minimum_size_chunk_still_truncates(self):
+        chunk = self._chunk(20)
+        rev, build_summary = self._run(chunk, lambda chunk_arg, **kwargs: _truncation_result())
+
+        failed = ChunkExtractionAttempt.objects.filter(
+            candidate_memory=rev, status=ChunkExtractionAttempt.Status.FAILED
+        )
+        self.assertTrue(failed.exists())
+        self.assertGreater(build_summary["extraction_errors"], 0)
+        # Never split below the minimum -- no attempt row covers fewer than 6 lines' worth of an
+        # original chunk that was itself already at or above the minimum before splitting.
+        smallest = min(a.end_line - a.start_line + 1 for a in ChunkExtractionAttempt.objects.filter(
+            candidate_memory=rev, status=ChunkExtractionAttempt.Status.FAILED
+        ))
+        self.assertGreaterEqual(smallest, 5)
+
+    def test_only_failed_chunks_are_split_never_a_healthy_one(self):
+        chunk = self._chunk(20)
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            return _success_result()
+
+        rev, build_summary = self._run(chunk, side_effect)
+        self.assertEqual(call_count["n"], 1)
+        attempts = ChunkExtractionAttempt.objects.filter(candidate_memory=rev)
+        self.assertEqual(attempts.count(), 1)
+        self.assertEqual(attempts.get().status, ChunkExtractionAttempt.Status.SUCCESS)
+
+    def test_successful_sub_chunks_after_a_split_are_not_duplicated(self):
+        """A truncated response never has any parseable content, so nothing is ever stored from
+        the chunk that gets split -- only the two successful sub-chunks' own items are stored,
+        exactly once each."""
+        lines = tuple(f"Fact number {i}." for i in range(10))
+        chunk = SourceChunk(start_line=1, end_line=10, lines=lines)
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(lines) + "\n")
+        build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
+
+        def _item_for(line_no, text):
+            return ExtractedItem(
+                plane=ContentPlane.EVIDENCE,
+                canonical_text_en=text,
+                support=SourcePassage(quote=text, start_line=line_no, end_line=line_no, language="en"),
+                claim_type="skill",
+                subject_scope=f"skill:fact{line_no}",
+                resume_eligible=True,
+            )
+
+        def side_effect(chunk_arg, **kwargs):
+            if len(chunk_arg.lines) > 5:
+                return _truncation_result()
+            items = [
+                _item_for(chunk_arg.start_line + i, chunk_arg.lines[i])
+                for i in range(len(chunk_arg.lines))
+            ]
+            return _success_result(items)
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            bootstrap_service._process_chunk_with_recovery(
+                chunk, source_role="ENGLISH_CORPUS", language="en",
+                source_document=source, new_revision=rev, build_summary=build_summary,
+            )
+
+        self.assertEqual(build_summary["claims_extracted"], 10)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 10)
+
+
+class DuplicateGroupingFixTests(TestCase):
+    """Candidate Memory recovery (2026-09-03): distinct facts sharing subject_scope+claim_type
+    must never be silently merged -- only an explicit duplicate_group_hint may merge two items."""
+
+    def _item(self, text, **overrides):
+        defaults = dict(
+            plane=ContentPlane.EVIDENCE,
+            canonical_text_en=text,
+            support=SourcePassage(quote=text, start_line=1, end_line=1, language="en"),
+            claim_type="responsibility",
+            subject_scope="career",
+            resume_eligible=True,
+        )
+        defaults.update(overrides)
+        return ExtractedItem(**defaults)
+
+    def test_distinct_responsibilities_sharing_scope_and_type_remain_separate(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="Led the migration.\nOwned the on-call rotation.\n")
+        item_a = self._item("Led the migration.", support=SourcePassage(
+            quote="Led the migration.", start_line=1, end_line=1, language="en"
+        ))
+        item_b = self._item("Owned the on-call rotation.", support=SourcePassage(
+            quote="Owned the on-call rotation.", start_line=2, end_line=2, language="en"
+        ))
+        store_extracted_item(item_a, candidate_memory=rev, source_document=source)
+        store_extracted_item(item_b, candidate_memory=rev, source_document=source)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 2)
+
+    def test_distinct_certifications_sharing_scope_and_type_remain_separate(self):
+        rev = make_revision()
+        source = make_source(
+            rev,
+            raw_content=(
+                "Google Cloud Associate Cloud Engineer.\nIBM Data Science Professional Certificate.\n"
+            ),
+        )
+        cert_a = self._item(
+            "Google Cloud Associate Cloud Engineer.", claim_type="certification",
+            support=SourcePassage(
+                quote="Google Cloud Associate Cloud Engineer.", start_line=1, end_line=1, language="en"
+            ),
+        )
+        cert_b = self._item(
+            "IBM Data Science Professional Certificate.", claim_type="certification",
+            support=SourcePassage(
+                quote="IBM Data Science Professional Certificate.", start_line=2, end_line=2, language="en"
+            ),
+        )
+        store_extracted_item(cert_a, candidate_memory=rev, source_document=source)
+        store_extracted_item(cert_b, candidate_memory=rev, source_document=source)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 2)
+
+    def test_distinct_degrees_sharing_scope_and_type_remain_separate(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="M.Tech - Automotive Electronics.\nB.Tech - Electronics.\n")
+        degree_a = self._item(
+            "M.Tech - Automotive Electronics.", claim_type="education",
+            support=SourcePassage(
+                quote="M.Tech - Automotive Electronics.", start_line=1, end_line=1, language="en"
+            ),
+        )
+        degree_b = self._item(
+            "B.Tech - Electronics.", claim_type="education",
+            support=SourcePassage(quote="B.Tech - Electronics.", start_line=2, end_line=2, language="en"),
+        )
+        store_extracted_item(degree_a, candidate_memory=rev, source_document=source)
+        store_extracted_item(degree_b, candidate_memory=rev, source_document=source)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 2)
+
+    def test_genuine_en_de_duplicates_still_merge_via_explicit_hint(self):
+        rev = make_revision()
+        source_en = make_source(rev, raw_content="Built the Ford integration.\n")
+        source_de = make_source(
+            rev, logical_source_key="german", filename="german.md", language="de", precedence=3,
+            raw_content="Baute die Ford-Integration.\n",
+        )
+        item_en = self._item(
+            "Built the Ford integration.", duplicate_group_hint="ford_integration",
+            support=SourcePassage(
+                quote="Built the Ford integration.", start_line=1, end_line=1, language="en"
+            ),
+        )
+        item_de = self._item(
+            "Built the Ford integration.", duplicate_group_hint="ford_integration",
+            support=SourcePassage(
+                quote="Baute die Ford-Integration.", start_line=1, end_line=1, language="de"
+            ),
+        )
+        store_extracted_item(item_en, candidate_memory=rev, source_document=source_en)
+        store_extracted_item(item_de, candidate_memory=rev, source_document=source_de)
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev).count(), 1)
+        claim = MemoryClaim.objects.get(candidate_memory=rev)
+        self.assertEqual(claim.supports.count(), 2)
+
+
+class ForceReextractTests(TestCase):
+    def _read_source(self, key, content, role=MemorySourceDocument.SourceRole.ENGLISH_CORPUS):
+        return ReadSource(
+            content=content,
+            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            logical_source_key=key,
+            filename=f"{key}.md",
+            source_role=role,
+            language="en",
+            precedence=2,
+        )
+
+    def test_force_reextract_ignores_an_existing_working_revision_without_touching_it(self):
+        rev1 = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        make_source(rev1, raw_content="Employed by Malformed Corp forever.\n")
+        malformed_claim = MemoryClaim.objects.create(
+            candidate_memory=rev1, stable_key="malformed", canonical_text_en="Malformed claim",
+            claim_type="skill", subject_scope="career", resume_eligible=True,
+        )
+        original_summary = dict(rev1.build_summary)
+
+        with scripted_extraction({"items": []}):
+            rev2 = bootstrap_service.build_revision_from_sources(
+                [self._read_source("corpus", "Fresh content for revision 2.\n")],
+                force_reextract=True,
+            )
+
+        rev1.refresh_from_db()
+        self.assertEqual(rev1.status, CandidateMemory.Status.NEEDS_REVIEW)  # untouched
+        self.assertEqual(rev1.build_summary, original_summary)  # untouched
+        self.assertTrue(MemoryClaim.objects.filter(pk=malformed_claim.pk).exists())  # untouched
+        self.assertNotEqual(rev2.pk, rev1.pk)
+        self.assertIsNone(rev2.base_revision)
+
+    def test_revision_2_does_not_inherit_revision_1s_malformed_claims(self):
+        rev1 = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        MemoryClaim.objects.create(
+            candidate_memory=rev1, stable_key="malformed", canonical_text_en="Malformed claim",
+            claim_type="skill", subject_scope="career", resume_eligible=True,
+        )
+
+        with scripted_extraction({"items": []}):
+            rev2 = bootstrap_service.build_revision_from_sources(
+                [self._read_source("corpus", "Fresh content for revision 2.\n")],
+                force_reextract=True,
+            )
+
+        self.assertEqual(MemoryClaim.objects.filter(candidate_memory=rev2).count(), 0)
+        self.assertEqual(rev2.build_summary["sources_reused"], 0)
+        self.assertEqual(rev2.build_summary["sources_processed"], 1)
+
+    def test_force_reextract_without_an_existing_revision_behaves_like_a_normal_fresh_build(self):
+        with scripted_extraction({"items": []}):
+            rev = bootstrap_service.build_revision_from_sources(
+                [self._read_source("corpus", "Some content.\n")], force_reextract=True
+            )
+        self.assertEqual(rev.status, CandidateMemory.Status.NEEDS_REVIEW)
+        self.assertEqual(rev.build_summary["sources_processed"], 1)

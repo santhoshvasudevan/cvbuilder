@@ -70,7 +70,11 @@ class ConflictPipelineTestCase(TestCase):
         if confirm_all:
             for claim in rev.claims.filter(confirmation_status=MemoryClaim.ConfirmationStatus.UNCONFIRMED):
                 lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev)
+        # acknowledge_zero_employment_coverage=True: these fixture corpora are deliberately
+        # narrow (one named fact at a time), so the zero-employment-coverage check (Candidate
+        # Memory recovery, 2026-09-03) would otherwise fire for scenarios unrelated to employment
+        # coverage (e.g. the German-only language-proficiency fixture).
+        lifecycle_service.activate_revision(rev, acknowledge_zero_employment_coverage=True)
         rev.refresh_from_db()
         return rev
 

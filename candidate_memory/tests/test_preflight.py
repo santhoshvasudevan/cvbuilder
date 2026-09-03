@@ -93,7 +93,7 @@ class DryRunPreflightTests(TestCase):
 
         for claim in rev.claims.all():
             lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev)
+        lifecycle_service.activate_revision(rev, acknowledge_zero_employment_coverage=True)
 
         # No working revision now (it's ACTIVE) -- preflight should compare against ACTIVE.
         same_spec = self._spec("corpus.md", "Built the Ford integration.\n")
@@ -183,7 +183,7 @@ class OutputTokenLimitPreflightTests(TestCase):
 
         for claim in rev.claims.all():
             lifecycle_service.confirm_claim(claim)
-        lifecycle_service.activate_revision(rev)
+        lifecycle_service.activate_revision(rev, acknowledge_zero_employment_coverage=True)
 
         same_spec = self._spec("corpus.md", "Built the Ford integration.\n")
         report = build_preflight_report([same_spec])

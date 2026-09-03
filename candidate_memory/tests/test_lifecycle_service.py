@@ -6,7 +6,7 @@ from __future__ import annotations
 from django.test import TestCase
 
 from ..exceptions import InvalidActivationError, RevisionNotEditableError
-from ..models import CandidateMemory, MemoryClaim, MemoryClaimSupport, MemoryConflict
+from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, MemoryClaimSupport, MemoryConflict
 from ..services import lifecycle as lifecycle_service
 from .factories import freeze_revision, make_claim, make_revision, make_source
 
@@ -22,6 +22,21 @@ def _confirmed_claim_with_valid_support(rev, **overrides):
         start_line=1, end_line=1, source_language="en", support_role=MemoryClaimSupport.SupportRole.PRIMARY,
     )
     return claim
+
+
+def _confirmed_employment_claim_with_valid_support(rev, **overrides):
+    """A CONFIRMED claim of an employment claim_type with a valid structured_value -- satisfies
+    both the zero-employment-coverage check and the comparable-type structured-value check
+    (Candidate Memory recovery, 2026-09-03) so tests unrelated to either don't need extra setup."""
+    defaults = dict(
+        claim_type="employment_dates",
+        structured_value={
+            "start_year": 2018, "start_month": None, "end_status": "ONGOING",
+            "end_year": None, "end_month": None, "precision": "YEAR",
+        },
+    )
+    defaults.update(overrides)
+    return _confirmed_claim_with_valid_support(rev, **defaults)
 
 
 class ClaimReviewActionTests(TestCase):
@@ -99,7 +114,7 @@ class ConflictResolutionActionTests(TestCase):
 class ActivationValidationTests(TestCase):
     def test_confirmed_claim_with_valid_support_has_no_blockers(self):
         rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
-        _confirmed_claim_with_valid_support(rev)
+        _confirmed_employment_claim_with_valid_support(rev)
         self.assertEqual(lifecycle_service.activation_blockers(rev), [])
 
     def test_confirmed_claim_with_no_support_is_a_blocker(self):
@@ -107,7 +122,10 @@ class ActivationValidationTests(TestCase):
         make_claim(rev, confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED, resume_eligible=True)
         self.assertNotEqual(lifecycle_service.activation_blockers(rev), [])
 
-    def test_open_conflict_with_blocked_claims_is_warning_not_blocker(self):
+    def test_open_conflict_now_blocks_even_with_only_blocked_claims(self):
+        """Candidate Memory recovery (2026-09-03, D-018): every OPEN conflict now blocks
+        activation outright -- superseding the earlier D-015 allowance that let one through as a
+        warning as long as its claims stayed ineligible. Resolve or dismiss it first instead."""
         rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
         claim = make_claim(rev, confirmation_status=MemoryClaim.ConfirmationStatus.BLOCKED_CONFLICT)
         conflict = MemoryConflict.objects.create(
@@ -115,13 +133,9 @@ class ActivationValidationTests(TestCase):
         )
         conflict.involved_claims.set([claim])
 
-        self.assertEqual(lifecycle_service.activation_blockers(rev), [])
-        self.assertEqual(len(lifecycle_service.activation_warnings(rev)), 1)
+        self.assertNotEqual(lifecycle_service.activation_blockers(rev), [])
 
     def test_open_conflict_with_a_confirmed_involved_claim_is_a_blocker(self):
-        """An unresolved conflict may remain in an activated revision only if every affected claim
-        is blocked/unconfirmed/ineligible -- a CONFIRMED claim still tangled in an OPEN conflict
-        must refuse activation outright, not just warn."""
         rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
         claim = _confirmed_claim_with_valid_support(rev)
         conflict = MemoryConflict.objects.create(
@@ -131,11 +145,63 @@ class ActivationValidationTests(TestCase):
 
         self.assertNotEqual(lifecycle_service.activation_blockers(rev), [])
 
+    def test_resolved_conflict_is_not_a_blocker(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        _confirmed_employment_claim_with_valid_support(rev)
+        claim = make_claim(rev, confirmation_status=MemoryClaim.ConfirmationStatus.RETIRED)
+        conflict = MemoryConflict.objects.create(
+            candidate_memory=rev, conflict_key="k", description="d", status=MemoryConflict.Status.RESOLVED
+        )
+        conflict.involved_claims.set([claim])
+        self.assertEqual(lifecycle_service.activation_blockers(rev), [])
+
+    def test_zero_employment_coverage_is_a_blocker_by_default(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        _confirmed_claim_with_valid_support(rev)  # claim_type="skill" -- not employment
+        self.assertNotEqual(lifecycle_service.activation_blockers(rev), [])
+
+    def test_zero_employment_coverage_blocker_can_be_explicitly_acknowledged(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        _confirmed_claim_with_valid_support(rev)
+        self.assertEqual(
+            lifecycle_service.activation_blockers(rev, acknowledge_zero_employment_coverage=True), []
+        )
+
+    def test_unresolved_failed_chunk_attempt_is_a_blocker(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        _confirmed_employment_claim_with_valid_support(rev)
+        source = make_source(rev, logical_source_key="chunk_attempt_source")
+        ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source, source_content_sha256=source.content_sha256,
+            start_line=1, end_line=5, status=ChunkExtractionAttempt.Status.FAILED,
+            error_category="CONFIGURATION",
+        )
+        self.assertNotEqual(lifecycle_service.activation_blockers(rev), [])
+
+    def test_success_and_superseded_chunk_attempts_are_not_blockers(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        _confirmed_employment_claim_with_valid_support(rev)
+        source = make_source(rev, logical_source_key="chunk_attempt_source")
+        ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source, source_content_sha256=source.content_sha256,
+            start_line=1, end_line=10, status=ChunkExtractionAttempt.Status.SUPERSEDED,
+            error_category="CONFIGURATION",
+        )
+        ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source, source_content_sha256=source.content_sha256,
+            start_line=1, end_line=5, status=ChunkExtractionAttempt.Status.SUCCESS,
+        )
+        ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source, source_content_sha256=source.content_sha256,
+            start_line=6, end_line=10, status=ChunkExtractionAttempt.Status.SUCCESS,
+        )
+        self.assertEqual(lifecycle_service.activation_blockers(rev), [])
+
 
 class ActivateRevisionTests(TestCase):
     def test_activate_needs_review_revision(self):
         rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
-        _confirmed_claim_with_valid_support(rev)
+        _confirmed_employment_claim_with_valid_support(rev)
         activated = lifecycle_service.activate_revision(rev)
         self.assertEqual(activated.status, CandidateMemory.Status.ACTIVE)
         self.assertIsNotNone(activated.activated_at)
@@ -143,7 +209,7 @@ class ActivateRevisionTests(TestCase):
     def test_activating_supersedes_previous_active(self):
         old_active = make_revision(status=CandidateMemory.Status.ACTIVE, version=1)
         new_rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW, version=2)
-        _confirmed_claim_with_valid_support(new_rev)
+        _confirmed_employment_claim_with_valid_support(new_rev)
 
         lifecycle_service.activate_revision(new_rev)
 
