@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Gate 1 -- {{ application }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'job_intake:analysis_detail' application_id=application.pk %}">&larr; Analysis detail</a></p>
+
+<h2>Human Review Gate 1 -- Candidate Matching</h2>
+<p>Pipeline phase: <strong>{{ application.pipeline_phase }}</strong></p>
+
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+{% if not jra %}
+<p>No JobRequirementAnalysis exists yet for this application.</p>
+{% else %}
+
+<h3>Agent Jobber -- {{ jra.role_title|default:"(role title not stated)" }} at {{ jra.employer|default:"(employer not stated)" }} (v{{ jra.version }})</h3>
+
+{% if not fit_assessment %}
+<p>No Agent Candidate assessment exists yet.</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="run_ac">
+  <button type="submit">Run Agent Candidate</button>
+</form>
+{% else %}
+
+{% if is_stale %}
+<p class="error">This assessment (v{{ fit_assessment.version }}) is based on a superseded
+JobRequirementAnalysis version -- re-run Agent Candidate before approving.</p>
+{% endif %}
+
+<h3>Agent Candidate -- Fit Assessment v{{ fit_assessment.version }}</h3>
+<table>
+  <thead>
+    <tr><th>Requirement</th><th>Disposition</th><th>Evidence</th><th>Explanation</th><th>Gap/limitation</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.requirement.requirement_id }} ({{ row.requirement.get_category_display }})<br>{{ row.requirement.text }}</td>
+      {% if row.assessment %}
+      <td>{{ row.assessment.disposition }}</td>
+      <td>
+        {% for claim_id in row.assessment.supporting_memory_claim_ids %}{{ claim_id }} {% endfor %}
+        {% for engagement_id in row.assessment.supporting_engagement_ids %}{{ engagement_id }} {% endfor %}
+      </td>
+      <td>{{ row.assessment.explanation }}</td>
+      <td>{{ row.assessment.gap_or_limitation }}</td>
+      {% else %}
+      <td colspan="4"><em>No assessment</em></td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="run_ac">
+  <button type="submit">Re-run Agent Candidate</button>
+</form>
+
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="approve">
+  <button type="submit" {% if is_stale %}disabled{% endif %}>Approve Gate 1</button>
+</form>
+
+{% endif %}
+
+<h3>Send feedback</h3>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="feedback">
+  <p>
+    Target:
+    <select name="target">
+      <option value="AJ">Agent Jobber (re-analyze the posting)</option>
+      <option value="AC">Agent Candidate (re-assess fit)</option>
+    </select>
+  </p>
+  <p>Comments:<br><textarea name="comments" rows="4" cols="60"></textarea></p>
+  <p>Optional new URL (Agent Jobber only):<br><input type="text" name="url" size="60"></p>
+  <p>Optional new pasted text (Agent Jobber only):<br><textarea name="pasted_text" rows="4" cols="60"></textarea></p>
+  <button type="submit">Submit feedback and re-run</button>
+</form>
+
+<h3>Feedback history</h3>
+<ul>
+  {% for feedback in feedback_history %}
+  <li>{{ feedback.created_at }} -- {{ feedback.target }}: {{ feedback.comments }}</li>
+  {% empty %}
+  <li>None yet.</li>
+  {% endfor %}
+</ul>
+
+{% endif %}
+{% endblock %}

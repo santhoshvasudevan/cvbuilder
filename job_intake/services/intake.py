@@ -8,6 +8,7 @@ import hashlib
 from dataclasses import dataclass
 
 from django.db import transaction
+from django.db.models import Max
 
 from job_applications.models import JobApplication
 
@@ -101,32 +102,75 @@ def run_intake(resolved: ResolvedSource) -> JobApplication:
 
     with transaction.atomic():
         application = JobApplication.objects.create()
-        jra = JobRequirementAnalysis.objects.create(
-            job_application=application,
-            version=1,
-            source_type=resolved.source_type,
-            source_url=resolved.source_url,
-            original_input=resolved.original_input,
-            extracted_text=resolved.extracted_text,
-            extracted_text_sha256=hashlib.sha256(
-                resolved.extracted_text.encode("utf-8")
-            ).hexdigest(),
-            posting_language=analysis.posting_language,
-            employer=analysis.employer,
-            role_title=analysis.role_title,
-            location=analysis.location,
-            work_arrangement=analysis.work_arrangement,
-            screening_risks=list(analysis.screening_risks),
-        )
-        for order, requirement in enumerate(analysis.requirements, start=1):
-            JobRequirement.objects.create(
-                job_requirement_analysis=jra,
-                requirement_id=f"JR-{order:03d}",
-                order=order,
-                category=requirement.category.value,
-                text=requirement.text,
-                source_context=requirement.source_context,
-            )
+        jra = _persist_jra_version(application, version=1, resolved=resolved, analysis=analysis)
         application.advance_to_analysis(jra=jra)
 
     return application
+
+
+def _persist_jra_version(application: JobApplication, *, version: int, resolved: ResolvedSource, analysis):
+    jra = JobRequirementAnalysis.objects.create(
+        job_application=application,
+        version=version,
+        source_type=resolved.source_type,
+        source_url=resolved.source_url,
+        original_input=resolved.original_input,
+        extracted_text=resolved.extracted_text,
+        extracted_text_sha256=hashlib.sha256(resolved.extracted_text.encode("utf-8")).hexdigest(),
+        posting_language=analysis.posting_language,
+        employer=analysis.employer,
+        role_title=analysis.role_title,
+        location=analysis.location,
+        work_arrangement=analysis.work_arrangement,
+        screening_risks=list(analysis.screening_risks),
+    )
+    for order, requirement in enumerate(analysis.requirements, start=1):
+        JobRequirement.objects.create(
+            job_requirement_analysis=jra,
+            requirement_id=f"JR-{order:03d}",
+            order=order,
+            category=requirement.category.value,
+            text=requirement.text,
+            source_context=requirement.source_context,
+        )
+    return jra
+
+
+def rerun_analysis(
+    application: JobApplication, *, url: str = "", pasted_text: str = ""
+) -> JobRequirementAnalysis:
+    """Gate-1 feedback re-run targeting Agent Jobber (M5): creates a new, append-only
+    JobRequirementAnalysis version for an application that already has one, and repoints
+    `JobApplication.current_jra` at it (`record_jra` -- a plain pointer update, no phase
+    transition; the application is already past NEW).
+
+    If the operator supplies neither a new URL nor new pasted text, this reruns analysis against
+    exactly the same original input the current version used (a plain retry, e.g. to get a second
+    opinion from the model without changing anything). Otherwise it resolves a fresh source exactly
+    like the initial intake path, including the same URL-fetch-failure-propagates-uncaught contract
+    (`resolve_posting_source`'s docstring) so the caller can offer the pasted-text fallback.
+    """
+    current = application.current_jra
+    if current is None:
+        raise IntakeValidationError("JobApplication has no existing JobRequirementAnalysis to rerun.")
+
+    if url or pasted_text:
+        resolved = resolve_posting_source(url=url, pasted_text=pasted_text)
+    elif current.source_type == JobRequirementAnalysis.SourceType.URL:
+        resolved = resolve_posting_source(url=current.original_input, pasted_text="")
+    else:
+        resolved = resolve_posting_source(url="", pasted_text=current.original_input)
+
+    result = analyze_posting(resolved.extracted_text)
+    if result.is_error:
+        raise AnalysisFailedError(result.error.message)
+    analysis = result.content
+
+    with transaction.atomic():
+        next_version = (
+            application.job_requirement_analyses.aggregate(Max("version"))["version__max"] or 0
+        ) + 1
+        jra = _persist_jra_version(application, version=next_version, resolved=resolved, analysis=analysis)
+        application.record_jra(jra)
+
+    return jra

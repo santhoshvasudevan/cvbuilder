@@ -16,6 +16,8 @@
   Pipeline phase: {{ application.pipeline_phase }}
 </p>
 
+<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">Go to Gate 1 (Candidate Matching)</a></p>
+
 {% if jra.location or jra.work_arrangement %}
 <p>
   {% if jra.location %}Location: {{ jra.location }}<br>{% endif %}

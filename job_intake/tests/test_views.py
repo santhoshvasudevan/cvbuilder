@@ -102,7 +102,13 @@ class CsrfProtectionTests(TestCase):
 
 
 class NoLaterMilestoneControlsTests(TestCase):
-    def test_detail_page_shows_no_gate1_or_matching_controls(self):
+    def test_detail_page_links_to_gate1_but_shows_no_m6_controls(self):
+        # Updated for M5 (2026-09-03): this page originally asserted "no Gate 1 controls exist at
+        # all," which was accurate only because M5 (candidate_matching/reviews) did not exist yet.
+        # M5 is now implemented, and a plain navigation link forward to Gate 1 is the correct,
+        # intended behavior -- so that assertion is corrected here rather than left encoding a
+        # since-superseded milestone boundary. M6 (Resume Builder) genuinely still does not exist,
+        # so those specific controls remain correctly absent.
         with scripted_analysis(valid_analysis_response()):
             self.client.post(
                 reverse("job_intake:intake"), {"url": "", "pasted_text": "Some job posting text."}
@@ -111,5 +117,6 @@ class NoLaterMilestoneControlsTests(TestCase):
         response = self.client.get(
             reverse("job_intake:analysis_detail", kwargs={"application_id": application.pk})
         )
-        for forbidden in ("Fit Assessment", "Approve", "Gate 1", "Resume Draft"):
+        self.assertContains(response, "Go to Gate 1 (Candidate Matching)")
+        for forbidden in ("Fit Assessment", "Resume Draft"):
             self.assertNotContains(response, forbidden)
