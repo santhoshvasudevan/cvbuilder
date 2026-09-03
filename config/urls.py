@@ -20,4 +20,5 @@ from django.urls import include, path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('candidate-memory/', include('candidate_memory.urls')),
+    path('job-intake/', include('job_intake.urls')),
 ]

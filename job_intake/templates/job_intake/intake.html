@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Job Posting Intake{% endblock %}
+{% block content %}
+<h2>Analyze a job posting</h2>
+
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+{% if fetch_error %}
+  <p class="error">{{ fetch_error }}</p>
+  {% if offer_paste_fallback %}
+    <p>Paste the posting text below instead.</p>
+  {% endif %}
+{% endif %}
+
+<form method="post" action="{% url 'job_intake:intake' %}">
+  {% csrf_token %}
+  {{ form.non_field_errors }}
+  <p>
+    {{ form.url.label_tag }}<br>
+    {{ form.url }}
+    {{ form.url.errors }}
+  </p>
+  <p>
+    {{ form.pasted_text.label_tag }}<br>
+    {{ form.pasted_text }}
+    {{ form.pasted_text.errors }}
+  </p>
+  <button type="submit">Analyze</button>
+</form>
+{% endblock %}

@@ -318,6 +318,15 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 - **Verification**: `manage.py test job_intake` passing; manual test with one real URL and one
   pasted posting, plus one deliberately broken URL to confirm fallback UX.
 - **Completion evidence**: passing tests + manual walkthrough note.
+- **Status (2026-09-02)**: implemented, **uncommitted** pending operator review. `job_intake`
+  (models, schemas, fetch/analyze/intake services, views/templates/urls, admin) and
+  `job_applications.JobApplication` (M4-scoped fields only) are complete; 68 new tests, full
+  project suite 352/352 passing, `ruff check .`/`manage.py check`/`makemigrations --check`/`git
+  diff --check` all clean. Verification performed against the `FakeAdapter` and mocked HTTP only —
+  "one real URL" and a real AJ provider call were explicitly **not** performed this session (no
+  live call was authorized); this remains an honest gap, not silently claimed. D-004's extraction
+  library (`readability-lxml`) is selected and recorded. See `docs/CURRENT_STATE.md`'s M4 section
+  for full detail.
 - **Risks**: real-world fetch reliability is inherently variable (requirements.md calls this an
   "ongoing maintenance concern," not a one-time build) — acceptance criteria test the fallback
   path, not a guarantee that fetching succeeds against arbitrary job boards.

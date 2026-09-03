@@ -129,6 +129,23 @@ requirement text there).
 - **Consequence**: M1/M2 add no fetch/extraction dependency; that dependency choice is scoped to
   M4's own commit, keeping earlier milestones' dependency footprint smaller.
 
+### M4 follow-up: extraction library selected (2026-09-02)
+
+- **Selected**: `readability-lxml` (import name `readability`), added to `requirements.txt`.
+- **Purpose/rationale**: a small, maintained port of Mozilla's Readability algorithm, used only to
+  strip chrome (nav/cookie-banners/scripts) from one fetched job-posting page at a time and keep
+  the main body text. Chosen over heavier alternatives (e.g. `trafilatura`, which pulls in its own
+  crawling/date-parsing dependency chain aimed at bulk corpus scraping) as the smallest maintained
+  option that performs well at this narrow, single-URL task — nothing more.
+- **Not a completeness guarantee**: this is a heuristic, density/link-ratio-based extractor, not a
+  guarantee that any arbitrary job-posting page can be usefully extracted — short pages, heavily
+  scripted pages, or pages that block automated access may still fail the deterministic usability
+  check downstream. Pasted-text intake remains the guaranteed, first-class fallback in every case;
+  URL fetching stays best-effort exactly as this decision's original text already states.
+- **Consequence**: no change to the original approved decision above (fetch → extract → usability
+  check → fallback, no headless browser); this note only records which library fills the
+  already-approved "main-content extraction" step.
+
 ## D-005: Structured-output representation across providers
 
 - **Status**: **APPROVED** (2026-09-02)
