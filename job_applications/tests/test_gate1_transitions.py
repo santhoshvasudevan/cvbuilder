@@ -85,3 +85,20 @@ class ApproveGate1Tests(TestCase):
         application.approve_gate1()
         application.refresh_from_db()
         self.assertEqual(application.pipeline_phase, JobApplication.PipelinePhase.PREPARATION)
+
+    def test_approving_twice_is_an_idempotent_no_op(self):
+        application = self._application_with_fit_assessment()
+        application.approve_gate1()
+        application.approve_gate1()  # must not raise
+        application.refresh_from_db()
+        self.assertEqual(application.pipeline_phase, JobApplication.PipelinePhase.PREPARATION)
+
+    def test_cannot_approve_when_a_newer_stale_assessment_supersedes_the_approved_one(self):
+        application = self._application_with_fit_assessment()
+        application.approve_gate1()
+
+        jra2 = _make_jra(application, version=2)
+        application.record_jra(jra2)
+
+        with self.assertRaises(StaleAssessmentError):
+            application.approve_gate1()

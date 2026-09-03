@@ -5,7 +5,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from candidate_matching.services.fit_assessment import AgentCandidateError
+from candidate_matching.services.fit_assessment import (
+    ConcurrentModificationError as FitAssessmentConcurrentModificationError,
+)
 from candidate_matching.services.retrieve import NoActiveCandidateMemoryError
+from candidate_memory.models import MemoryClaim
 from job_applications.models import (
     GateNotReadyError,
     InvalidPhaseTransitionError,
@@ -14,6 +18,10 @@ from job_applications.models import (
 )
 from job_intake.services.fetch import FetchError
 from job_intake.services.intake import AnalysisFailedError, IntakeValidationError
+from job_intake.services.intake import ConcurrentModificationError as JraConcurrentModificationError
+from resume_builder.services.build import (
+    ConcurrentModificationError as ResumeDraftConcurrentModificationError,
+)
 from resume_builder.services.build import ResumeBuilderError
 
 from .models import ReviewFeedback
@@ -64,6 +72,8 @@ def gate1_view(request, application_id: int):
             StaleAssessmentError,
             IntakeValidationError,
             AnalysisFailedError,
+            FitAssessmentConcurrentModificationError,
+            JraConcurrentModificationError,
         ) as exc:
             error = str(exc)
         except FetchError as exc:
@@ -91,6 +101,7 @@ def gate1_view(request, application_id: int):
     feedback_history = ReviewFeedback.objects.filter(
         job_application=application, gate=ReviewFeedback.Gate.GATE_1
     )
+    retrieval_manifest = fit_assessment.retrieval_manifest if fit_assessment is not None else None
 
     return render(
         request,
@@ -98,8 +109,10 @@ def gate1_view(request, application_id: int):
         {
             "application": application,
             "jra": jra,
+            "requirements": requirements,
             "rows": rows,
             "fit_assessment": fit_assessment,
+            "retrieval_manifest": retrieval_manifest,
             "is_stale": is_stale,
             "feedback_history": feedback_history,
             "error": error,
@@ -132,6 +145,7 @@ def gate2_view(request, application_id: int):
             InvalidPhaseTransitionError,
             GateNotReadyError,
             StaleAssessmentError,
+            ResumeDraftConcurrentModificationError,
         ) as exc:
             error = str(exc)
 
@@ -147,7 +161,41 @@ def gate2_view(request, application_id: int):
         is_stale = fit_assessment is not None and draft.based_on_fit_assessment_id != fit_assessment.pk
     if fit_assessment is not None:
         upstream_stale = fit_assessment.based_on_jra_id != application.current_jra_id
-    elements = draft.elements.all() if draft is not None else []
+    elements = list(draft.elements.all()) if draft is not None else []
+
+    # Evidence-inspection support: which CandidateMemory *version* each cited claim lives on (for
+    # a direct link to its quotation/detail page), and whether each claim is engagement-matched or
+    # merely global/supplementary for the element it's cited on.
+    all_claim_ids = {claim_id for element in elements for claim_id in element.supporting_memory_claim_ids}
+    claim_versions = dict(
+        MemoryClaim.objects.filter(claim_id__in=all_claim_ids)
+        .values_list("claim_id", "candidate_memory__version")
+    )
+    approved_engagements_by_claim: dict[str, set[str]] = {}
+    if all_claim_ids:
+        for claim in MemoryClaim.objects.filter(claim_id__in=all_claim_ids).prefetch_related(
+            "engagement_mappings__career_engagement"
+        ):
+            approved_engagements_by_claim[claim.claim_id] = {
+                mapping.career_engagement.engagement_id
+                for mapping in claim.engagement_mappings.all()
+                if mapping.status == mapping.Status.APPROVED
+            }
+
+    evidence_rows = []
+    for element in elements:
+        claim_rows = []
+        for claim_id in element.supporting_memory_claim_ids:
+            is_global = element.engagement_id not in approved_engagements_by_claim.get(claim_id, set())
+            claim_rows.append(
+                {
+                    "claim_id": claim_id,
+                    "candidate_memory_version": claim_versions.get(claim_id),
+                    "is_global": is_global,
+                }
+            )
+        evidence_rows.append({"element": element, "claim_rows": claim_rows})
+
     feedback_history = ReviewFeedback.objects.filter(
         job_application=application, gate=ReviewFeedback.Gate.GATE_2
     )
@@ -158,7 +206,7 @@ def gate2_view(request, application_id: int):
         {
             "application": application,
             "draft": draft,
-            "elements": elements,
+            "evidence_rows": evidence_rows,
             "is_stale": is_stale,
             "upstream_stale": upstream_stale,
             "feedback_history": feedback_history,

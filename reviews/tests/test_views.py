@@ -71,6 +71,31 @@ class Gate1ViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Unknown action")
 
+    def test_screening_risks_shown_inline(self):
+        from job_intake.models import JobRequirementAnalysis
+
+        JobRequirementAnalysis.objects.filter(pk=self.application.current_jra_id).update(
+            screening_risks=["No visa sponsorship mentioned."]
+        )
+        response = self.client.get(self.url)
+        self.assertContains(response, "No visa sponsorship mentioned.")
+
+    def test_retrieval_manifest_shown_after_run(self):
+        with scripted_agent_candidate(valid_assessment_response()):
+            self.client.post(self.url, {"action": "run_ac"})
+        response = self.client.get(self.url)
+        self.assertContains(response, "Eligible claims considered")
+        self.assertContains(response, "Estimated request size")
+
+    def test_double_approve_is_idempotent_not_an_error(self):
+        with scripted_agent_candidate(valid_assessment_response()):
+            self.client.post(self.url, {"action": "run_ac"})
+        self.client.post(self.url, {"action": "approve"})
+        response = self.client.post(self.url, {"action": "approve"})
+        self.assertEqual(response.status_code, 302)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.pipeline_phase, JobApplication.PipelinePhase.PREPARATION)
+
 
 class CsrfProtectionTests(TestCase):
     def test_post_without_csrf_token_is_rejected(self):

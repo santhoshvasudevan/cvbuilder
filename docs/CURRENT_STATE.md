@@ -1,17 +1,19 @@
 # Current State
 
-Last updated: 2026-09-03 (M5 and M6 implemented, tested, and committed as one coordinated work
-package. M5 -- Agent Candidate, matching, and Human Review Gate 1 -- and M6 -- Agent Builder and
-Human Review Gate 2 -- are both complete: real, deterministic retrieval and static-requirement
-assessment against the real ACTIVE CandidateMemory and real APPROVED CareerEngagements; LLM-backed
-narrative assessment/generation routed only through the FakeAdapter (no live provider calls were
-authorized or made this round); disposition-coverage and no-fabrication validators; deterministic
-markdown rendering; both human review gates wired end to end. A full end-to-end manual walkthrough
-(intake -> Agent Candidate -> Gate 1 feedback+approval -> Agent Builder -> Gate 2 feedback+approval)
-was run live against the real ACTIVE CandidateMemory (v2/id=7) and a real APPROVED CareerEngagement
-(CE-0003), inside a transaction rolled back at the end -- zero residue in the persistent
-development database (`JobApplication`/`FitAssessment`/`ResumeDraft` counts confirmed unchanged
-before and after).)
+Last updated: 2026-09-03 (M5 and M6 implemented, tested, committed, independently audited, and
+hardened based on that audit -- see "M5/M6 audit hardening (2026-09-03, D-020)" below for the two
+release-blocking corrections. M5 -- Agent Candidate, matching, and Human Review Gate 1 -- and M6 --
+Agent Builder and Human Review Gate 2 -- are both complete: bounded, relevance-ranked retrieval and
+static-requirement assessment against the real ACTIVE CandidateMemory and real APPROVED
+CareerEngagements; LLM-backed narrative assessment/generation routed only through the FakeAdapter
+(no live provider calls were authorized or made this round); disposition-coverage and
+no-fabrication (including engagement-placement-correct) validators; deterministic markdown
+rendering; both human review gates wired end to end, hardened against concurrent approval and
+provider failure. A full end-to-end manual walkthrough (intake -> Agent Candidate -> Gate 1
+feedback+approval -> Agent Builder -> Gate 2 feedback+approval) was run live against the real
+ACTIVE CandidateMemory (v2/id=7) and a real APPROVED CareerEngagement (CE-0003), inside a
+transaction rolled back at the end -- zero residue in the persistent development database
+(`JobApplication`/`FitAssessment`/`ResumeDraft` counts confirmed unchanged before and after).)
 
 ## Summary
 
@@ -558,7 +560,9 @@ committed per `docs/IMPLEMENTATION_PLAN.md` M5.
   `RequirementAssessment` (`requirement_id`, `disposition` MATCH/PARTIAL/GAP/UNKNOWN,
   `supporting_memory_claim_ids`/`supporting_engagement_ids`, `explanation`, `gap_or_limitation`) --
   both append-only, same honest application-layer-only immutability pattern as `job_intake`'s JRA.
-- **`services/retrieve.py`**: `retrieve_context()` returns a bounded subset of the ACTIVE
+- **`services/retrieve.py`** (superseded by the bounded pipeline below, 2026-09-03 audit
+  hardening -- kept only as the eligibility layer `bounded_retrieval.py` builds on):
+  `retrieve_eligible_pool()` (formerly `retrieve_context()`) returns a bounded subset of the ACTIVE
   CandidateMemory -- every `CONFIRMED`+`resume_eligible` narrative (non-static-type) `MemoryClaim`
   that either has an `APPROVED` `ClaimEngagementMapping` or has no mapping at all (a global claim),
   every `APPROVED` `CareerEngagement`, and every `CandidateRule` -- and exposes exactly which
@@ -641,7 +645,14 @@ committed per `docs/IMPLEMENTATION_PLAN.md` M5.
   failure) on any element with no evidence, a fabricated claim ID, or an unknown/unapproved/
   not-in-context `engagement_id` (via `resolve_approved_engagement`) -- nothing is ever persisted
   for a build that fails validation, matching `docs/RESUME_OUTPUT_STRUCTURE.md` Sec 3/6's own
-  "rejected... before any markdown is ever rendered" contract.
+  "rejected... before any markdown is ever rendered" contract. **Corrected 2026-09-03 (D-020)**:
+  every experience bullet's cited claims are now also checked against that claim's *complete* set
+  of approved engagement mappings (`RetrievedClaim.approved_engagement_ids`) -- a claim approved
+  only for a different engagement than its bullet fails the build closed, and a bullet whose
+  evidence is entirely global (unmapped) claims is rejected too (global evidence may supplement a
+  bullet that already has at least one genuinely matching claim, never support it alone). The
+  original version of this validator only checked that a cited claim existed somewhere in context,
+  never that it belonged to the specific engagement it was placed under -- see D-020.
 - **`rendering/markdown.py`**: deterministic v1 rendering per `docs/RESUME_OUTPUT_STRUCTURE.md`
   Sec 4, run only after validation passes and entirely from already-validated in-memory data (no
   DB round-trip needed before persistence). Every experience header comes exclusively from
@@ -654,10 +665,13 @@ committed per `docs/IMPLEMENTATION_PLAN.md` M5.
   engagement (via its own claims' engagement mappings) is placed there; one resolving to zero or
   multiple engagements is placed under Professional Summary instead of being silently dropped.
 - **`services/build.py`**: orchestrates the freshness/gate precondition (requires
-  `pipeline_phase` in PREPARATION/READY and a non-stale `current_fit_assessment`), retrieval
-  (reused directly from `candidate_matching.services.retrieve` -- the identical bounded, D-019-
-  respecting subset), generation, validation, rendering, and versioned persistence, mirroring
-  `build_fit_assessment`'s transaction shape.
+  `pipeline_phase` in PREPARATION/READY and a non-stale `current_fit_assessment`), retrieval,
+  generation, validation, rendering, and versioned persistence, mirroring `build_fit_assessment`'s
+  transaction shape. **Corrected 2026-09-03 (D-020)**: retrieval is no longer M5's raw eligible
+  pool -- `resume_builder/services/context.py::build_builder_context()` builds a separate, smaller
+  `BuilderContext` strictly from what the current `FitAssessment` already selected
+  (`retrieved_claim_ids`/`retrieved_engagement_ids`), re-verifying each claim/engagement is still
+  eligible/`APPROVED` rather than reloading or re-querying the full CandidateMemory.
 - **`job_applications/models.py`**: `current_resume_draft` FK (completing D-012's three pointers);
   `record_resume_draft` (plain pointer update) and `approve_gate2()` (`PREPARATION -> READY`,
   requiring a non-stale `current_resume_draft` -- D-006 -- and confirming the draft itself in the
@@ -692,13 +706,52 @@ committed per `docs/IMPLEMENTATION_PLAN.md` M5.
   manual walkthrough). M7 (the dashboard, cross-app integration beyond the pointer-based freshness
   checks, and the final "download the resume" flow) was not started.
 
+## M5/M6 audit hardening (2026-09-03, D-020)
+
+An independent adversarial audit of the M5/M6 implementation above found two release-blocking
+gaps, confirmed live against the real ACTIVE CandidateMemory before being fixed in three separate
+commits. See D-020 in `docs/DECISIONS.md` for full detail; summarized here:
+
+1. **Unbounded retrieval (blocking, fixed)**: `retrieve_context()` sent the *entire* eligible pool
+   to both `AC_MATCH` and `AB_BUILD` -- 1,122 claims/359 rules, ~203,000 characters (~50,785
+   estimated tokens) against the real corpus, with no relevance filtering, no count/token bound,
+   and no deduplication. Replaced with a real bounded pipeline: conservative dedup -> deterministic
+   per-requirement lexical candidate generation -> a new bounded LLM relevance-ranking stage
+   (`AC_RANK`) that never falls back to the full corpus on failure -> capped final selection
+   against documented hard limits, with an inspectable `retrieval_manifest` on every
+   `FitAssessment`. M6 now builds its own smaller `BuilderContext` from what the current
+   `FitAssessment` already selected, never the full CandidateMemory.
+2. **Engagement-placement gap (blocking, fixed)**: the no-fabrication validator only checked that a
+   cited claim existed *somewhere* in context, never that it belonged to the specific engagement
+   its bullet was placed under -- a claim mapped only to Engagement A was accepted under
+   Engagement B with no rejection. Fixed: every experience bullet is now checked against the
+   claim's complete set of approved engagement mappings; a wrong-engagement citation, or a bullet
+   supported only by global/unmapped evidence, fails the whole build closed.
+3. **Non-blocking hardening also applied**: a `FAKE`-typed provider can no longer serve a real
+   stage outside an automated test run; Gate 1/Gate 2 approval is now `select_for_update()`-locked
+   and idempotent (a repeated approval of an already-approved, still-current artifact is a safe
+   no-op); the same version-allocation race is closed the same way for `FitAssessment`/
+   `ResumeDraft`/JRA-rerun version numbering; Gate 1 shows screening risks and the retrieval
+   manifest inline; Gate 2 links every supporting claim ID to its CandidateMemory detail/quotation
+   page and marks global/supplementary evidence distinctly.
+
+Verification: 746/746 tests passing (26 new dedicated failure-atomicity tests covering timeout/
+429/retryable-5xx/non-retryable/malformed/schema-invalid/truncated-output/DB-failure-during-child-
+persistence/retry-after-failure for both `AC_MATCH` and `AB_BUILD`; 31 new engagement-placement
+tests including the audit's exact adversarial scenarios), `ruff`/`check`/`makemigrations`/
+`git diff --check` all clean, plus a fresh genuinely-isolated PostgreSQL database (not Django's own
+test-runner database) had every migration applied cleanly from zero. No live provider call was
+made or authorized. `docs/REQUIREMENT_TRACEABILITY.md`'s MEM-015/MEM-016 rows were corrected to
+describe the real bounded pipeline rather than the unbounded one they originally cited.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
   wiring beyond the pointer-based freshness checks M5/M6 already enforce individually.
-- Any pipeline stage other than `MEMORY_BUILD`, `AJ_ANALYZE`, `AC_MATCH`, and `AB_BUILD` -- all four
-  now exist and are exercised by the automated suite via the `FakeAdapter`; none has been exercised
-  against a live provider (no credentials configured in this environment for any stage).
+- Any pipeline stage other than `MEMORY_BUILD`, `AJ_ANALYZE`, `AC_RANK`, `AC_MATCH`, and
+  `AB_BUILD` -- all five now exist and are exercised by the automated suite via the `FakeAdapter`;
+  none has been exercised against a live provider (no credentials configured in this environment
+  for any stage).
 - Any real-world URL fetch verification (only mocked HTTP responses have been exercised).
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
   not performed in this environment -- no credentials configured).
@@ -708,16 +761,15 @@ committed per `docs/IMPLEMENTATION_PLAN.md` M5.
 
 D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
 D-016 (`FAILED` lifecycle state) remains PROPOSED, not yet product-owner-approved. D-017 (line-wrap
-provenance risk), D-018 (Candidate Memory recovery), and D-019 (the deterministic static-profile
-boundary — `CareerEngagement`/`ClaimEngagementMapping`, see below) are all **APPROVED AND
-IMPLEMENTED**. M5 and M6 were implemented entirely within the boundaries of these already-approved
-decisions (principally D-006, D-010, D-014, D-019) -- no new architectural decision requiring
-product-owner approval arose; a small number of genuine implementation choices not dictated by any
-prior decision (the static-requirement classifier's specific heuristics, the achievement-placement
-policy `docs/RESUME_OUTPUT_STRUCTURE.md` itself left open, restricting Gate-2 feedback to target
-Agent Builder only) are documented in the M5/M6 sections above rather than recorded as separate
-DECISIONS.md entries, consistent with how D-004's extraction-library choice was handled. Neither
-D-016 nor anything else is blocking for M7 as currently scoped.
+provenance risk), D-018 (Candidate Memory recovery), D-019 (the deterministic static-profile
+boundary — `CareerEngagement`/`ClaimEngagementMapping`, see below), and D-020 (M5/M6 audit
+hardening -- bounded relevance retrieval, engagement-correct evidence, gate/failure hardening, see
+"M5/M6 audit hardening" above) are all **APPROVED AND IMPLEMENTED**. M5 and M6 were originally
+implemented within the boundaries of the already-approved decisions in force at the time
+(principally D-006, D-010, D-014, D-019); D-020 was added when an independent audit found that
+implementation had not actually satisfied D-015's bounded-retrieval clause and D-019's engagement-
+placement guarantee, and records the correction. Neither D-016 nor anything else is blocking for M7
+as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

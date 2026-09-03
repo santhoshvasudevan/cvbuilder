@@ -667,3 +667,71 @@ retroactively rejects the 9 pre-refinement mappings that were proposed under the
 rule. `approved_narrative_claim_ids_for_engagement` is the planned M6 renderer's lookup for which
 narrative claims to place under one engagement's experience section -- the concrete form of item 6
 above ("use mappings only to place narrative bullets under the correct engagement").
+
+## D-020: M5/M6 audit-hardening -- bounded relevance retrieval, engagement-correct evidence,
+## and gate/failure hardening
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-03) -- directed and approved in the same
+  session, following an independent adversarial audit of the M5/M6 implementation (commits
+  `aed6b32`/`88c8770`). Two release-blocking findings and several non-blocking gaps were confirmed
+  live against the real ACTIVE CandidateMemory before being fixed.
+- **Requirement**: corrects the M5 implementation of D-015's "PostgreSQL structured retrieval plus
+  a bounded LLM relevance-ranking step" clause (that clause was written but never actually built --
+  see the finding below); extends D-019's engagement-placement guarantees; hardens D-006/D-010's
+  gate and versioning mechanics under concurrency and provider failure.
+- **Finding 1 (blocking, fixed)**: `candidate_matching.services.retrieve.retrieve_context()` sent
+  **the entire eligible pool** to both `AC_MATCH` and `AB_BUILD` -- measured at 1,122 claims/359
+  rules, a ~203,000-character (~50,785-estimated-token) request against the real revision-2
+  corpus, with no relevance filtering, no count/token bound, and no deduplication. This had been
+  marked "Implemented" against MEM-015 on a 4-claim fixture test that never exercised scale.
+  **Fixed**: a real, measurable bounded pipeline (`services/bounded_retrieval.py` and its
+  supporting modules -- `dedup.py`, `candidate_generation.py`, `lexical_relevance.py`, `rank.py`,
+  `rule_selection.py`, `retrieval_limits.py`) -- eligibility (unchanged) -> conservative
+  deduplication (exact normalized text or an explicit `duplicate_group_key`, never fuzzy) ->
+  deterministic per-`JobRequirement` lexical candidate generation with a guaranteed minimum
+  candidate floor -> a genuinely new bounded LLM relevance-ranking stage (`AC_RANK`, a new
+  `StageModelAssignment.Stage` value) that only ever sees the bounded candidate pool and never
+  falls back to the full corpus on any error or malformed/truncated output -> capped final
+  selection against documented hard limits chosen against the real corpus's own scale. Exceeding
+  the final token budget after every count cap raises an actionable
+  `RetrievalBudgetExceededError` rather than silently truncating. Every `FitAssessment` now carries
+  an inspectable `retrieval_manifest` (counts, exclusion reasons, per-requirement selected IDs,
+  cap configuration -- never raw prompts/responses). M6 was also found to be reusing M5's
+  unbounded retrieval directly; it now builds its own `BuilderContext`
+  (`resume_builder/services/context.py`) strictly from what the current `FitAssessment` already
+  selected, re-verifying each claim/engagement is still eligible/approved rather than trusting a
+  stored ID list or re-querying the full CandidateMemory.
+- **Finding 2 (blocking, fixed)**: `resume_builder.validators.no_fabrication.validate_and_flatten`
+  checked only that a cited `claim_id` existed somewhere in the retrieved context -- it never
+  checked that the claim was actually approved for the *specific* engagement its bullet was placed
+  under. Reproduced live: a claim mapped only to Engagement A was accepted under Engagement B's
+  experience section with no rejection, contradicting the milestone's own "incorrect engagement
+  placement fails closed" claim. **Fixed**: `RetrievedClaim.engagement_id` (a single nullable
+  field) is replaced everywhere by `approved_engagement_ids` (the complete set of a claim's
+  approved mappings -- a claim can legitimately be approved for more than one engagement, which
+  the old shape could never represent), and every experience bullet is now checked against that
+  complete set: a claim approved only for a different engagement fails the whole build closed;
+  global (unmapped) evidence may supplement a bullet that already has at least one genuinely
+  matching claim, but can never be its sole support.
+- **Non-blocking findings, also addressed**: `get_adapter_for_stage` now refuses to route a real
+  stage through a `FAKE`-typed provider outside an automated test run (`settings.TESTING`);
+  `JobApplication.approve_gate1`/`approve_gate2` are now `select_for_update()`-locked and
+  idempotent (a repeated approval of an already-approved, still-current artifact is a safe no-op,
+  not an error), and the same version-allocation race is closed the same way in
+  `build_fit_assessment`/`build_resume_draft`/`job_intake.services.intake.rerun_analysis`
+  (`ConcurrentModificationError` on the residual, effectively-unreachable IntegrityError case);
+  Gate 1 now shows screening risks and the retrieval manifest inline; Gate 2 now links every
+  supporting claim ID to its CandidateMemory detail/quotation page and marks global/supplementary
+  evidence distinctly.
+- **Alternative considered**: relying on the LLM ranking step alone (no deterministic lexical
+  pre-filter) to narrow 1,122 claims down to a bounded set in one call. Not adopted -- a single
+  ranking call over the full corpus would itself be the same unbounded-request problem this
+  decision fixes; the deterministic candidate-generation step is what keeps every individual
+  request (including the ranking request itself) bounded.
+- **Consequence**: `llm_provider.0002_alter_llmcalllog_stage_and_more` adds the `AC_RANK` stage
+  choice; `candidate_matching.0002_fitassessment_retrieval_manifest` adds the manifest field. Real
+  end-to-end verification (a rolled-back manual walkthrough against the real ACTIVE
+  CandidateMemory and real APPROVED CareerEngagements) confirmed the bounded pipeline produces a
+  real, working assessment and resume draft at a small fraction of the pre-fix request size. No
+  live provider call was made or authorized for this work; `AC_RANK`/`AC_MATCH`/`AB_BUILD` have no
+  real `StageModelAssignment` configured in the development database.

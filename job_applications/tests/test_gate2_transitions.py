@@ -86,7 +86,9 @@ class ApproveGate2Tests(TestCase):
         self.assertEqual(application.pipeline_phase, JobApplication.PipelinePhase.READY)
         self.assertIsNotNone(draft.confirmed_at)
 
-    def test_cannot_approve_gate2_twice(self):
+    def test_approving_gate2_twice_is_an_idempotent_no_op(self):
+        # Audit hardening (2026-09-03): a repeated approval of the same already-approved, still-
+        # current draft is a safe no-op, not an error -- guards against a double-click/retry.
         application = _prepared_application()
         draft = ResumeDraft.objects.create(
             job_application=application, version=1,
@@ -96,5 +98,27 @@ class ApproveGate2Tests(TestCase):
         application.record_resume_draft(draft)
         application.approve_gate2()
 
-        with self.assertRaises(InvalidPhaseTransitionError):
+        application.approve_gate2()  # must not raise
+
+        application.refresh_from_db()
+        draft.refresh_from_db()
+        self.assertEqual(application.pipeline_phase, JobApplication.PipelinePhase.READY)
+        self.assertIsNotNone(draft.confirmed_at)
+
+    def test_cannot_approve_gate2_when_a_newer_unapproved_draft_supersedes_the_ready_one(self):
+        application = _prepared_application()
+        draft = ResumeDraft.objects.create(
+            job_application=application, version=1,
+            based_on_fit_assessment=application.current_fit_assessment,
+            recommended_title="Engineer", rendered_markdown="# Engineer\n",
+        )
+        application.record_resume_draft(draft)
+        application.approve_gate2()
+
+        new_fit_assessment = FitAssessment.objects.create(
+            job_application=application, version=2, based_on_jra=application.current_jra
+        )
+        application.record_fit_assessment(new_fit_assessment)
+
+        with self.assertRaises(StaleAssessmentError):
             application.approve_gate2()

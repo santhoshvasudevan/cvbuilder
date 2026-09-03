@@ -40,13 +40,22 @@ re-run Agent Builder before approving.</p>
     <tr><th>Section</th><th>Engagement</th><th>Text</th><th>Supporting claims</th><th>Matched requirements</th></tr>
   </thead>
   <tbody>
-    {% for element in elements %}
+    {% for row in evidence_rows %}
     <tr>
-      <td>{{ element.get_section_display }}</td>
-      <td>{{ element.engagement_id }}</td>
-      <td>{{ element.text }}</td>
-      <td>{% for claim_id in element.supporting_memory_claim_ids %}{{ claim_id }} {% endfor %}</td>
-      <td>{% for jr_id in element.matched_job_requirement_ids %}{{ jr_id }} {% endfor %}</td>
+      <td>{{ row.element.get_section_display }}</td>
+      <td>{{ row.element.engagement_id }}</td>
+      <td>{{ row.element.text }}</td>
+      <td>
+        {% for claim_row in row.claim_rows %}
+          {% if claim_row.candidate_memory_version %}
+            <a href="{% url 'candidate_memory:claim_detail' version=claim_row.candidate_memory_version claim_id=claim_row.claim_id %}">{{ claim_row.claim_id }}</a>
+          {% else %}
+            {{ claim_row.claim_id }}
+          {% endif %}
+          {% if claim_row.is_global %}<em>(global)</em>{% endif %}
+        {% endfor %}
+      </td>
+      <td>{% for jr_id in row.element.matched_job_requirement_ids %}{{ jr_id }} {% endfor %}</td>
     </tr>
     {% endfor %}
   </tbody>

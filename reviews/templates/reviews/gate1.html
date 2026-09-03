@@ -16,6 +16,17 @@
 
 <h3>Agent Jobber -- {{ jra.role_title|default:"(role title not stated)" }} at {{ jra.employer|default:"(employer not stated)" }} (v{{ jra.version }})</h3>
 
+<h4>Screening risks</h4>
+{% if jra.screening_risks %}
+<ul>
+  {% for risk in jra.screening_risks %}
+  <li>{{ risk }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p>None identified.</p>
+{% endif %}
+
 {% if not fit_assessment %}
 <p>No Agent Candidate assessment exists yet.</p>
 <form method="post">
@@ -54,6 +65,29 @@ JobRequirementAnalysis version -- re-run Agent Candidate before approving.</p>
     {% endfor %}
   </tbody>
 </table>
+
+<h4>Retrieval manifest</h4>
+{% if retrieval_manifest %}
+<ul>
+  <li>Eligible claims considered: {{ retrieval_manifest.eligible_count }}</li>
+  <li>Duplicates merged: {{ retrieval_manifest.duplicate_count }}</li>
+  <li>Candidate pool sent to relevance ranking: {{ retrieval_manifest.candidate_pool_count }}</li>
+  <li>Claims actually selected: {{ retrieval_manifest.selected_count }}</li>
+  <li>Rules selected: {{ retrieval_manifest.rules_selected_count }} (duplicates merged: {{ retrieval_manifest.rules_duplicate_count }}, positioning excluded by budget: {{ retrieval_manifest.rules_excluded_positioning_count }})</li>
+  <li>Estimated request size: {{ retrieval_manifest.estimated_request_tokens }} tokens (cap: {{ retrieval_manifest.caps.max_estimated_request_tokens }})</li>
+  {% if retrieval_manifest.excluded_counts %}
+  <li>Exclusions:
+    <ul>
+      {% for reason, count in retrieval_manifest.excluded_counts.items %}
+      <li>{{ reason }}: {{ count }}</li>
+      {% endfor %}
+    </ul>
+  </li>
+  {% endif %}
+</ul>
+{% else %}
+<p>Not available.</p>
+{% endif %}
 
 <form method="post">
   {% csrf_token %}

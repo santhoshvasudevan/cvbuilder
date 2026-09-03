@@ -48,6 +48,22 @@ class Gate2ViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "run Agent Builder first")
 
+    def test_get_after_run_links_claim_id_to_its_candidate_memory_detail_page(self):
+        with scripted_generation(valid_generation_response(self.engagement_id, self.claim_id)):
+            self.client.post(self.url, {"action": "run_ab"})
+        response = self.client.get(self.url)
+        self.assertContains(response, "/candidate-memory/revisions/")
+        self.assertContains(response, self.claim_id)
+
+    def test_double_approve_is_idempotent_not_an_error(self):
+        with scripted_generation(valid_generation_response(self.engagement_id, self.claim_id)):
+            self.client.post(self.url, {"action": "run_ab"})
+        self.client.post(self.url, {"action": "approve"})
+        response = self.client.post(self.url, {"action": "approve"})
+        self.assertEqual(response.status_code, 302)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.pipeline_phase, JobApplication.PipelinePhase.READY)
+
     def test_feedback_action_records_and_reruns(self):
         with scripted_generation(valid_generation_response(self.engagement_id, self.claim_id)):
             self.client.post(self.url, {"action": "run_ab"})

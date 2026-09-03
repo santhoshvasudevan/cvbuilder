@@ -7,7 +7,7 @@ completing the aggregate.
 
 from __future__ import annotations
 
-from django.db import models
+from django.db import models, transaction
 
 
 class JobApplication(models.Model):
@@ -105,24 +105,36 @@ class JobApplication(models.Model):
 
     def approve_gate1(self) -> None:
         """Human Review Gate 1 approval (HITL-001/002/004/005): a plain DB-state transition,
-        checked fresh -- never a paused process. Requires phase ANALYSIS (never re-approved from
-        PREPARATION/READY) and a `current_fit_assessment` that is actually based on the current
-        `current_jra` (D-006 freshness) -- approving a stale assessment is refused outright rather
-        than silently allowed."""
-        if self.pipeline_phase != self.PipelinePhase.ANALYSIS:
-            raise InvalidPhaseTransitionError(
-                f"Cannot approve Gate 1 from phase {self.pipeline_phase!r} -- only ANALYSIS may "
-                "transition this way."
-            )
-        if self.current_fit_assessment_id is None:
-            raise GateNotReadyError("No FitAssessment exists yet -- run Agent Candidate first.")
-        if self.current_fit_assessment.based_on_jra_id != self.current_jra_id:
-            raise StaleAssessmentError(
-                "The current FitAssessment is based on a superseded JobRequirementAnalysis "
-                "version -- re-run Agent Candidate against the current analysis before approving."
-            )
-        self.pipeline_phase = self.PipelinePhase.PREPARATION
-        self.save(update_fields=["pipeline_phase", "updated_at"])
+        checked fresh -- never a paused process. Requires a `current_fit_assessment` that is
+        actually based on the current `current_jra` (D-006 freshness) -- approving a stale
+        assessment is refused outright, in every phase, not just from ANALYSIS.
+
+        Audit hardening (2026-09-03): locks this row with `select_for_update()` for the whole
+        check-and-transition so two concurrent approvals can never race into an inconsistent
+        state, and is idempotent -- calling this again once already in PREPARATION/READY (i.e.
+        Gate 1 was already approved and nothing about the current, non-stale FitAssessment has
+        changed since) is a safe no-op, not an error, so a double-click or a retried request
+        never surfaces a confusing failure for an action that already succeeded.
+        """
+        with transaction.atomic():
+            locked = JobApplication.objects.select_for_update().get(pk=self.pk)
+            if locked.pipeline_phase not in (
+                self.PipelinePhase.ANALYSIS, self.PipelinePhase.PREPARATION, self.PipelinePhase.READY,
+            ):
+                raise InvalidPhaseTransitionError(
+                    f"Cannot approve Gate 1 from phase {locked.pipeline_phase!r}."
+                )
+            if locked.current_fit_assessment_id is None:
+                raise GateNotReadyError("No FitAssessment exists yet -- run Agent Candidate first.")
+            if locked.current_fit_assessment.based_on_jra_id != locked.current_jra_id:
+                raise StaleAssessmentError(
+                    "The current FitAssessment is based on a superseded JobRequirementAnalysis "
+                    "version -- re-run Agent Candidate against the current analysis before approving."
+                )
+            if locked.pipeline_phase == self.PipelinePhase.ANALYSIS:
+                locked.pipeline_phase = self.PipelinePhase.PREPARATION
+                locked.save(update_fields=["pipeline_phase", "updated_at"])
+        self.pipeline_phase = locked.pipeline_phase
 
     def record_resume_draft(self, resume_draft) -> None:
         """Pointer update only, no phase check -- called whenever a new ResumeDraft version is
@@ -131,26 +143,34 @@ class JobApplication(models.Model):
         self.save(update_fields=["current_resume_draft", "updated_at"])
 
     def approve_gate2(self) -> None:
-        """Human Review Gate 2 approval (HITL-003): requires phase PREPARATION (never re-approved
-        from READY) and a `current_resume_draft` that is actually based on the current
-        `current_fit_assessment` (D-006 freshness) -- approving a stale draft is refused outright.
-        Confirms the draft itself (`ResumeDraft.confirm()`) in the same action, then advances the
-        phase -- Gate 2 approval means both things at once, never one without the other."""
-        if self.pipeline_phase != self.PipelinePhase.PREPARATION:
-            raise InvalidPhaseTransitionError(
-                f"Cannot approve Gate 2 from phase {self.pipeline_phase!r} -- only PREPARATION may "
-                "transition this way."
-            )
-        if self.current_resume_draft_id is None:
-            raise GateNotReadyError("No ResumeDraft exists yet -- run Agent Builder first.")
-        if self.current_resume_draft.based_on_fit_assessment_id != self.current_fit_assessment_id:
-            raise StaleAssessmentError(
-                "The current ResumeDraft is based on a superseded FitAssessment version -- "
-                "re-run Agent Builder against the current assessment before approving."
-            )
-        self.current_resume_draft.confirm()
-        self.pipeline_phase = self.PipelinePhase.READY
-        self.save(update_fields=["pipeline_phase", "updated_at"])
+        """Human Review Gate 2 approval (HITL-003): requires a `current_resume_draft` that is
+        actually based on the current `current_fit_assessment` (D-006 freshness) -- approving a
+        stale draft is refused outright. Confirms the draft itself (`ResumeDraft.confirm()`) and
+        advances the phase together, atomically.
+
+        Audit hardening (2026-09-03): `select_for_update()`-locked for the whole check-and-
+        transition, and idempotent -- calling this again once already READY with the same,
+        already-confirmed, non-stale draft is a safe no-op rather than an error (mirrors
+        `approve_gate1`)."""
+        with transaction.atomic():
+            locked = JobApplication.objects.select_for_update().get(pk=self.pk)
+            if locked.pipeline_phase not in (self.PipelinePhase.PREPARATION, self.PipelinePhase.READY):
+                raise InvalidPhaseTransitionError(
+                    f"Cannot approve Gate 2 from phase {locked.pipeline_phase!r}."
+                )
+            if locked.current_resume_draft_id is None:
+                raise GateNotReadyError("No ResumeDraft exists yet -- run Agent Builder first.")
+            if locked.current_resume_draft.based_on_fit_assessment_id != locked.current_fit_assessment_id:
+                raise StaleAssessmentError(
+                    "The current ResumeDraft is based on a superseded FitAssessment version -- "
+                    "re-run Agent Builder against the current assessment before approving."
+                )
+            if locked.pipeline_phase == self.PipelinePhase.PREPARATION:
+                if not locked.current_resume_draft.is_confirmed:
+                    locked.current_resume_draft.confirm()
+                locked.pipeline_phase = self.PipelinePhase.READY
+                locked.save(update_fields=["pipeline_phase", "updated_at"])
+        self.pipeline_phase = locked.pipeline_phase
 
 
 class InvalidPhaseTransitionError(Exception):

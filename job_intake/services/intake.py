@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Max
 
 from job_applications.models import JobApplication
@@ -26,6 +26,11 @@ class IntakeValidationError(Exception):
 
 class AnalysisFailedError(Exception):
     pass
+
+
+class ConcurrentModificationError(Exception):
+    """See `candidate_matching.services.fit_assessment.ConcurrentModificationError` -- same
+    rationale, same (effectively unreachable given the `select_for_update()` lock) safety net."""
 
 
 @dataclass(frozen=True)
@@ -166,11 +171,22 @@ def rerun_analysis(
         raise AnalysisFailedError(result.error.message)
     analysis = result.content
 
-    with transaction.atomic():
-        next_version = (
-            application.job_requirement_analyses.aggregate(Max("version"))["version__max"] or 0
-        ) + 1
-        jra = _persist_jra_version(application, version=next_version, resolved=resolved, analysis=analysis)
-        application.record_jra(jra)
+    try:
+        with transaction.atomic():
+            locked_application = JobApplication.objects.select_for_update().get(pk=application.pk)
+            next_version = (
+                locked_application.job_requirement_analyses.aggregate(Max("version"))["version__max"] or 0
+            ) + 1
+            jra = _persist_jra_version(
+                locked_application, version=next_version, resolved=resolved, analysis=analysis
+            )
+            locked_application.record_jra(jra)
+    except IntegrityError as exc:
+        raise ConcurrentModificationError(
+            "A concurrent Agent Jobber re-run for this application raced this one -- retry."
+        ) from exc
+
+    application.current_jra = jra
+    application.current_jra_id = jra.pk
 
     return jra
