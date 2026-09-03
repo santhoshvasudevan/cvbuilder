@@ -644,3 +644,26 @@ under-represented in a real bootstrap.
   `FitAssessment`/`RequirementAssessment`/`ResumeDraft`; `docs/REQUIREMENT_TRACEABILITY.md` gains
   `CE-001`..`CE-00N` rows; `docs/TEST_STRATEGY.md` and `docs/IMPLEMENTATION_PLAN.md`'s M5/M6
   sections are updated accordingly.
+
+### D-019 refinement: the static/narrative claim-eligibility boundary (2026-09-03, APPROVED)
+
+The first pass above proposed mappings for exactly `employment_dates`/`employment_location`
+claims -- backwards from the actual intent. Those two types (plus `position`/`position_title`,
+verified against the real activated CandidateMemory's own `claim_type` vocabulary, not guessed)
+are **static engagement claim types**: their entire factual content is now owned by
+`CareerEngagement` directly, so they must never be proposed for mapping, never be eligible for
+approval, and never enter a future M5/M6 LLM input projection.
+`services/engagement_mapping.STATIC_ENGAGEMENT_CLAIM_TYPES` is the definitive, evidence-based list.
+`ClaimEngagementMapping` exists only to link **narrative** evidence -- responsibilities,
+achievements, projects, role-specific skills/technical delivery -- to the engagement a future M6
+should place it under; `propose_claim_engagement_mappings` now excludes the static types (and
+requires `resume_eligible=True`); `approve_mapping` refuses (`StaticClaimMappingError`) to approve
+a static-type mapping even if a stale row exists from before this refinement; the admin's bulk
+approve action is routed through `approve_mapping` per row (never a bulk status update) so the
+refusal is enforced through the real workflow. `find_mappings_needing_review` gives a read-only
+categorization of existing mappings against this boundary, and the
+`cleanup_static_engagement_mappings` management command (report by default; `--apply` to act)
+retroactively rejects the 9 pre-refinement mappings that were proposed under the old, backwards
+rule. `approved_narrative_claim_ids_for_engagement` is the planned M6 renderer's lookup for which
+narrative claims to place under one engagement's experience section -- the concrete form of item 6
+above ("use mappings only to place narrative bullets under the correct engagement").

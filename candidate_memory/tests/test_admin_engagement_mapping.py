@@ -42,7 +42,7 @@ class ClaimEngagementMappingAdminReviewTests(TestCase):
         )
         self.claim = make_claim(
             self.rev,
-            claim_type="employment_dates",
+            claim_type="responsibility",
             canonical_text_en="Employed by Ford Motor Company as Senior Cloud Engineer since 2017.",
             subject_scope="organization:ford motor company",
             legal_employer="Ambigai Consultancy Services",
@@ -77,7 +77,7 @@ class ClaimEngagementMappingAdminReviewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
         self.assertIn(self.claim.claim_id, body)
-        self.assertIn("employment_dates", body)
+        self.assertIn("responsibility", body)
         self.assertIn(self.engagement.engagement_id, body)
         self.assertIn("Senior Cloud Engineer", body)
         self.assertIn("AC-profile_english.md", body)
@@ -91,7 +91,7 @@ class ClaimEngagementMappingAdminReviewTests(TestCase):
         # MemoryClaim ID, complete canonical text, claim type, subject scope.
         self.assertIn(self.claim.claim_id, body)
         self.assertIn("Employed by Ford Motor Company as Senior Cloud Engineer since 2017.", body)
-        self.assertIn("employment_dates", body)
+        self.assertIn("responsibility", body)
         self.assertIn("organization:ford motor company", body)
 
         # Confirmation and resume-eligibility status.
@@ -156,7 +156,7 @@ class ClaimEngagementMappingAdminPermissionTests(TestCase):
     def setUp(self):
         self.rev = make_revision()
         self.engagement = _make_engagement()
-        self.claim = make_claim(self.rev, claim_type="employment_dates")
+        self.claim = make_claim(self.rev, claim_type="responsibility")
         self.mapping = ClaimEngagementMapping.objects.create(
             memory_claim=self.claim, career_engagement=self.engagement
         )
@@ -189,3 +189,75 @@ class ClaimEngagementMappingAdminPermissionTests(TestCase):
         response = self.client.get(self._change_url())
         self.assertEqual(response.status_code, 200)
         self.assertIn(self.claim.claim_id, response.content.decode())
+
+
+class ClaimEngagementMappingAdminApproveActionTests(TestCase):
+    """The admin's bulk 'Approve selected mappings' action must refuse a static engagement claim
+    exactly like the underlying service does -- it is routed through
+    services.engagement_mapping.approve_mapping per row, never a bulk status update (D-019
+    refinement, 2026-09-03)."""
+
+    def setUp(self):
+        self.superuser = User.objects.create_superuser(
+            username="admin-approver", email="approver@example.com", password="pw"
+        )
+        self.client.force_login(self.superuser)
+        self.rev = make_revision()
+        self.engagement = _make_engagement()
+
+    def _approve(self, mapping_ids):
+        return self.client.post(
+            reverse("admin:candidate_memory_claimengagementmapping_changelist"),
+            {
+                "action": "approve_mappings",
+                "_selected_action": [str(pk) for pk in mapping_ids],
+            },
+            follow=True,
+        )
+
+    def test_approving_a_narrative_mapping_succeeds(self):
+        claim = make_claim(
+            self.rev, claim_type="responsibility",
+            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED, resume_eligible=True,
+        )
+        mapping = ClaimEngagementMapping.objects.create(
+            memory_claim=claim, career_engagement=self.engagement
+        )
+
+        self._approve([mapping.pk])
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.APPROVED)
+
+    def test_approving_a_static_engagement_claim_mapping_is_refused(self):
+        claim = make_claim(self.rev, claim_type="employment_dates")
+        mapping = ClaimEngagementMapping.objects.create(
+            memory_claim=claim, career_engagement=self.engagement
+        )
+
+        response = self._approve([mapping.pk])
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+        self.assertIsNone(mapping.reviewed_at)
+        self.assertIn(claim.claim_id.encode(), response.content)
+
+    def test_mixed_selection_approves_narrative_and_refuses_static(self):
+        static_claim = make_claim(self.rev, claim_type="position_title")
+        narrative_claim = make_claim(
+            self.rev, claim_type="achievement",
+            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED, resume_eligible=True,
+        )
+        static_mapping = ClaimEngagementMapping.objects.create(
+            memory_claim=static_claim, career_engagement=self.engagement
+        )
+        narrative_mapping = ClaimEngagementMapping.objects.create(
+            memory_claim=narrative_claim, career_engagement=self.engagement
+        )
+
+        self._approve([static_mapping.pk, narrative_mapping.pk])
+
+        static_mapping.refresh_from_db()
+        narrative_mapping.refresh_from_db()
+        self.assertEqual(static_mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+        self.assertEqual(narrative_mapping.status, ClaimEngagementMapping.Status.APPROVED)

@@ -51,7 +51,7 @@ class ProposeClaimEngagementMappingsCommandTests(TestCase):
         rev = make_revision()
         engagement = _make_engagement()
         claim = make_claim(
-            rev, claim_type="employment_dates",
+            rev, claim_type="responsibility",
             legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Company",
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
         )
@@ -69,7 +69,7 @@ class ProposeClaimEngagementMappingsCommandTests(TestCase):
         rev = make_revision()
         _make_engagement()
         make_claim(
-            rev, claim_type="employment_dates",
+            rev, claim_type="responsibility",
             legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Company",
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
         )
@@ -88,7 +88,7 @@ class ProposeClaimEngagementMappingsCommandTests(TestCase):
         rev = make_revision()
         _make_engagement()
         make_claim(
-            rev, claim_type="employment_dates",
+            rev, claim_type="responsibility",
             legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Company",
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
         )
@@ -103,7 +103,7 @@ class ProposeClaimEngagementMappingsCommandTests(TestCase):
         rev = make_revision()
         _make_engagement()
         make_claim(
-            rev, claim_type="employment_dates",
+            rev, claim_type="responsibility",
             legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Company",
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
         )
@@ -118,7 +118,7 @@ class ProposeClaimEngagementMappingsCommandTests(TestCase):
     def test_ambiguous_and_unresolved_claims_never_produce_a_mapping(self):
         rev = make_revision()
         make_claim(
-            rev, claim_type="employment_dates",
+            rev, claim_type="responsibility",
             legal_employer="Some Employer With No Engagement Yet", client_organization="",
             confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
         )

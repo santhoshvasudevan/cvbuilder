@@ -1,5 +1,4 @@
-from django.contrib import admin
-from django.utils import timezone
+from django.contrib import admin, messages
 from django.utils.html import format_html, format_html_join
 
 from .models import (
@@ -12,6 +11,7 @@ from .models import (
     MemoryConflict,
     MemorySourceDocument,
 )
+from .services import engagement_mapping
 
 
 class _RevisionScopedAdminMixin:
@@ -266,8 +266,28 @@ class ClaimEngagementMappingAdmin(admin.ModelAdmin):
 
     @admin.action(description="Approve selected mappings")
     def approve_mappings(self, request, queryset):
-        queryset.update(status=ClaimEngagementMapping.Status.APPROVED, reviewed_at=timezone.now())
+        # Routed through the service function (D-019 refinement, 2026-09-03) -- never a bulk
+        # status update -- so a static engagement claim's mapping is refused here exactly like
+        # everywhere else, not just in code nobody calls.
+        approved, refused = 0, []
+        for mapping in queryset.select_related("memory_claim", "career_engagement"):
+            try:
+                engagement_mapping.approve_mapping(mapping)
+            except engagement_mapping.StaticClaimMappingError:
+                refused.append(mapping.memory_claim.claim_id)
+            else:
+                approved += 1
+        if approved:
+            self.message_user(request, f"Approved {approved} mapping(s).")
+        if refused:
+            self.message_user(
+                request,
+                "Refused to approve static engagement claim mapping(s), reject them instead: "
+                + ", ".join(refused),
+                level=messages.WARNING,
+            )
 
     @admin.action(description="Reject selected mappings")
     def reject_mappings(self, request, queryset):
-        queryset.update(status=ClaimEngagementMapping.Status.REJECTED, reviewed_at=timezone.now())
+        for mapping in queryset:
+            engagement_mapping.reject_mapping(mapping)
