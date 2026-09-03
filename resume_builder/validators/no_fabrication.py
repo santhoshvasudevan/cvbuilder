@@ -14,6 +14,23 @@ This is an evidence-attachment/eligibility check -- existence, confirmation, res
 and retrieval-context-membership of every cited ID -- never a text/embedding-similarity check
 (D-014 explicitly rules that out as the fabrication test). Whether generated wording *fairly
 represents* the cited evidence remains Gate 2's human-review responsibility.
+
+Engagement-placement correctness (audit hardening, 2026-09-03): a claim's *complete* set of
+APPROVED engagement mappings (`RetrievedClaim.approved_engagement_ids` -- never a single nullable
+field, since one claim can legitimately be approved for more than one engagement) is checked for
+every experience bullet:
+- citing a claim that IS mapped, but only to a *different* engagement than the one the bullet is
+  placed under, fails the whole build (this is what the pre-hardening version of this validator
+  missed -- it only checked that a claim existed somewhere in the retrieved context, never that it
+  belonged to the specific engagement it was placed under);
+- a claim with no engagement mapping at all ("global") may appear alongside real evidence for that
+  engagement, but a bullet whose evidence is *entirely* global claims is rejected -- global
+  evidence is supplementary, never sufficient on its own to place a bullet under one specific
+  engagement's experience section.
+Summary/positioning-theme/achievement/skill/certification/language elements are exempt from this
+engagement-correctness check by design (D-019/`docs/RESUME_OUTPUT_STRUCTURE.md`): they may use any
+valid claim, global or engagement-mapped, without needing to "belong" to a section's engagement,
+since those sections have no engagement of their own to belong to.
 """
 
 from __future__ import annotations
@@ -55,6 +72,9 @@ def validate_and_flatten(
 ) -> list[ValidatedElement]:
     valid_claim_ids = set(retrieval.claim_ids)
     valid_engagement_ids = set(retrieval.engagement_ids)
+    claim_engagements: dict[str, tuple[str, ...]] = {
+        claim.claim_id: claim.approved_engagement_ids for claim in retrieval.claims
+    }
     failures: list[str] = []
     elements: list[ValidatedElement] = []
     order_counters: dict[tuple[str, str], int] = defaultdict(int)
@@ -82,6 +102,64 @@ def validate_and_flatten(
             )
         )
 
+    def add_experience_bullet(text: str, claim_ids: list[str], jr_ids: list[str], engagement_id: str):
+        if not claim_ids:
+            failures.append(f"EXPERIENCE_BULLET {text[:60]!r} has no supporting_memory_claim_ids.")
+            return
+        unknown = [claim_id for claim_id in claim_ids if claim_id not in valid_claim_ids]
+        if unknown:
+            failures.append(
+                f"EXPERIENCE_BULLET {text[:60]!r} cites claim id(s) not in the retrieved context: {unknown}"
+            )
+            return
+
+        wrong_engagement: list[str] = []
+        matches_this_engagement = False
+        has_global_evidence = False
+        for claim_id in claim_ids:
+            mapped = claim_engagements.get(claim_id, ())
+            if not mapped:
+                has_global_evidence = True
+                continue
+            if engagement_id in mapped:
+                matches_this_engagement = True
+            else:
+                wrong_engagement.append(claim_id)
+
+        if wrong_engagement:
+            failures.append(
+                f"EXPERIENCE_BULLET {text[:60]!r} under engagement {engagement_id!r} cites claim(s) "
+                f"{wrong_engagement} that are approved only for a different engagement "
+                f"({[claim_engagements[c] for c in wrong_engagement]}) -- cross-engagement "
+                "placement is rejected rather than silently placed under one engagement."
+            )
+            return
+        if not matches_this_engagement:
+            reason = (
+                "only global (unmapped) evidence"
+                if has_global_evidence
+                else "no evidence approved for this specific engagement"
+            )
+            failures.append(
+                f"EXPERIENCE_BULLET {text[:60]!r} under engagement {engagement_id!r} has {reason} -- "
+                "global evidence may supplement an engagement-specific bullet but can never be its "
+                "sole support."
+            )
+            return
+
+        key = (ResumeElement.Section.EXPERIENCE_BULLET, engagement_id)
+        order_counters[key] += 1
+        elements.append(
+            ValidatedElement(
+                section=ResumeElement.Section.EXPERIENCE_BULLET,
+                engagement_id=engagement_id,
+                order=order_counters[key],
+                text=text,
+                supporting_memory_claim_ids=list(claim_ids),
+                matched_job_requirement_ids=list(jr_ids),
+            )
+        )
+
     for item in ab_output.summary_elements:
         add(
             ResumeElement.Section.SUMMARY,
@@ -100,12 +178,11 @@ def validate_and_flatten(
             )
             continue
         for bullet in section.bullets:
-            add(
-                ResumeElement.Section.EXPERIENCE_BULLET,
+            add_experience_bullet(
                 bullet.text,
                 bullet.supporting_memory_claim_ids,
                 bullet.matched_job_requirement_ids,
-                engagement_id=section.engagement_id,
+                section.engagement_id,
             )
 
     for item in ab_output.positioning_themes:

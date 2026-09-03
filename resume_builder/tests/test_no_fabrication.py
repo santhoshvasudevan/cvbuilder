@@ -11,13 +11,20 @@ from ..validators.no_fabrication import NoFabricationError, validate_and_flatten
 from .factories import freeze_revision, make_engagement, make_revision
 
 
-def _retrieval(claim_ids, engagement_ids) -> RetrievalContext:
+def _retrieval(claim_ids, engagement_ids, claim_engagements=None) -> RetrievalContext:
+    """`claim_engagements` optionally maps claim_id -> tuple of approved engagement_ids for that
+    claim (default: global/unmapped) -- lets tests exercise engagement-placement correctness
+    without touching the database."""
+    claim_engagements = claim_engagements or {}
     return RetrievalContext(
         candidate_memory_id=1,
         claims=[
             RetrievedClaim(
-                claim_id=cid, text="t", claim_type="responsibility", subject_scope="s",
-                approved_engagement_ids=(),
+                claim_id=cid,
+                text="t",
+                claim_type="responsibility",
+                subject_scope="s",
+                approved_engagement_ids=claim_engagements.get(cid, ()),
             )
             for cid in claim_ids
         ],
@@ -149,10 +156,126 @@ class ValidateAndFlattenTests(TestCase):
                 }
             ]
         )
-        elements = validate_and_flatten(output, retrieval=_retrieval(["MC-1"], [engagement.engagement_id]))
+        retrieval = _retrieval(
+            ["MC-1"],
+            [engagement.engagement_id],
+            claim_engagements={"MC-1": (engagement.engagement_id,)},
+        )
+        elements = validate_and_flatten(output, retrieval=retrieval)
         self.assertEqual(len(elements), 1)
         self.assertEqual(elements[0].engagement_id, engagement.engagement_id)
         self.assertEqual(elements[0].matched_job_requirement_ids, ["JR-001"])
+
+    def test_experience_bullet_with_only_global_evidence_is_rejected(self):
+        engagement = make_engagement()
+        output = _output(
+            experience_sections=[
+                {
+                    "engagement_id": engagement.engagement_id,
+                    "bullets": [
+                        {
+                            "text": "Did things.",
+                            "supporting_memory_claim_ids": ["MC-1"],
+                            "matched_job_requirement_ids": [],
+                        }
+                    ],
+                }
+            ]
+        )
+        # MC-1 is global (no engagement mapping) -- not sufficient on its own.
+        retrieval = _retrieval(["MC-1"], [engagement.engagement_id])
+        with self.assertRaises(NoFabricationError) as ctx:
+            validate_and_flatten(output, retrieval=retrieval)
+        self.assertIn("only global (unmapped) evidence", str(ctx.exception))
+
+    def test_experience_bullet_mixing_matched_and_global_evidence_passes(self):
+        engagement = make_engagement()
+        output = _output(
+            experience_sections=[
+                {
+                    "engagement_id": engagement.engagement_id,
+                    "bullets": [
+                        {
+                            "text": "Did things, using Python broadly.",
+                            "supporting_memory_claim_ids": ["MC-1", "MC-global"],
+                            "matched_job_requirement_ids": [],
+                        }
+                    ],
+                }
+            ]
+        )
+        retrieval = _retrieval(
+            ["MC-1", "MC-global"],
+            [engagement.engagement_id],
+            claim_engagements={"MC-1": (engagement.engagement_id,)},
+        )
+        elements = validate_and_flatten(output, retrieval=retrieval)
+        self.assertEqual(sorted(elements[0].supporting_memory_claim_ids), ["MC-1", "MC-global"])
+
+    def test_experience_bullet_citing_a_claim_mapped_to_a_different_engagement_is_rejected(self):
+        engagement_a = make_engagement()
+        engagement_b = make_engagement()
+        output = _output(
+            experience_sections=[
+                {
+                    "engagement_id": engagement_b.engagement_id,
+                    "bullets": [
+                        {
+                            "text": "Did things.",
+                            "supporting_memory_claim_ids": ["MC-1"],
+                            "matched_job_requirement_ids": [],
+                        }
+                    ],
+                }
+            ]
+        )
+        retrieval = _retrieval(
+            ["MC-1"],
+            [engagement_a.engagement_id, engagement_b.engagement_id],
+            claim_engagements={"MC-1": (engagement_a.engagement_id,)},
+        )
+        with self.assertRaises(NoFabricationError) as ctx:
+            validate_and_flatten(output, retrieval=retrieval)
+        self.assertIn("approved only for a different engagement", str(ctx.exception))
+
+    def test_claim_approved_for_multiple_engagements_passes_under_either(self):
+        engagement_a = make_engagement()
+        engagement_b = make_engagement()
+        retrieval = _retrieval(
+            ["MC-1"],
+            [engagement_a.engagement_id, engagement_b.engagement_id],
+            claim_engagements={"MC-1": (engagement_a.engagement_id, engagement_b.engagement_id)},
+        )
+        for target in (engagement_a, engagement_b):
+            output = _output(
+                experience_sections=[
+                    {
+                        "engagement_id": target.engagement_id,
+                        "bullets": [
+                            {
+                                "text": "Did things.",
+                                "supporting_memory_claim_ids": ["MC-1"],
+                                "matched_job_requirement_ids": [],
+                            }
+                        ],
+                    }
+                ]
+            )
+            elements = validate_and_flatten(output, retrieval=retrieval)
+            self.assertEqual(elements[0].engagement_id, target.engagement_id)
+
+    def test_summary_may_use_a_global_claim_with_no_engagement_mapping(self):
+        output = _output(
+            summary_elements=[
+                {
+                    "text": "Broadly skilled.",
+                    "supporting_memory_claim_ids": ["MC-1"],
+                    "matched_job_requirement_ids": [],
+                }
+            ]
+        )
+        elements = validate_and_flatten(output, retrieval=_retrieval(["MC-1"], []))
+        self.assertEqual(elements[0].section, ResumeElement.Section.SUMMARY)
 
     def test_multiple_failures_are_all_reported_together(self):
         output = _output(
