@@ -113,9 +113,11 @@ def activation_blockers(
         status=ChunkExtractionAttempt.Status.FAILED
     ).select_related("source_document")
     if failed_attempts.exists():
-        examples = ", ".join(
-            f"{a.source_document.filename} L{a.start_line}-{a.end_line}" for a in failed_attempts[:5]
-        )
+        def _describe(a: ChunkExtractionAttempt) -> str:
+            char_suffix = f" C{a.start_char}-{a.end_char}" if a.start_char is not None else ""
+            return f"{a.source_document.filename} L{a.start_line}-{a.end_line}{char_suffix}"
+
+        examples = ", ".join(_describe(a) for a in failed_attempts[:5])
         blockers.append(
             f"{failed_attempts.count()} chunk extraction attempt(s) remain FAILED and unresolved "
             f"(e.g. {examples}) -- this source content was never successfully extracted."

@@ -35,6 +35,7 @@ from .chunking import (
     chunk_source,
     split_chunk_in_half,
     split_chunk_into_individual_lines,
+    split_line_into_sentences,
 )
 from .comparable_values import COMPARABLE_CLAIM_TYPES, has_valid_structured_value
 from .confirmation import evaluate_auto_confirmation
@@ -178,6 +179,8 @@ def _record_chunk_attempt(
         source_content_sha256=source_document.content_sha256,
         start_line=chunk.start_line,
         end_line=chunk.end_line,
+        start_char=chunk.start_char,
+        end_char=chunk.end_char,
         status=status,
         error_category=error_category,
         llm_call_log=llm_call_log,
@@ -201,14 +204,16 @@ def _process_chunk_with_recovery(
     """Extracts one chunk, recursively halving and retrying *only* on a `finish_reason=length`
     truncation, bounded by `MAX_SPLIT_DEPTH`/`chunking.MIN_SPLIT_CHUNK_LINES` (Candidate Memory
     recovery, 2026-09-03) -- reasoning stays disabled and `max_output_tokens` stays at its
-    configured value throughout; only the chunk's own size shrinks. `max_output_tokens_override`,
-    when given, is threaded to every call this invocation makes (including any split children) and
-    never changes the registry's configured default -- see
+    configured value throughout; only the chunk's own size shrinks. Once a chunk is down to a
+    single whole physical line and still truncates, the deterministic (LLM-free)
+    `chunking.split_line_into_sentences` is tried as a further, final tier before failing closed
+    (2026-09-03) -- see that function's docstring for its own fail-closed conditions.
+    `max_output_tokens_override`, when given, is threaded to every call this invocation makes
+    (including any split children) and never changes the registry's configured default -- see
     `retry_chunk_lineage_with_output_override` below, the only caller that ever sets it.
 
     A truncated response never has any parseable content (JSON parsing fails on incomplete output,
-    which is exactly what
-    makes it classify as `finish_reason=length` in the first place -- see
+    which is exactly what makes it classify as `finish_reason=length` in the first place -- see
     `llm_provider/adapters/openai.py`), so a chunk that gets split was never able to store
     anything in the first place; splitting can never duplicate an already-stored claim. Every
     attempt -- success, unresolved failure, or superseded-by-split -- gets exactly one
@@ -265,6 +270,13 @@ def _process_chunk_with_recovery(
             # own long Markdown bullet. An empty list here (chunk is already a single line) keeps
             # `split` falsy, same as the original None case.
             split = split_chunk_into_individual_lines(chunk) or None
+        if split is None and len(chunk.lines) == 1 and chunk.start_char is None:
+            # Already a single whole physical line and still truncating -- deterministic,
+            # LLM-free sentence-boundary split (recovery, 2026-09-03): some lines are themselves
+            # dense enough (several complete sentences in one Markdown bullet) to overflow the
+            # output budget even alone. `[] or None` fails closed exactly like the tiers above when
+            # the line doesn't tokenize into at least two trustworthy sentence fragments.
+            split = split_line_into_sentences(chunk) or None
 
     if is_truncation and split:
         _record_chunk_attempt(
@@ -554,6 +566,145 @@ def retry_chunk_lineage_with_output_override(
         live_calls_made=1,
         recovered=len(matched_attempts) if recovered_ok else 0,
         still_failed=0 if recovered_ok else len(matched_attempts),
+        claims_extracted=build_summary["claims_extracted"],
+        rules_extracted=build_summary["rules_extracted"],
+        extraction_errors=build_summary["extraction_errors"],
+    )
+
+
+@dataclasses.dataclass
+class SentenceSplitPlan:
+    """Result of pre-calculating a sentence-level split before any provider call is made."""
+
+    fragments: list[SourceChunk]
+    required_calls: int
+    within_budget: bool
+
+
+def plan_sentence_split_recovery(
+    source_document: MemorySourceDocument, *, line_number: int, max_live_calls: int
+) -> SentenceSplitPlan:
+    """Pure, no-provider-call pre-calculation (Candidate Memory recovery, 2026-09-03): splits
+    `line_number` deterministically via `chunking.split_line_into_sentences` and reports how many
+    live calls that plan would require, without making any of them. Callers must check
+    `within_budget` and refuse to proceed (never silently truncate the plan to fit) if it is
+    `False`."""
+    lines = source_document.raw_content.splitlines()
+    whole_line = SourceChunk(start_line=line_number, end_line=line_number, lines=(lines[line_number - 1],))
+    fragments = split_line_into_sentences(whole_line)
+    return SentenceSplitPlan(
+        fragments=fragments,
+        required_calls=len(fragments),
+        within_budget=len(fragments) >= 2 and len(fragments) <= max_live_calls,
+    )
+
+
+def retry_line_via_sentence_split(
+    candidate_memory: CandidateMemory,
+    *,
+    source_document: MemorySourceDocument,
+    line_number: int,
+    max_live_calls: int,
+) -> ChunkRetrySummary:
+    """Deterministic, LLM-free sentence-level last-resort recovery (2026-09-03) for one physical
+    line whose every currently-`FAILED` `ChunkExtractionAttempt` -- at any ancestor granularity,
+    including any prior per-call `max_output_tokens` override attempt -- still traces back to it.
+    This only ever matters once line-level splitting and a raised per-call output-token ceiling
+    have both already been exhausted and the line still truncates: the sentence boundaries
+    themselves (never the provider) decide how to subdivide it, via
+    `plan_sentence_split_recovery`/`chunking.split_line_into_sentences`.
+
+    Pre-calculates the full plan via `plan_sentence_split_recovery` *before* making any call.
+    Returns immediately, having made zero calls, if: no currently-`FAILED` attempt covers this
+    line (a true no-op, never reinterpreted as success); the source document's current content
+    hash no longer matches any matched attempt's stored `source_content_sha256` (fail closed,
+    never retry under stale provenance); the line does not split into at least two trustworthy
+    sentence fragments; or the plan would require more calls than `max_live_calls` allows.
+
+    Fragments are attempted strictly in order, one live call each, at `depth=MAX_SPLIT_DEPTH` so a
+    fragment that itself still truncates fails closed immediately with no further split attempt.
+    Processing stops at the first fragment failure -- every fragment after it is left entirely
+    unattempted (no call spent, no `ChunkExtractionAttempt` row created for it) rather than
+    continuing or retrying. All matched historical `FAILED` attempts are marked `SUPERSEDED`
+    together only if every fragment succeeds; on any failure, or on any of the zero-call fail-closed
+    conditions above, they are left exactly as they already were.
+    """
+    matched_attempts = list(
+        candidate_memory.chunk_attempts.filter(
+            status=ChunkExtractionAttempt.Status.FAILED,
+            source_document=source_document,
+            start_line__lte=line_number,
+            end_line__gte=line_number,
+        )
+    )
+    if not matched_attempts:
+        return ChunkRetrySummary(0, 0, 0, 0, 0, 0, 0)
+
+    if any(
+        source_document.content_sha256 != attempt.source_content_sha256 for attempt in matched_attempts
+    ):
+        return ChunkRetrySummary(len(matched_attempts), 0, 0, len(matched_attempts), 0, 0, 0)
+
+    plan = plan_sentence_split_recovery(
+        source_document, line_number=line_number, max_live_calls=max_live_calls
+    )
+    if not plan.within_budget:
+        return ChunkRetrySummary(len(matched_attempts), 0, 0, len(matched_attempts), 0, 0, 0)
+
+    build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
+    live_calls_made = 0
+    all_succeeded = True
+
+    for fragment in plan.fragments:
+        before_ids = set(
+            ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory).values_list(
+                "id", flat=True
+            )
+        )
+        _process_chunk_with_recovery(
+            fragment,
+            source_role=source_document.source_role,
+            language=source_document.language,
+            source_document=source_document,
+            new_revision=candidate_memory,
+            build_summary=build_summary,
+            depth=MAX_SPLIT_DEPTH,
+        )
+        live_calls_made += 1
+        after_ids = set(
+            ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory).values_list(
+                "id", flat=True
+            )
+        )
+        new_attempts = ChunkExtractionAttempt.objects.filter(id__in=after_ids - before_ids)
+        if new_attempts.filter(status=ChunkExtractionAttempt.Status.FAILED).exists():
+            all_succeeded = False
+            break
+
+    if all_succeeded:
+        for attempt in matched_attempts:
+            attempt.status = ChunkExtractionAttempt.Status.SUPERSEDED
+            attempt.save()
+
+    candidate_memory.refresh_from_db()
+    summary = dict(candidate_memory.build_summary)
+    summary["claims_extracted"] = summary.get("claims_extracted", 0) + build_summary["claims_extracted"]
+    summary["rules_extracted"] = summary.get("rules_extracted", 0) + build_summary["rules_extracted"]
+    summary["extraction_errors"] = summary.get("extraction_errors", 0) + build_summary["extraction_errors"]
+    summary["chunk_attempts_failed"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.FAILED
+    ).count()
+    summary["chunk_attempts_superseded"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.SUPERSEDED
+    ).count()
+    candidate_memory.build_summary = summary
+    candidate_memory.save()
+
+    return ChunkRetrySummary(
+        failed_before=len(matched_attempts),
+        live_calls_made=live_calls_made,
+        recovered=len(matched_attempts) if all_succeeded else 0,
+        still_failed=0 if all_succeeded else len(matched_attempts),
         claims_extracted=build_summary["claims_extracted"],
         rules_extracted=build_summary["rules_extracted"],
         extraction_errors=build_summary["extraction_errors"],

@@ -16,7 +16,12 @@ from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, Memor
 from ..schemas import ChunkExtractionResult, ContentPlane, ExtractedItem, SourcePassage
 from ..services import bootstrap as bootstrap_service
 from ..services.bootstrap import ReadSource
-from ..services.chunking import SourceChunk, split_chunk_in_half, split_chunk_into_individual_lines
+from ..services.chunking import (
+    SourceChunk,
+    split_chunk_in_half,
+    split_chunk_into_individual_lines,
+    split_line_into_sentences,
+)
 from ..services.storage import store_extracted_item
 from .factories import make_revision, make_source, scripted_extraction
 
@@ -65,6 +70,81 @@ class SplitChunkIntoIndividualLinesTests(SimpleTestCase):
     def test_returns_empty_list_for_a_single_line_chunk(self):
         chunk = SourceChunk(start_line=1, end_line=1, lines=("only line",))
         self.assertEqual(split_chunk_into_individual_lines(chunk), [])
+
+
+class SplitLineIntoSentencesTests(SimpleTestCase):
+    def test_splits_on_sentence_boundaries_preserving_exact_offsets(self):
+        line = "First sentence. Second sentence! Third sentence?"
+        chunk = SourceChunk(start_line=37, end_line=37, lines=(line,))
+        result = split_line_into_sentences(chunk)
+        self.assertEqual(len(result), 3)
+        for fragment in result:
+            self.assertEqual((fragment.start_line, fragment.end_line), (37, 37))
+        # Every fragment is an exact, unmodified slice of the original line at its own offsets.
+        for fragment in result:
+            self.assertEqual(line[fragment.start_char:fragment.end_char], fragment.lines[0])
+        self.assertEqual(result[0].lines[0], "First sentence.")
+        self.assertEqual(result[1].lines[0], "Second sentence!")
+        self.assertEqual(result[2].lines[0], "Third sentence?")
+
+    def test_fragments_partition_the_line_with_only_whitespace_between(self):
+        line = "Alpha. Beta. Gamma."
+        chunk = SourceChunk(start_line=1, end_line=1, lines=(line,))
+        result = split_line_into_sentences(chunk)
+        self.assertEqual(result[0].start_char, 0)
+        self.assertEqual(result[-1].end_char, len(line))
+        for a, b in zip(result, result[1:]):
+            # Only whitespace may separate consecutive fragments -- never overlap, never a gap
+            # containing non-whitespace content that would be silently dropped.
+            gap = line[a.end_char:b.start_char]
+            self.assertEqual(gap.strip(), "")
+
+    def test_returns_empty_list_when_line_has_no_sentence_boundaries(self):
+        chunk = SourceChunk(start_line=1, end_line=1, lines=("no punctuation at all here",))
+        self.assertEqual(split_line_into_sentences(chunk), [])
+
+    def test_returns_empty_list_for_a_single_sentence(self):
+        chunk = SourceChunk(start_line=1, end_line=1, lines=("Only one sentence here.",))
+        self.assertEqual(split_line_into_sentences(chunk), [])
+
+    def test_refuses_to_split_a_multi_line_chunk(self):
+        chunk = SourceChunk(start_line=1, end_line=2, lines=("First. Second.", "Third. Fourth."))
+        self.assertEqual(split_line_into_sentences(chunk), [])
+
+    def test_refuses_to_split_an_already_sentence_level_fragment(self):
+        chunk = SourceChunk(
+            start_line=1, end_line=1, lines=("Already a fragment. Still two sentences.",),
+            start_char=0, end_char=40,
+        )
+        self.assertEqual(split_line_into_sentences(chunk), [])
+
+    def test_real_corpus_line_37_splits_into_exactly_six_sentences(self):
+        """Regression guard for the actual production case this recovery targets: line 37 of
+        AC-profile_english.md is one Markdown bullet containing six complete sentences."""
+        line = (
+            "- Business intelligence and connected-mobility professional with 13+ years of "
+            "experience across automotive OEM and Tier-1 environments, including extensive "
+            "responsibility for connected-vehicle data platforms, analytics, and service "
+            "performance. Transforms vehicle, fleet, operational, and customer-experience data "
+            "into KPI dashboards, self-service analytics, actionable insights, and management "
+            "reporting. Hands-on with SQL, Python, Pandas, dbt, Airflow, Power BI, Tableau, Looker "
+            "Studio, analytical data models, data-quality controls, and cloud-native analytics on "
+            "Google Cloud Platform. Combines direct knowledge of connected services, fleet "
+            "telematics, EV charging schedules, subscriptions, and digital customer journeys with "
+            "structured ownership and international stakeholder collaboration. Tableau experience "
+            "is hands-on rather than advanced. Production cloud delivery is GCP-centered; AWS "
+            "analytics services, forecasting, segmentation, CRM, and marketing analytics are "
+            "identified development areas rather than claimed delivery experience."
+        )
+        chunk = SourceChunk(start_line=37, end_line=37, lines=(line,))
+        result = split_line_into_sentences(chunk)
+        self.assertEqual(len(result), 6)
+        self.assertEqual(result[0].start_char, 0)
+        self.assertEqual(result[-1].end_char, len(line))
+        for fragment in result:
+            self.assertEqual(line[fragment.start_char:fragment.end_char], fragment.lines[0])
+        for a, b in zip(result, result[1:]):
+            self.assertEqual(line[a.end_char:b.start_char].strip(), "")
 
 
 class RecursiveSplitOnTruncationTests(TestCase):
@@ -141,6 +221,41 @@ class RecursiveSplitOnTruncationTests(TestCase):
         # chunk still truncates; nothing coarser is ever left as the final, unresolved state.
         for a in failed:
             self.assertEqual(a.end_line, a.start_line)
+
+    def test_single_line_that_still_truncates_falls_back_to_sentence_split(self):
+        """Recovery (2026-09-03): once a chunk is down to one whole physical line and still
+        truncates, the deterministic sentence-boundary split is tried before failing closed."""
+        line = "First sentence. Second sentence! Third sentence?"
+        chunk = SourceChunk(start_line=37, end_line=37, lines=(line,))
+
+        def side_effect(chunk_arg, **kwargs):
+            return _truncation_result() if chunk_arg.start_char is None else _success_result()
+
+        rev, build_summary = self._run(chunk, side_effect)
+
+        attempts = list(ChunkExtractionAttempt.objects.filter(candidate_memory=rev))
+        # 1 SUPERSEDED (the original whole-line attempt) + 3 SUCCESS (one per sentence fragment).
+        self.assertEqual(len(attempts), 4)
+        self.assertEqual(
+            sum(1 for a in attempts if a.status == ChunkExtractionAttempt.Status.SUPERSEDED), 1
+        )
+        success_attempts = [a for a in attempts if a.status == ChunkExtractionAttempt.Status.SUCCESS]
+        self.assertEqual(len(success_attempts), 3)
+        self.assertTrue(all(a.start_line == 37 and a.end_line == 37 for a in success_attempts))
+        self.assertTrue(all(a.start_char is not None for a in success_attempts))
+        self.assertEqual(build_summary["extraction_errors"], 0)
+
+    def test_single_sentence_line_that_still_truncates_fails_closed(self):
+        """A single line with no sentence boundaries to split on (or only one sentence) has no
+        finer, still-trustworthy granularity -- it must fail closed, not loop forever."""
+        chunk = SourceChunk(start_line=37, end_line=37, lines=("Only one sentence with no split.",))
+        rev, build_summary = self._run(chunk, lambda chunk_arg, **kwargs: _truncation_result())
+
+        attempts = list(ChunkExtractionAttempt.objects.filter(candidate_memory=rev))
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0].status, ChunkExtractionAttempt.Status.FAILED)
+        self.assertEqual(attempts[0].start_char, None)
+        self.assertGreater(build_summary["extraction_errors"], 0)
 
     def test_only_failed_chunks_are_split_never_a_healthy_one(self):
         chunk = self._chunk(20)
@@ -611,6 +726,187 @@ class RetryChunkLineageWithOutputOverrideTests(TestCase):
         ):
             bootstrap_service.retry_chunk_lineage_with_output_override(
                 rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        other_leaf.refresh_from_db()
+        self.assertEqual(other_leaf.status, ChunkExtractionAttempt.Status.FAILED)
+
+
+class PlanSentenceSplitRecoveryTests(TestCase):
+    def test_reports_the_exact_required_call_count_without_calling_the_provider(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First. Second. Third.\n")
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            plan = bootstrap_service.plan_sentence_split_recovery(
+                source, line_number=1, max_live_calls=6
+            )
+        extract_mock.assert_not_called()
+        self.assertEqual(plan.required_calls, 3)
+        self.assertTrue(plan.within_budget)
+
+    def test_not_within_budget_when_required_calls_exceed_the_ceiling(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First. Second. Third. Fourth.\n")
+        plan = bootstrap_service.plan_sentence_split_recovery(source, line_number=1, max_live_calls=2)
+        self.assertEqual(plan.required_calls, 4)
+        self.assertFalse(plan.within_budget)
+
+    def test_not_within_budget_when_the_line_does_not_split(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="No sentence boundaries at all\n")
+        plan = bootstrap_service.plan_sentence_split_recovery(source, line_number=1, max_live_calls=6)
+        self.assertEqual(plan.required_calls, 0)
+        self.assertFalse(plan.within_budget)
+
+
+class RetryLineViaSentenceSplitTests(TestCase):
+    """Deterministic, LLM-free sentence-level last-resort recovery for a single physical line
+    (Candidate Memory recovery, 2026-09-03)."""
+
+    def _make_failed_attempt(self, rev, source, *, start_line, end_line, attempt_number=1):
+        return ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source,
+            source_content_sha256=source.content_sha256,
+            start_line=start_line, end_line=end_line,
+            status=ChunkExtractionAttempt.Status.FAILED, error_category="CONFIGURATION",
+            attempt_number=attempt_number,
+        )
+
+    def test_recovers_and_supersedes_the_whole_lineage_when_every_fragment_succeeds(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First sentence. Second sentence! Third sentence?\n")
+        ancestor_1 = self._make_failed_attempt(rev, source, start_line=1, end_line=1, attempt_number=1)
+        ancestor_2 = self._make_failed_attempt(rev, source, start_line=1, end_line=1, attempt_number=2)
+
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
+            )
+
+        self.assertEqual(call_count["n"], 3)
+        self.assertEqual(summary.live_calls_made, 3)
+        self.assertEqual(summary.failed_before, 2)
+        self.assertEqual(summary.recovered, 2)
+        self.assertEqual(summary.still_failed, 0)
+        for attempt in (ancestor_1, ancestor_2):
+            attempt.refresh_from_db()
+            self.assertEqual(attempt.status, ChunkExtractionAttempt.Status.SUPERSEDED)
+        fragment_attempts = ChunkExtractionAttempt.objects.filter(
+            candidate_memory=rev, status=ChunkExtractionAttempt.Status.SUCCESS
+        )
+        self.assertEqual(fragment_attempts.count(), 3)
+        self.assertTrue(all(a.start_char is not None for a in fragment_attempts))
+
+    def test_stops_at_the_first_failure_and_never_attempts_later_fragments(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First sentence. Second sentence! Third sentence?\n")
+        leaf = self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return _truncation_result()
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
+            )
+
+        # Exactly 2 calls made (fragment 1 succeeds, fragment 2 fails) -- fragment 3 is never
+        # attempted and consumes no call.
+        self.assertEqual(call_count["n"], 2)
+        self.assertEqual(summary.live_calls_made, 2)
+        self.assertEqual(summary.recovered, 0)
+        self.assertEqual(summary.still_failed, 1)
+        leaf.refresh_from_db()
+        self.assertEqual(leaf.status, ChunkExtractionAttempt.Status.FAILED)
+        attempts = ChunkExtractionAttempt.objects.filter(candidate_memory=rev)
+        # The original leaf + exactly 2 new fragment attempts (1 SUCCESS + 1 FAILED) = 3 total.
+        self.assertEqual(attempts.count(), 3)
+
+    def test_zero_calls_when_the_plan_exceeds_the_call_ceiling(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First. Second. Third. Fourth.\n")
+        leaf = self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=2
+            )
+
+        extract_mock.assert_not_called()
+        self.assertEqual(summary.live_calls_made, 0)
+        self.assertEqual(summary.still_failed, 1)
+        leaf.refresh_from_db()
+        self.assertEqual(leaf.status, ChunkExtractionAttempt.Status.FAILED)
+
+    def test_zero_calls_when_the_line_does_not_split_into_sentences(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="No sentence boundaries at all\n")
+        self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
+            )
+
+        extract_mock.assert_not_called()
+        self.assertEqual(summary.live_calls_made, 0)
+
+    def test_fails_closed_when_source_content_has_changed(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First sentence. Second sentence!\n")
+        leaf = self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+        leaf.source_content_sha256 = "stale-hash-does-not-match-current-source"
+        leaf.save()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
+            )
+
+        extract_mock.assert_not_called()
+        leaf.refresh_from_db()
+        self.assertEqual(leaf.status, ChunkExtractionAttempt.Status.FAILED)
+        self.assertEqual(summary.live_calls_made, 0)
+
+    def test_no_matching_failed_attempts_is_a_true_no_op(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="First sentence. Second sentence!\n")
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
+            )
+
+        extract_mock.assert_not_called()
+        self.assertEqual(summary.failed_before, 0)
+        self.assertEqual(summary.live_calls_made, 0)
+
+    def test_never_touches_a_different_revision(self):
+        other_rev = make_revision()
+        other_source = make_source(other_rev, raw_content="untouched\n")
+        other_leaf = self._make_failed_attempt(other_rev, other_source, start_line=1, end_line=1)
+
+        rev = make_revision()
+        source = make_source(rev, raw_content="First sentence. Second sentence!\n")
+        self._make_failed_attempt(rev, source, start_line=1, end_line=1)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _success_result(),
+        ):
+            bootstrap_service.retry_line_via_sentence_split(
+                rev, source_document=source, line_number=1, max_live_calls=6
             )
 
         other_leaf.refresh_from_db()

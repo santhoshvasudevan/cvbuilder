@@ -349,6 +349,19 @@ class ChunkExtractionAttempt(_RevisionScopedModel):
     )
     start_line = models.PositiveIntegerField()
     end_line = models.PositiveIntegerField()
+    start_char = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text=(
+            "Character offset (inclusive, 0-based) into the single line at start_line==end_line "
+            "for a sentence-level sub-line fragment (Candidate Memory recovery, 2026-09-03). Null "
+            "for every whole-line-or-wider attempt -- the overwhelming majority, and every row "
+            "that predates this field -- meaning start_char/end_char simply do not apply."
+        ),
+    )
+    end_char = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Character offset (exclusive) paired with start_char; see start_char.",
+    )
     attempt_number = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=20, choices=Status.choices)
     error_category = models.CharField(max_length=40, blank=True)
@@ -363,9 +376,10 @@ class ChunkExtractionAttempt(_RevisionScopedModel):
 
     def __str__(self) -> str:
         filename = self.source_document.filename if self.source_document_id else "?"
+        char_suffix = f" C{self.start_char}-{self.end_char}" if self.start_char is not None else ""
         return (
             f"ChunkExtractionAttempt(rev={self.candidate_memory_id}, {filename} "
-            f"L{self.start_line}-{self.end_line}, {self.status})"
+            f"L{self.start_line}-{self.end_line}{char_suffix}, {self.status})"
         )
 
 
