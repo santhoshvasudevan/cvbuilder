@@ -16,8 +16,13 @@ never matches an engagement and is correctly left unmapped.
 No source re-extraction, no LLM call, and no fuzzy/embedding similarity anywhere in this module --
 a mapping is only ever proposed on an exact, normalized identity match between a claim's
 `legal_employer`/`client_organization` (or, failing that, its `subject_scope`) and an `APPROVED`
-engagement's own `legal_employer`/`client_organization`. Anything else -- no match, or more than
-one candidate match -- is left unresolved for the operator, never guessed.
+engagement's own `legal_employer`/`client_organization`, or one of that engagement's own
+operator-approved `organization_aliases`/`programme_scopes` (2026-09-03) -- an alias is an
+alternate exact spelling/casing of the *same* legal identity; a programme scope is a project/
+initiative known to have occurred during the engagement and is never itself treated as an
+employer/client identity. Neither ever changes `CareerEngagement.legal_employer`/
+`client_organization`, which remain the sole canonical identity fields. Anything else -- no match,
+or more than one candidate match -- is left unresolved for the operator, never guessed.
 
 Proposing, approving, or rejecting a mapping never edits the `MemoryClaim` row itself (see
 `ClaimEngagementMapping`'s docstring), so this is safe to run against claims belonging to an
@@ -112,12 +117,51 @@ def _engagement_pair_key(engagement: CareerEngagement) -> tuple[str, str]:
     return (_normalize(engagement.legal_employer), _normalize(engagement.client_organization))
 
 
+def _engagement_scope_name_sources(engagement: CareerEngagement) -> dict[str, str]:
+    """Every normalized name this engagement matches a scope-fallback claim on, mapped to a short
+    label for *why* -- the engagement's own canonical `legal_employer`/`client_organization`, an
+    operator-approved `organization_aliases` entry (an alternate spelling/casing of the same legal
+    identity), or an operator-approved `programme_scopes` entry (a project/initiative known to
+    have occurred during this engagement, never itself an employer/client name). Canonical names
+    win over an alias/programme entry that happens to normalize to the same string (`setdefault`
+    order below), since that is the more precise, already-established fact."""
+    sources: dict[str, str] = {}
+    for source_field, label in (
+        (engagement.organization_aliases, "organization_alias"),
+        (engagement.programme_scopes, "programme_scope"),
+    ):
+        for raw_name in source_field:
+            normalized = _normalize(raw_name)
+            if normalized:
+                sources.setdefault(normalized, label)
+    for raw_name, label in (
+        (engagement.legal_employer, "legal_employer"),
+        (engagement.client_organization, "client_organization"),
+    ):
+        normalized = _normalize(raw_name)
+        if normalized:
+            sources[normalized] = label
+    return sources
+
+
 def _engagement_scope_names(engagement: CareerEngagement) -> set[str]:
-    return {
-        name
-        for name in (_normalize(engagement.legal_employer), _normalize(engagement.client_organization))
-        if name
-    }
+    return set(_engagement_scope_name_sources(engagement))
+
+
+def _scope_match_reason(engagement: CareerEngagement, matched_name: str, claim_subject_scope: str) -> str:
+    label = _engagement_scope_name_sources(engagement).get(matched_name)
+    if label == "organization_alias":
+        return (
+            f"organization alias match: {claim_subject_scope!r} is an approved alternate spelling "
+            f"of {engagement.engagement_id}'s legal_employer/client_organization"
+        )
+    if label == "programme_scope":
+        return (
+            f"programme/project scope match: {claim_subject_scope!r} is an approved project/"
+            f"initiative known to have occurred during {engagement.engagement_id} "
+            "(not an employer/client identity)"
+        )
+    return "exact normalized legal_employer/client_organization match"
 
 
 @dataclasses.dataclass
@@ -169,10 +213,14 @@ def propose_claim_engagement_mappings(candidate_memory: CandidateMemory) -> Mapp
             ambiguous += 1
             continue
         engagement = matches[0]
+        if kind == "pair":
+            reason = "exact normalized legal_employer/client_organization match"
+        else:
+            reason = _scope_match_reason(engagement, key, claim.subject_scope)
         _, created = ClaimEngagementMapping.objects.get_or_create(
             memory_claim=claim,
             career_engagement=engagement,
-            defaults={"proposed_reason": "exact normalized legal_employer/client_organization match"},
+            defaults={"proposed_reason": reason},
         )
         if created:
             proposed += 1

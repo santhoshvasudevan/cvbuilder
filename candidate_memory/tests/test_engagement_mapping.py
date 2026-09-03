@@ -412,3 +412,109 @@ class ApproveNarrativeMappingTests(TestCase):
 
         with self.assertRaises(MappingApprovalError):
             approve_narrative_mapping(mapping, approved_by=self.user)
+
+
+class OrganizationAliasAndProgrammeScopeMatchingTests(TestCase):
+    """Operator-approved CareerEngagement.organization_aliases/programme_scopes (2026-09-03):
+    deterministic exact normalized matching only; never changes legal_employer/client_organization;
+    never touches a MemoryClaim; no LLM call."""
+
+    def test_organization_alias_matches_a_claim_scoped_to_the_alternate_spelling(self):
+        rev = make_revision()
+        engagement = _make_engagement(
+            legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Werk GmbH",
+            organization_aliases=["ford", "Ford", "ford motors"],
+        )
+        claim = _make_narrative_claim(rev, subject_scope="organization:ford motors")
+
+        summary = propose_claim_engagement_mappings(rev)
+
+        self.assertEqual(summary.proposed, 1)
+        mapping = ClaimEngagementMapping.objects.get(memory_claim=claim, career_engagement=engagement)
+        self.assertIn("organization alias match", mapping.proposed_reason)
+        self.assertIn("'organization:ford motors'", mapping.proposed_reason)
+
+    def test_organization_alias_matching_is_case_and_whitespace_insensitive(self):
+        rev = make_revision()
+        engagement = _make_engagement(organization_aliases=["ford"])
+        _make_narrative_claim(rev, subject_scope="organization:  FORD  ")
+        summary = propose_claim_engagement_mappings(rev)
+        self.assertEqual(summary.proposed, 1)
+        self.assertTrue(ClaimEngagementMapping.objects.filter(career_engagement=engagement).exists())
+
+    def test_programme_scope_matches_a_claim_and_is_labeled_distinctly_from_an_alias(self):
+        rev = make_revision()
+        engagement = _make_engagement(
+            programme_scopes=["ford connectivity", "ford chassis controls", "ford-volkswagen-alliance"],
+        )
+        claim = _make_narrative_claim(rev, subject_scope="organization:ford connectivity")
+
+        summary = propose_claim_engagement_mappings(rev)
+
+        self.assertEqual(summary.proposed, 1)
+        mapping = ClaimEngagementMapping.objects.get(memory_claim=claim, career_engagement=engagement)
+        self.assertIn("programme/project scope match", mapping.proposed_reason)
+        self.assertIn("not an employer/client identity", mapping.proposed_reason)
+
+    def test_programme_scope_never_changes_legal_employer_or_client_organization(self):
+        rev = make_revision()
+        engagement = _make_engagement(
+            legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Werk GmbH",
+            programme_scopes=["ford connectivity"],
+        )
+        _make_narrative_claim(rev, subject_scope="organization:ford connectivity")
+
+        propose_claim_engagement_mappings(rev)
+
+        engagement.refresh_from_db()
+        self.assertEqual(engagement.legal_employer, "Ambigai Consultancy Services")
+        self.assertEqual(engagement.client_organization, "Ford Motor Werk GmbH")
+
+    def test_matching_never_alters_the_memory_claim(self):
+        rev = make_revision()
+        _make_engagement(organization_aliases=["ford"])
+        claim = _make_narrative_claim(rev, subject_scope="organization:ford")
+        original_scope = claim.subject_scope
+        original_legal_employer = claim.legal_employer
+
+        propose_claim_engagement_mappings(rev)
+
+        claim.refresh_from_db()
+        self.assertEqual(claim.subject_scope, original_scope)
+        self.assertEqual(claim.legal_employer, original_legal_employer)
+
+    def test_two_engagements_sharing_an_alias_are_ambiguous_not_guessed(self):
+        rev = make_revision()
+        _make_engagement(organization_aliases=["shared-alias"])
+        _make_engagement(
+            legal_employer="Some Other Employer", client_organization="",
+            organization_aliases=["shared-alias"],
+        )
+        _make_narrative_claim(rev, subject_scope="organization:shared-alias")
+
+        summary = propose_claim_engagement_mappings(rev)
+
+        self.assertEqual(summary.proposed, 0)
+        self.assertEqual(summary.ambiguous, 1)
+        self.assertEqual(ClaimEngagementMapping.objects.count(), 0)
+
+    def test_canonical_legal_employer_match_reason_is_unaffected_by_unrelated_aliases(self):
+        rev = make_revision()
+        _make_engagement(
+            legal_employer="Ambigai Consultancy Services", client_organization="Ford Motor Werk GmbH",
+            organization_aliases=["ford"],
+        )
+        claim = _make_narrative_claim(rev, subject_scope="organization:ford motor werk gmbh")
+
+        propose_claim_engagement_mappings(rev)
+
+        mapping = ClaimEngagementMapping.objects.get(memory_claim=claim)
+        self.assertEqual(mapping.proposed_reason, "exact normalized legal_employer/client_organization match")
+
+    def test_no_aliases_or_programme_scopes_behaves_exactly_as_before(self):
+        rev = make_revision()
+        _make_engagement()
+        _make_narrative_claim(rev, subject_scope="organization:some unrelated scope")
+        summary = propose_claim_engagement_mappings(rev)
+        self.assertEqual(summary.proposed, 0)
+        self.assertEqual(summary.unresolved, 1)

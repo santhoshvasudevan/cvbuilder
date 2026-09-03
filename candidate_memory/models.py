@@ -486,6 +486,19 @@ class CareerEngagement(models.Model):
         "{'de': 'Senior Cloud-Ingenieur'}. Never machine-translated at render time -- see "
         "title_for_language().",
     )
+    organization_aliases = models.JSONField(
+        default=list, blank=True,
+        help_text="Operator-approved alternate exact spellings/casings of legal_employer or "
+        "client_organization (e.g. 'ford motors' for 'Ford Motor Werk GmbH') -- used only for "
+        "deterministic claim-mapping matching (services/engagement_mapping.py). Never the "
+        "canonical identity itself, which always stays legal_employer/client_organization.",
+    )
+    programme_scopes = models.JSONField(
+        default=list, blank=True,
+        help_text="Operator-approved project/programme subject_scope values known to have "
+        "occurred during this engagement (e.g. 'ford connectivity', a named initiative) -- "
+        "matches a claim to this engagement without implying it is an employer/client name.",
+    )
     location = models.CharField(max_length=200, blank=True)
     start_year = models.PositiveIntegerField()
     start_month = models.PositiveIntegerField(null=True, blank=True)
