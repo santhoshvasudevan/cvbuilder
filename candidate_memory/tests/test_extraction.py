@@ -189,6 +189,47 @@ class ExtractChunkOutputTokenResolutionTests(TestCase):
         _, kwargs = build_request_mock.call_args
         self.assertEqual(kwargs["max_output_tokens"], DEFAULT_MAX_OUTPUT_TOKENS)
 
+    def test_explicit_override_wins_over_the_registry_models_max_output_tokens(self):
+        """Recovery (2026-09-03): `max_output_tokens_override` is for a single manually-authorized
+        retry call only -- it must win over whatever the registry field says, but must never write
+        back to the registry (the model's own `max_output_tokens` field is left untouched)."""
+        model = make_fake_stage_assignment()
+        model.max_output_tokens = 4096
+        model.save(update_fields=["max_output_tokens"])
+
+        from ..services import extraction as extraction_module
+
+        with mock.patch(
+            "candidate_memory.services.extraction.build_request", wraps=extraction_module.build_request
+        ) as build_request_mock:
+            chunk = chunk_source("Some candidate evidence text.\n")[0]
+            extract_chunk(
+                chunk, source_role="ENGLISH_CORPUS", language="en", max_output_tokens_override=8192
+            )
+
+        _, kwargs = build_request_mock.call_args
+        self.assertEqual(kwargs["max_output_tokens"], 8192)
+        model.refresh_from_db()
+        self.assertEqual(model.max_output_tokens, 4096)
+
+    def test_no_override_falls_back_to_prior_resolution_unchanged(self):
+        model = make_fake_stage_assignment()
+        model.max_output_tokens = 4096
+        model.save(update_fields=["max_output_tokens"])
+
+        from ..services import extraction as extraction_module
+
+        with mock.patch(
+            "candidate_memory.services.extraction.build_request", wraps=extraction_module.build_request
+        ) as build_request_mock:
+            chunk = chunk_source("Some candidate evidence text.\n")[0]
+            extract_chunk(
+                chunk, source_role="ENGLISH_CORPUS", language="en", max_output_tokens_override=None
+            )
+
+        _, kwargs = build_request_mock.call_args
+        self.assertEqual(kwargs["max_output_tokens"], 4096)
+
 
 class NemotronGenerationSettingsTests(TestCase):
     """Operator-decision repair: the non-reasoning/temperature/top_p settings are scoped to this

@@ -186,13 +186,24 @@ def build_request(
     )
 
 
-def extract_chunk(chunk: SourceChunk, *, source_role: str, language: str) -> NormalizedLLMResult:
+def extract_chunk(
+    chunk: SourceChunk,
+    *,
+    source_role: str,
+    language: str,
+    max_output_tokens_override: int | None = None,
+) -> NormalizedLLMResult:
+    """`max_output_tokens_override`, when given, is used for this one call only -- it never
+    touches the registry's configured `LLMModel.max_output_tokens` (the ambient default every
+    other call still resolves to). This exists solely for a manually authorized, single-chunk
+    recovery retry of a physical line that still truncates even at the finest possible chunking
+    granularity (Candidate Memory recovery, 2026-09-03) -- not a general per-call tuning knob."""
     adapter = get_adapter_for_stage(StageModelAssignment.Stage.MEMORY_BUILD)
     llm_model = adapter.llm_model
     # The resolved model's own registry capability wins when set (an operator-editable ceiling
     # per model, e.g. a model with a smaller real context/output budget); otherwise fall back to
     # the conservative canary default -- either way, never unbounded.
-    max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+    max_output_tokens = max_output_tokens_override or llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
 
     # Scoped exactly to this one provider+model (see the constants' docstring above) -- any other
     # stage/model combination keeps the plain defaults (temperature=0.0, no top_p/reasoning key).

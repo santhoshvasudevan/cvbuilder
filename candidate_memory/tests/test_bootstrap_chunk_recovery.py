@@ -482,3 +482,136 @@ class RetryFailedChunksTests(TestCase):
         self.assertEqual(
             other_rev.chunk_attempts.filter(status=ChunkExtractionAttempt.Status.FAILED).count(), 1
         )
+
+
+class RetryChunkLineageWithOutputOverrideTests(TestCase):
+    """Last-resort single-line recovery (2026-09-03): a physical line whose every FAILED attempt,
+    at any ancestor granularity, still truncates at the configured default max_output_tokens even
+    once chunking has already been narrowed to that one line -- the only remaining lever is a
+    higher max_output_tokens for exactly one manually authorized retry call."""
+
+    def _make_failed_attempt(self, rev, source, *, start_line, end_line, attempt_number=1):
+        return ChunkExtractionAttempt.objects.create(
+            candidate_memory=rev, source_document=source,
+            source_content_sha256=source.content_sha256,
+            start_line=start_line, end_line=end_line,
+            status=ChunkExtractionAttempt.Status.FAILED, error_category="CONFIGURATION",
+            attempt_number=attempt_number,
+        )
+
+    def test_recovers_and_supersedes_every_attempt_in_the_lineage_on_success(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+        # Two ancestor-granularity FAILED rows (the original 5-line chunk retried twice) plus the
+        # finest-granularity single-line FAILED row -- all three describe line 3.
+        ancestor_1 = self._make_failed_attempt(rev, source, start_line=1, end_line=5, attempt_number=1)
+        ancestor_2 = self._make_failed_attempt(rev, source, start_line=1, end_line=5, attempt_number=2)
+        leaf = self._make_failed_attempt(rev, source, start_line=3, end_line=3, attempt_number=1)
+
+        seen_kwargs = {}
+
+        def side_effect(chunk_arg, **kwargs):
+            seen_kwargs.update(kwargs)
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        self.assertEqual(seen_kwargs["max_output_tokens_override"], 8192)
+        self.assertEqual(summary.live_calls_made, 1)
+        self.assertEqual(summary.failed_before, 3)
+        self.assertEqual(summary.recovered, 3)
+        self.assertEqual(summary.still_failed, 0)
+        for attempt in (ancestor_1, ancestor_2, leaf):
+            attempt.refresh_from_db()
+            self.assertEqual(attempt.status, ChunkExtractionAttempt.Status.SUPERSEDED)
+
+    def test_still_truncating_leaves_every_attempt_in_the_lineage_failed(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+        leaf = self._make_failed_attempt(rev, source, start_line=3, end_line=3, attempt_number=1)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _truncation_result(),
+        ):
+            summary = bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        leaf.refresh_from_db()
+        self.assertEqual(leaf.status, ChunkExtractionAttempt.Status.FAILED)
+        self.assertEqual(summary.live_calls_made, 1)
+        self.assertEqual(summary.recovered, 0)
+        self.assertEqual(summary.still_failed, 1)
+
+    def test_makes_at_most_one_call_even_though_the_chunk_could_theoretically_split(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+        self._make_failed_attempt(rev, source, start_line=3, end_line=3, attempt_number=1)
+
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            return _truncation_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        self.assertEqual(call_count["n"], 1)
+
+    def test_fails_closed_when_source_content_has_changed(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+        leaf = self._make_failed_attempt(rev, source, start_line=3, end_line=3, attempt_number=1)
+        leaf.source_content_sha256 = "stale-hash-does-not-match-current-source"
+        leaf.save()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        extract_mock.assert_not_called()
+        leaf.refresh_from_db()
+        self.assertEqual(leaf.status, ChunkExtractionAttempt.Status.FAILED)
+        self.assertEqual(summary.live_calls_made, 0)
+        self.assertEqual(summary.still_failed, 1)
+
+    def test_no_matching_failed_attempts_is_a_true_no_op(self):
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk") as extract_mock:
+            summary = bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        extract_mock.assert_not_called()
+        self.assertEqual(summary.failed_before, 0)
+        self.assertEqual(summary.live_calls_made, 0)
+
+    def test_never_touches_a_different_revision(self):
+        other_rev = make_revision()
+        other_source = make_source(other_rev, raw_content="untouched\n")
+        other_leaf = self._make_failed_attempt(other_rev, other_source, start_line=1, end_line=1)
+
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 6)) + "\n")
+        self._make_failed_attempt(rev, source, start_line=3, end_line=3, attempt_number=1)
+
+        with mock.patch(
+            "candidate_memory.services.bootstrap.extract_chunk",
+            side_effect=lambda chunk_arg, **kwargs: _success_result(),
+        ):
+            bootstrap_service.retry_chunk_lineage_with_output_override(
+                rev, source_document=source, line_number=3, max_output_tokens=8192
+            )
+
+        other_leaf.refresh_from_db()
+        self.assertEqual(other_leaf.status, ChunkExtractionAttempt.Status.FAILED)

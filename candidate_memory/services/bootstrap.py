@@ -196,12 +196,18 @@ def _process_chunk_with_recovery(
     depth: int = 0,
     attempt_number: int = 1,
     call_budget: dict | None = None,
+    max_output_tokens_override: int | None = None,
 ) -> None:
     """Extracts one chunk, recursively halving and retrying *only* on a `finish_reason=length`
     truncation, bounded by `MAX_SPLIT_DEPTH`/`chunking.MIN_SPLIT_CHUNK_LINES` (Candidate Memory
     recovery, 2026-09-03) -- reasoning stays disabled and `max_output_tokens` stays at its
-    configured value throughout; only the chunk's own size shrinks. A truncated response never
-    has any parseable content (JSON parsing fails on incomplete output, which is exactly what
+    configured value throughout; only the chunk's own size shrinks. `max_output_tokens_override`,
+    when given, is threaded to every call this invocation makes (including any split children) and
+    never changes the registry's configured default -- see
+    `retry_chunk_lineage_with_output_override` below, the only caller that ever sets it.
+
+    A truncated response never has any parseable content (JSON parsing fails on incomplete output,
+    which is exactly what
     makes it classify as `finish_reason=length` in the first place -- see
     `llm_provider/adapters/openai.py`), so a chunk that gets split was never able to store
     anything in the first place; splitting can never duplicate an already-stored claim. Every
@@ -232,7 +238,12 @@ def _process_chunk_with_recovery(
         call_budget["remaining"] -= 1
 
     before_id = _latest_memory_build_call_log_id()
-    result = extract_chunk(chunk, source_role=source_role, language=language)
+    result = extract_chunk(
+        chunk,
+        source_role=source_role,
+        language=language,
+        max_output_tokens_override=max_output_tokens_override,
+    )
     call_log = (
         LLMCallLog.objects.filter(stage=StageModelAssignment.Stage.MEMORY_BUILD, id__gt=before_id)
         .order_by("id")
@@ -275,6 +286,7 @@ def _process_chunk_with_recovery(
                 build_summary=build_summary,
                 depth=depth + 1,
                 call_budget=call_budget,
+                max_output_tokens_override=max_output_tokens_override,
             )
         return
 
@@ -434,6 +446,114 @@ def retry_failed_chunks(candidate_memory: CandidateMemory, *, max_live_calls: in
         live_calls_made=max_live_calls - call_budget["remaining"],
         recovered=recovered,
         still_failed=still_failed,
+        claims_extracted=build_summary["claims_extracted"],
+        rules_extracted=build_summary["rules_extracted"],
+        extraction_errors=build_summary["extraction_errors"],
+    )
+
+
+def retry_chunk_lineage_with_output_override(
+    candidate_memory: CandidateMemory,
+    *,
+    source_document: MemorySourceDocument,
+    line_number: int,
+    max_output_tokens: int,
+) -> ChunkRetrySummary:
+    """Last-resort, single-call recovery (2026-09-03) for one specific physical line whose every
+    `ChunkExtractionAttempt` -- at any ancestor granularity, not just its own direct single-line
+    attempt -- is currently `FAILED`. This only ever matters once the normal bounded-split recovery
+    (`retry_failed_chunks` / `split_chunk_into_individual_lines`) has already reached the finest
+    possible granularity (a single line) and that line *still* truncates at the model's configured
+    default `max_output_tokens` -- i.e. the line itself, not the chunk size, is the bottleneck.
+
+    Retries with an explicit, higher `max_output_tokens` for this one call only; the registry's
+    configured `LLMModel.max_output_tokens` default is never read from or written to here, so every
+    other call (including any future normal build or `retry_failed_chunks` pass) is entirely
+    unaffected. Matches every currently-`FAILED` attempt on this source document whose stored line
+    range *contains* `line_number` -- both its own direct single-line attempt and any coarser
+    ancestor chunk that also covered it and was never superseded (because that ancestor's retry
+    left this exact line as its one remaining failure) -- so the whole lineage is resolved together
+    rather than leaving stale ancestor rows referring to now-covered content.
+
+    Fails closed, exactly like `retry_failed_chunks`, if the source document's current content hash
+    no longer matches any matched attempt's stored `source_content_sha256` (never retries against
+    changed content under stale provenance), and if there are no matching `FAILED` attempts at all
+    (nothing to do -- never a partial no-op treated as success). Since the chunk being retried is
+    always exactly one physical line, `_process_chunk_with_recovery` can never split it further
+    (`split_chunk_into_individual_lines` returns `[]` for a single-line chunk), so this function
+    always makes at most one live provider call. All matched attempts are marked `SUPERSEDED`
+    together only if that one call succeeds without truncating; otherwise every one of them is left
+    exactly as `FAILED` as it already was -- this function never retries a second time itself.
+    """
+    matched_attempts = list(
+        candidate_memory.chunk_attempts.filter(
+            status=ChunkExtractionAttempt.Status.FAILED,
+            source_document=source_document,
+            start_line__lte=line_number,
+            end_line__gte=line_number,
+        )
+    )
+    if not matched_attempts:
+        return ChunkRetrySummary(0, 0, 0, 0, 0, 0, 0)
+
+    if any(
+        source_document.content_sha256 != attempt.source_content_sha256 for attempt in matched_attempts
+    ):
+        return ChunkRetrySummary(len(matched_attempts), 0, 0, len(matched_attempts), 0, 0, 0)
+
+    lines = source_document.raw_content.splitlines()
+    chunk = SourceChunk(start_line=line_number, end_line=line_number, lines=(lines[line_number - 1],))
+    next_attempt_number = max(attempt.attempt_number for attempt in matched_attempts) + 1
+    build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
+
+    before_ids = set(
+        ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory).values_list(
+            "id", flat=True
+        )
+    )
+    _process_chunk_with_recovery(
+        chunk,
+        source_role=source_document.source_role,
+        language=source_document.language,
+        source_document=source_document,
+        new_revision=candidate_memory,
+        build_summary=build_summary,
+        attempt_number=next_attempt_number,
+        max_output_tokens_override=max_output_tokens,
+    )
+    after_ids = set(
+        ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory).values_list(
+            "id", flat=True
+        )
+    )
+    new_attempts = ChunkExtractionAttempt.objects.filter(id__in=after_ids - before_ids)
+    recovered_ok = new_attempts.exists() and not new_attempts.filter(
+        status=ChunkExtractionAttempt.Status.FAILED
+    ).exists()
+    if recovered_ok:
+        for attempt in matched_attempts:
+            attempt.status = ChunkExtractionAttempt.Status.SUPERSEDED
+            attempt.save()
+
+    candidate_memory.refresh_from_db()
+    summary = dict(candidate_memory.build_summary)
+    summary["claims_extracted"] = summary.get("claims_extracted", 0) + build_summary["claims_extracted"]
+    summary["rules_extracted"] = summary.get("rules_extracted", 0) + build_summary["rules_extracted"]
+    summary["extraction_errors"] = summary.get("extraction_errors", 0) + build_summary["extraction_errors"]
+    summary["chunk_attempts_failed"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.FAILED
+    ).count()
+    summary["chunk_attempts_superseded"] = candidate_memory.chunk_attempts.filter(
+        status=ChunkExtractionAttempt.Status.SUPERSEDED
+    ).count()
+    candidate_memory.build_summary = summary
+    candidate_memory.save()
+
+    return ChunkRetrySummary(
+        failed_before=len(matched_attempts),
+        live_calls_made=1,
+        recovered=len(matched_attempts) if recovered_ok else 0,
+        still_failed=0 if recovered_ok else len(matched_attempts),
         claims_extracted=build_summary["claims_extracted"],
         rules_extracted=build_summary["rules_extracted"],
         extraction_errors=build_summary["extraction_errors"],
