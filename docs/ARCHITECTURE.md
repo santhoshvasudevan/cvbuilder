@@ -86,7 +86,10 @@ pasted-text fallback, language detection, the AJ LLM call, and storage of the st
 
 **Owns**: `FitAssessment` (DATA-005), its child `RequirementAssessment` rows (D-014), the
 retrieval service (queries `candidate_memory` for confirmed claims relevant to a given
-`JobRequirementAnalysis`, never the whole profile).
+`JobRequirementAnalysis`, never the whole profile). **(D-019)** A static, structural requirement
+(tenure, dates, location, employment relationship) is assessed locally against `CareerEngagement`
+records — no LLM call — via `candidate_memory.services.static_profile_boundary`; only genuinely
+narrative fit/gap judgment goes through the AC LLM call.
 
 **Satisfies**: AC-001..003, NFR-002, D-014's AC portion.
 
@@ -96,7 +99,11 @@ retrieval service (queries `candidate_memory` for confirmed claims relevant to a
 post-generation no-fabrication validator, markdown rendering, and versioned `ResumeDraft` storage.
 
 **Owns**: `ResumeDraft` (DATA-007) and its structured `ResumeElement`s (D-014), the no-fabrication
-validator, and the markdown renderer defined in `docs/RESUME_OUTPUT_STRUCTURE.md`.
+validator, and the markdown renderer defined in `docs/RESUME_OUTPUT_STRUCTURE.md`. **(D-019)** The
+AB LLM call never receives or produces employer/title/location/date fields — it selects an
+`engagement_id` and writes evidence-backed bullets for it; `candidate_memory.services.
+static_profile_boundary.render_engagement_header` renders the actual header exclusively from the
+referenced `APPROVED` `CareerEngagement` record.
 
 **Satisfies**: AB-001..004, NFR-001, D-014's AB portion.
 
@@ -448,6 +455,50 @@ semantics and invariants come first.
   revision is `ACTIVE`/`SUPERSEDED`, this conflict record is frozen like everything else on that
   revision; resolving it thereafter means creating a new revision, not editing this row.
 
+### `CareerEngagement` (new entity, D-019 — the deterministic static-profile boundary)
+- **Responsibility**: one operator-owned, structured record of a real employment/client
+  engagement. Employment identity, organisation, title, location, and dates are facts the operator
+  approves directly here — never generated, rewritten, or inferred by an LLM, and never part of
+  the planned M5/M6 input or output schema (see `services/static_profile_boundary.py`).
+- **Key fields**: `engagement_id` (stable, auto-assigned, e.g. `CE-0001`), `legal_employer`,
+  `client_organization` (blank when there is no separate client), `default_displayed_organization`,
+  `approved_role_title`, `localized_titles` (optional operator-approved translations, never
+  machine-translated at render time), `location`, `start_year`/`start_month`, `end_status`
+  (`KNOWN`/`PRESENT`/`UNKNOWN`) with `end_year`/`end_month` when `KNOWN`, `presentation_mode`
+  (`CLIENT_CENTRIC`/`LEGAL_EMPLOYER_EXPLICIT`/`COMBINED` — same vocabulary as
+  `MemoryClaim.presentation_mode`), `approval_status` (`DRAFT`/`APPROVED`/`REJECTED`),
+  `created_at`/`updated_at`.
+- **Deliberately not a `_RevisionScopedModel`**: not re-extracted per `CandidateMemory` revision
+  and not frozen by that revision's own lifecycle — gated by its own `approval_status` instead,
+  following the same admin-editable-registry pattern as `llm_provider`'s `LLMProvider`/`LLMModel`.
+- **Derived behavior (all deterministic, no LLM call)**: `duration_months()` (a missing month
+  component is treated as January for a start date / December for an end date — a disclosed
+  rounding convention, not a hidden guess; returns `None`, never `0`, when `end_status=UNKNOWN`),
+  `is_current` (`end_status=PRESENT`), `displayed_organization` (selects among this record's own
+  stored alternatives per `presentation_mode` — never computes or invents a new name),
+  `title_for_language(code)` (a stored `localized_titles` entry, or else `approved_role_title` —
+  never machine-translated). `services/career_engagement.total_non_overlapping_experience_months`
+  merges overlapping engagements' date ranges so concurrent roles are never double-counted.
+- **Invariant**: only an `APPROVED` `CareerEngagement` may ever be rendered or referenced by a
+  future M6 output (`services/static_profile_boundary.resolve_approved_engagement`) — an unknown or
+  unapproved `engagement_id` fails validation outright.
+
+### `ClaimEngagementMapping` (new entity, D-019)
+- **Responsibility**: a reviewable link between one `MemoryClaim` and one `CareerEngagement`.
+  Deliberately a **separate table**, never a field on `MemoryClaim` itself — proposing, approving,
+  or rejecting a mapping never mutates a `MemoryClaim` row, so it never conflicts with
+  `_RevisionScopedModel`'s ACTIVE-revision-content-freeze invariant; a claim belonging to an
+  already-`ACTIVE` revision can still be mapped to an engagement afterward, exactly like
+  `MemoryConflict.involved_claims` already references frozen claims without editing them.
+- **Key fields**: `memory_claim` FK, `career_engagement` FK, `status`
+  (`PROPOSED`/`APPROVED`/`REJECTED`), `proposed_reason`, `created_at`, `reviewed_at`.
+- **Mechanism (`services/engagement_mapping.py`)**: `propose_claim_engagement_mappings` proposes a
+  mapping only on an exact, normalized match between a claim's `legal_employer`/
+  `client_organization` (or, failing that, its `subject_scope`) and an `APPROVED` engagement's own
+  fields — never fuzzy/embedding similarity. Zero matches or more than one candidate match is left
+  **unresolved** for the operator, never guessed; idempotent — an existing `(claim, engagement)`
+  mapping row is never duplicated. No source document is ever re-extracted to produce a mapping.
+
 ### `JobRequirementAnalysis`
 - **Responsibility**: Agent Jobber's structured output for one job posting.
 - **Key fields**: `source_type` (`url`/`pasted`), original raw text/URL, mandatory requirements,
@@ -471,11 +522,16 @@ semantics and invariants come first.
 - **Key fields**: FK to `JobRequirementAnalysis` (specific version), matched-requirements list
   (each referencing the supporting `MemoryClaim`(s)), explicit gaps list, risk notes carried from
   AJ.
-- **Child entity `RequirementAssessment`** (D-014, approved): one row per relevant
-  `JobRequirement` — `requirement_id`, `disposition` (`MATCH`/`PARTIAL`/`GAP`/`UNKNOWN`),
-  `supporting_memory_claim_ids`, `explanation`, `gap_or_limitation`. This *replaces* a purely
-  free-form gaps/matches representation — every relevant `JobRequirement` gets exactly one
-  disposition row, so coverage is enumerable and checkable, not just narratively described.
+- **Child entity `RequirementAssessment`** (D-014, approved; evidence shape extended by D-019): one
+  row per relevant `JobRequirement` — `requirement_id`, `disposition`
+  (`MATCH`/`PARTIAL`/`GAP`/`UNKNOWN`), `supporting_memory_claim_ids`, **`supporting_engagement_ids`
+  (D-019)**, `explanation`, `gap_or_limitation`. This *replaces* a purely free-form gaps/matches
+  representation — every relevant `JobRequirement` gets exactly one disposition row, so coverage is
+  enumerable and checkable, not just narratively described. A **static, structural** requirement
+  (tenure, dates, location, employment relationship) is assessed **locally, without an LLM call**,
+  purely from `CareerEngagement`'s own stored/derived fields (`services/static_profile_boundary.
+  assess_tenure_requirement_locally`/`assess_location_requirement_locally`) and cited via
+  `supporting_engagement_ids` alone — no narrative `MemoryClaim` is needed for that disposition.
 - **Versioning** (D-010, approved): versioned like `JobRequirementAnalysis`; a Gate-1 feedback
   re-run targeting AC creates a new version.
 - **Invariants (NFR-002/D-014)**: every relevant `JobRequirement` has exactly one
@@ -506,7 +562,12 @@ semantics and invariants come first.
   (`draft`/`awaiting_review`/`confirmed`), `confirmed_at`.
 - **Child entity `ResumeElement`** (D-014, approved): every factual structured item (summary
   statement, experience bullet, achievement, skill, certification, language entry) is a
-  `ResumeElement` — `text`, `supporting_memory_claim_ids`, `matched_job_requirement_ids`.
+  `ResumeElement` — `text`, `supporting_memory_claim_ids`, `matched_job_requirement_ids`. **(D-019)**
+  An `ExperienceSection`'s employer/title/location/dates are never part of this structured output at
+  all — it carries only an `engagement_id` (referencing an `APPROVED` `CareerEngagement`) plus its
+  `ResumeElement` bullets; the deterministic renderer resolves the static fields exclusively from
+  that engagement record (`services/static_profile_boundary.render_engagement_header`), never from
+  anything Agent Builder generated. See `docs/RESUME_OUTPUT_STRUCTURE.md` §2.C/§3/§4.
 - **Versioning** (D-010, approved — consolidates the former D-013): each Gate-2 regeneration
   produces a new version; the operator-approved one is flagged `confirmed` as the final
   deliverable for that `JobApplication` (`JobApplication.current_resume_draft`).
@@ -517,7 +578,9 @@ semantics and invariants come first.
   **before** markdown is rendered. This is an evidence-attachment/eligibility check, not a
   text-similarity check (semantic/embedding similarity is explicitly not the truth test — see
   D-014). Human review at Gate 2 remains responsible for judging whether the wording fairly
-  represents the evidence.
+  represents the evidence. **(D-019)** Every `ExperienceSection.engagement_id` must resolve to an
+  `APPROVED` `CareerEngagement` — an unknown or unapproved ID fails this same validator, exactly
+  like a fabricated claim ID.
 - **Freshness** (HITL-007/D-006, approved): stores `based_on_fit_assessment_id`; it is stale
   whenever that no longer equals `JobApplication.current_fit_assessment_id` — the same
   immutable-identity comparison `FitAssessment` uses against `JobRequirementAnalysis`.

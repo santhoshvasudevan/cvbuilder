@@ -575,3 +575,72 @@ under-represented in a real bootstrap.
   artifact. Existing tests exercising activation without employment coverage now pass
   `acknowledge_zero_employment_coverage=True` explicitly (recorded as an intentional test update,
   not a weakening, since the check itself is new and correctly firing).
+
+## D-019: The deterministic static-profile boundary
+
+- **Status**: **APPROVED** (2026-09-03, product-owner directive: "implement the deterministic
+  static-profile boundary" before M5/M6, and "record an approved architectural decision").
+- **Issue**: `docs/RESUME_OUTPUT_STRUCTURE.md`'s `ExperienceSection` (§2.C) originally had Agent
+  Builder's own structured output carry `employer`/`role_title`/`dates`/`location` directly,
+  "only as supported by CandidateMemory" -- i.e. LLM-generated fields constrained by prompting and
+  post-hoc evidence checking, not fields the LLM is structurally forbidden from ever emitting. Real
+  `MemoryClaim` data for this candidate's own history (`organization:ford motors`,
+  `organization:ford motor werk gmbh`, `organization:ford connectivity`, `organization:ford –
+  köln`, ...) shows the same real employer expressed a dozen different ways across extraction
+  passes -- exactly the kind of fact an LLM could plausibly restate *slightly* differently each
+  time it tailors a resume, which is a materially different (and worse) risk than wording a bullet
+  differently: an employer name, title, location, or date range has exactly one correct rendering,
+  and any LLM-mediated path to it is one path too many.
+- **Decision**:
+  1. Employment identity (legal employer, client organisation, approved title(s), location, start/
+     end dates) are operator-owned structured facts, recorded once in a new `CareerEngagement`
+     model (`candidate_memory/models.py`) independent of any `CandidateMemory` revision's own
+     BUILDING/NEEDS_REVIEW/ACTIVE/SUPERSEDED lifecycle -- an admin-editable registry, following the
+     same pattern as `llm_provider`'s `LLMProvider`/`LLMModel`, gated by its own `approval_status`
+     (`DRAFT`/`APPROVED`/`REJECTED`) rather than being frozen by `CandidateMemory` activation.
+  2. Neither the planned M5 (Agent Candidate) nor M6 (Agent Builder) LLM call ever receives or
+     produces these fields. M6's planned output schema (`EngagementNarrativeOutput`/
+     `EngagementBullet`, `services/static_profile_boundary.py`) references only an `engagement_id`
+     plus evidence-backed narrative bullets, with `extra="forbid"` so a provider that tried to
+     smuggle an `employer`/`title`/`date` field through fails schema validation outright, not
+     merely "gets ignored by convention."
+  3. A resume experience-section header is rendered deterministically
+     (`render_engagement_header`) exclusively from an `APPROVED` `CareerEngagement` record, resolved
+     fresh from the database by `engagement_id` every time. An `engagement_id` that does not exist,
+     or that is not `APPROVED`, fails validation (`UnknownOrUnapprovedEngagementError`) rather than
+     rendering a placeholder or falling back to whatever text an LLM supplied.
+  4. `MemoryClaim`s reference a `CareerEngagement` through a **separate** `ClaimEngagementMapping`
+     table, never a field on `MemoryClaim` itself -- proposing, approving, or rejecting a mapping
+     therefore never mutates a `MemoryClaim` row, so it is safe to run against claims belonging to
+     an already-`ACTIVE` revision without violating the frozen-content invariant
+     (`docs/ARCHITECTURE.md` §4 `CandidateMemory`). `services/engagement_mapping.py` proposes a
+     mapping only on an exact, normalized match between a claim's `legal_employer`/
+     `client_organization` (or, failing that, its `subject_scope`) and an `APPROVED` engagement's
+     own fields -- never fuzzy/embedding similarity. Zero matches or more than one candidate match
+     is left **unresolved** for the operator, never guessed; no source document is ever
+     re-extracted to produce or refine a mapping.
+  5. Deterministic calculations -- `CareerEngagement.duration_months`/`is_current`/
+     `displayed_organization`/`title_for_language` (model methods) and
+     `services/career_engagement.total_non_overlapping_experience_months` (interval-merges
+     overlapping engagements so concurrent roles are never double-counted) -- give the planned M5
+     stage a way to assess static, structural requirements (tenure, current/past status, location,
+     employment relationship) **locally, without an LLM call**
+     (`services/static_profile_boundary.assess_tenure_requirement_locally`/
+     `assess_location_requirement_locally`).
+  6. The planned M5 `RequirementAssessment` evidence-attachment shape gains
+     `supporting_engagement_ids` alongside the existing `supporting_memory_claim_ids`
+     (`RequirementEvidenceReference`, `services/static_profile_boundary.py`) -- a disposition may
+     now be satisfied by engagement evidence, claim evidence, or both.
+- **Explicitly not done by this decision**: no `JobRequirement`/`FitAssessment`/`ResumeDraft`
+  Django model was created or modified (M5/M6 remain not started); no real `CareerEngagement` row
+  was created for the operator's actual employment history -- that is deliberate future operator
+  data-entry/review work through the normal admin/service workflow, never hardcoded into a
+  migration or seed script; `requirements.md` was not amended (this refines the data model's
+  "field-level detail... worked out during implementation" per §8, not a requirement change).
+- **Consequence**: `candidate_memory.0006_careerengagement_claimengagementmapping` migration adds
+  both new models; `docs/RESUME_OUTPUT_STRUCTURE.md` §2.C's `ExperienceSection` now carries an
+  `engagement_id` instead of freeform `employer`/`role_title`/`dates`/`location`;
+  `docs/ARCHITECTURE.md` §4 gains `CareerEngagement`/`ClaimEngagementMapping` entries and updates
+  `FitAssessment`/`RequirementAssessment`/`ResumeDraft`; `docs/REQUIREMENT_TRACEABILITY.md` gains
+  `CE-001`..`CE-00N` rows; `docs/TEST_STRATEGY.md` and `docs/IMPLEMENTATION_PLAN.md`'s M5/M6
+  sections are updated accordingly.

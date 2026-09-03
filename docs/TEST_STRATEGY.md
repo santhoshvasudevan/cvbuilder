@@ -103,6 +103,26 @@ milestone scope):
   already stated above (cassette: TEST-002, deliberately deferred; live-provider: the M2 opt-in
   manual smoke path only, never the automated suite; vector-search: no vector database is
   required for v1, per D-015).
+  - **The deterministic static-profile boundary (D-019, 2026-09-03)**: `CareerEngagement`'s own
+    derived behavior (`duration_months` — including the disclosed missing-month convention and the
+    `end_status=UNKNOWN` → `None` fail-closed case, `is_current`, `displayed_organization` across
+    all three `presentation_mode` values, `title_for_language` with and without a stored localized
+    entry) and `services.career_engagement.total_non_overlapping_experience_months` (additive for
+    non-overlapping engagements, merged — never double-counted — for overlapping ones, with
+    `UNKNOWN`-end engagements excluded and reported, not guessed). `services.engagement_mapping.
+    propose_claim_engagement_mappings`: exact-match proposal, ambiguous (2+ candidate matches) and
+    unresolved (0 matches) left untouched rather than guessed, idempotent re-run, and — the key
+    regression guard — a mapping can be proposed and approved for a claim belonging to an
+    already-`ACTIVE` `CandidateMemory` revision without violating that revision's frozen-content
+    invariant. `services.static_profile_boundary`: `EngagementNarrativeOutput`/`EngagementBullet`
+    (the planned M6 output schema) reject any employer/title/location/date field via Pydantic's
+    `extra="forbid"`; `render_engagement_header` refuses an unknown or non-`APPROVED` `engagement_id`
+    outright; a rendered header's title/organisation/dates exactly match the stored `CareerEngagement`
+    fields and are never machine-translated regardless of the requested `language`; `assess_tenure_
+    requirement_locally`/`assess_location_requirement_locally` (the planned M5 static-requirement
+    assessors) and `RequirementEvidenceReference` (accepting `supporting_memory_claim_ids` and
+    `supporting_engagement_ids` together, rejecting unknown fields). All ordinary deterministic
+    tests, no LLM adapter involved at all in this group.
 - **M4 (`job_intake`, `job_applications`)**: fetch-success vs. fetch-failure branching (a fixture
   returning an unparseable/too-short body triggers the fallback-to-paste UI path, not a silent
   low-quality result); `source_type` + raw input always persisted regardless of path taken; every
@@ -116,11 +136,17 @@ milestone scope):
   confirmed-claim evidence is rejected); review-gate state transitions (approve → proceed-ready,
   advancing `pipeline_phase` to `PREPARATION`; feedback → `needs_rework` plus a new version per
   D-010, verified to survive a process restart since it's plain DB state, not in-memory/paused
-  execution — this is the direct test of HITL-002/HITL-004).
+  execution — this is the direct test of HITL-002/HITL-004). **(D-019)** a fixture static
+  requirement (tenure/dates/location/employment relationship) is assessed via
+  `candidate_memory.services.static_profile_boundary`'s local assessors and cited by
+  `supporting_engagement_ids` alone, with zero LLM calls made for that disposition.
 - **M6 (`resume_builder`)**: the no-fabrication validator running against the **structured**
   representation before any markdown is rendered (a fixture `ResumeElement` with no evidence, or
   with an ID that doesn't resolve to an existing/confirmed/eligible `MemoryClaim`, is rejected
-  before rendering); the markdown renderer produces exactly the structure in
+  before rendering); **(D-019)** a fixture `ExperienceSection` referencing an unknown or
+  non-`APPROVED` `engagement_id` is rejected the same way, before rendering; a rendered header
+  exactly matches the referenced `CareerEngagement`'s stored fields; the markdown renderer produces
+  exactly the structure in
   `docs/RESUME_OUTPUT_STRUCTURE.md` §4 and omits internal-planning-only sections; draft versioning
   on regeneration; freshness/staleness detection keyed on `JobApplication.current_fit_
   assessment_id` (D-006) rather than a timestamp (mutating the underlying `FitAssessment` version

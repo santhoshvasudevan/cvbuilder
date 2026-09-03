@@ -1,8 +1,11 @@
 from django.contrib import admin
+from django.utils import timezone
 
 from .models import (
     CandidateMemory,
     CandidateRule,
+    CareerEngagement,
+    ClaimEngagementMapping,
     MemoryClaim,
     MemoryClaimSupport,
     MemoryConflict,
@@ -102,3 +105,62 @@ class MemoryConflictAdmin(_RevisionScopedAdminMixin, admin.ModelAdmin):
 
     def _revision_for(self, obj):
         return obj.candidate_memory
+
+
+@admin.register(CareerEngagement)
+class CareerEngagementAdmin(admin.ModelAdmin):
+    """Operator-owned registry, independent of any CandidateMemory revision's lifecycle (D-019) --
+    the normal admin-editable-registry pattern, same as llm_provider's LLMProvider/LLMModel."""
+
+    list_display = (
+        "engagement_id",
+        "approved_role_title",
+        "displayed_organization",
+        "start_year",
+        "end_status",
+        "end_year",
+        "approval_status",
+    )
+    list_filter = ("approval_status", "presentation_mode", "end_status")
+    search_fields = ("engagement_id", "legal_employer", "client_organization", "approved_role_title")
+    readonly_fields = ("engagement_id", "created_at", "updated_at")
+    actions = ["approve_engagements", "reject_engagements"]
+
+    @admin.display(description="Displayed organisation")
+    def displayed_organization(self, obj):
+        return obj.displayed_organization
+
+    @admin.action(description="Approve selected engagements")
+    def approve_engagements(self, request, queryset):
+        queryset.update(approval_status=CareerEngagement.ApprovalStatus.APPROVED)
+
+    @admin.action(description="Reject selected engagements")
+    def reject_engagements(self, request, queryset):
+        queryset.update(approval_status=CareerEngagement.ApprovalStatus.REJECTED)
+
+
+@admin.register(ClaimEngagementMapping)
+class ClaimEngagementMappingAdmin(admin.ModelAdmin):
+    """The reviewable claim<->engagement mapping workflow (D-019): PROPOSED rows are created only
+    by `services.engagement_mapping.propose_claim_engagement_mappings`, never by hand; the operator
+    approves or rejects them here."""
+
+    list_display = (
+        "memory_claim",
+        "career_engagement",
+        "status",
+        "proposed_reason",
+        "created_at",
+        "reviewed_at",
+    )
+    list_filter = ("status",)
+    readonly_fields = ("created_at",)
+    actions = ["approve_mappings", "reject_mappings"]
+
+    @admin.action(description="Approve selected mappings")
+    def approve_mappings(self, request, queryset):
+        queryset.update(status=ClaimEngagementMapping.Status.APPROVED, reviewed_at=timezone.now())
+
+    @admin.action(description="Reject selected mappings")
+    def reject_mappings(self, request, queryset):
+        queryset.update(status=ClaimEngagementMapping.Status.REJECTED, reviewed_at=timezone.now())

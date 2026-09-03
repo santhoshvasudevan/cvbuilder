@@ -43,17 +43,25 @@ ProfessionalSummary
 
 ```
 ExperienceSection
-    employer
-    role_title
-    dates                     # only as supported by CandidateMemory
-    location                  # only as supported by CandidateMemory
-    bullets[]                 # each a ResumeElement
+    engagement_id              # references an APPROVED CareerEngagement record -- see D-019
+    bullets[]                  # each a ResumeElement
 
 ResumeElement (used throughout — experience bullets, summary statements, achievements, etc.)
     text
     supporting_memory_claim_ids[]     # required for every factual element
     matched_job_requirement_ids[]     # optional, where relevant
 ```
+
+**The deterministic static-profile boundary (D-019, 2026-09-03):** `ExperienceSection` no longer
+carries `employer`/`role_title`/`dates`/`location` fields directly — Agent Builder never generates,
+rewrites, or even sees those values as part of its own structured output. It selects *which*
+engagement a section is about (by `engagement_id`) and writes evidence-backed narrative bullets for
+it; nothing else. The deterministic renderer (§4 below) resolves the employer, title, location, and
+dates for that section exclusively from the referenced `CareerEngagement` record via
+`services/static_profile_boundary.render_engagement_header` — never from anything Agent Builder
+produced. An `engagement_id` that does not exist, or that is not operator-`APPROVED`, fails
+validation outright rather than rendering with a placeholder or falling back to generated text (see
+`services/static_profile_boundary.py`, `docs/DECISIONS.md` D-019).
 
 Each factual bullet must contain explicit supporting `MemoryClaim` IDs. Where useful, a bullet
 also references the `JobRequirement` IDs it's intended to address.
@@ -144,6 +152,10 @@ Per requirements.md §16, before any markdown is produced, the no-fabrication va
 5. Every factual resume element (bullets, summary statements, achievements, skills,
    certifications, language entries) contains at least one evidence reference.
 6. No evidence ID was fabricated by the LLM (i.e., every ID resolves to a real row).
+7. **(D-019)** Every `ExperienceSection.engagement_id` resolves to a `CareerEngagement` that exists
+   **and** is operator-`APPROVED` (`services/static_profile_boundary.resolve_approved_engagement`)
+   — an unknown or unapproved ID fails validation before any markdown is rendered, exactly like a
+   fabricated `MemoryClaim` ID.
 
 This is an eligibility/attachment check, not a semantic-similarity check (requirements.md §16
 explicitly rules out exact/near-text or embedding similarity as the fundamental truth test).
@@ -163,7 +175,7 @@ markdown structure:
 
 ## Professional Experience
 
-### [Role / Employer / dates as supported]
+### [rendered via services/static_profile_boundary.render_engagement_header(engagement_id) — role, organisation, dates, and location come only from the referenced APPROVED CareerEngagement record, D-019]
 - [bullet]
 - [bullet]
 ...

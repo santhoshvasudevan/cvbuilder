@@ -23,6 +23,7 @@ starting a genuinely new revision, never resurrecting a `FAILED` one.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 
 from django.db import models
@@ -433,3 +434,168 @@ class MemoryConflict(_RevisionScopedModel):
 
     def __str__(self) -> str:
         return f"{self.conflict_key} ({self.status})"
+
+
+class CareerEngagement(models.Model):
+    """Operator-owned, deterministic structured record of one real employment/client engagement
+    (D-019, the deterministic static-profile boundary). Employment identity, organisation, title,
+    location, and dates are facts the operator approves directly here -- never generated,
+    rewritten, or inferred by an LLM, and never part of any future Agent Candidate/Agent Builder
+    input or output schema (see `services/static_profile_boundary.py`).
+
+    Deliberately **not** a `_RevisionScopedModel`: a `CareerEngagement` is not re-extracted per
+    `CandidateMemory` revision and is not frozen by that revision's own BUILDING/NEEDS_REVIEW/
+    ACTIVE/SUPERSEDED lifecycle -- it has its own independent `approval_status` instead, following
+    the same "admin-editable registry, not per-build state" pattern as `llm_provider`'s
+    `LLMProvider`/`LLMModel` registry.
+    """
+
+    class EndStatus(models.TextChoices):
+        KNOWN = "KNOWN", "Known end date"
+        PRESENT = "PRESENT", "Present (ongoing)"
+        UNKNOWN = "UNKNOWN", "Unknown"
+
+    class PresentationMode(models.TextChoices):
+        CLIENT_CENTRIC = "CLIENT_CENTRIC", "Client-centric (default)"
+        LEGAL_EMPLOYER_EXPLICIT = "LEGAL_EMPLOYER_EXPLICIT", "Legal employer explicit"
+        COMBINED = "COMBINED", "Combined"
+
+    class ApprovalStatus(models.TextChoices):
+        DRAFT = "DRAFT", "Draft"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
+    engagement_id = models.CharField(max_length=32, unique=True, blank=True)
+    legal_employer = models.CharField(max_length=200)
+    client_organization = models.CharField(
+        max_length=200, blank=True,
+        help_text="Blank when there is no separate client -- the legal employer is also the "
+        "displayed employer.",
+    )
+    default_displayed_organization = models.CharField(
+        max_length=200, blank=True,
+        help_text="The organisation name a rendered resume header shows by default. Auto-filled "
+        "from client_organization (or legal_employer if there is no client) on first save if left "
+        "blank -- never a third, independently invented value.",
+    )
+    approved_role_title = models.CharField(max_length=200)
+    localized_titles = models.JSONField(
+        default=dict, blank=True,
+        help_text="Optional operator-approved title translations keyed by language code, e.g. "
+        "{'de': 'Senior Cloud-Ingenieur'}. Never machine-translated at render time -- see "
+        "title_for_language().",
+    )
+    location = models.CharField(max_length=200, blank=True)
+    start_year = models.PositiveIntegerField()
+    start_month = models.PositiveIntegerField(null=True, blank=True)
+    end_status = models.CharField(max_length=10, choices=EndStatus.choices, default=EndStatus.UNKNOWN)
+    end_year = models.PositiveIntegerField(null=True, blank=True)
+    end_month = models.PositiveIntegerField(null=True, blank=True)
+    presentation_mode = models.CharField(
+        max_length=30, choices=PresentationMode.choices, default=PresentationMode.CLIENT_CENTRIC
+    )
+    approval_status = models.CharField(
+        max_length=10, choices=ApprovalStatus.choices, default=ApprovalStatus.DRAFT
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["start_year", "start_month"]
+        constraints = [
+            models.CheckConstraint(
+                check=Q(start_month__gte=1, start_month__lte=12) | Q(start_month__isnull=True),
+                name="career_engagement_start_month_range",
+            ),
+            models.CheckConstraint(
+                check=Q(end_month__gte=1, end_month__lte=12) | Q(end_month__isnull=True),
+                name="career_engagement_end_month_range",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.engagement_id:
+            existing = CareerEngagement.objects.count()
+            self.engagement_id = f"CE-{existing + 1:04d}"
+        if not self.default_displayed_organization:
+            self.default_displayed_organization = self.client_organization or self.legal_employer
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.engagement_id}: {self.approved_role_title} @ {self.default_displayed_organization}"
+
+    @property
+    def displayed_organization(self) -> str:
+        """Deterministic organisation-name presentation -- never translated or rewritten, only
+        selected among the operator's own stored alternatives. `default_displayed_organization` is
+        the default; `presentation_mode` can select the legal employer explicitly, or a combined
+        form, but never introduces a name not already stored on this record."""
+        if self.presentation_mode == self.PresentationMode.LEGAL_EMPLOYER_EXPLICIT:
+            return self.legal_employer
+        if self.presentation_mode == self.PresentationMode.COMBINED and self.client_organization:
+            return f"{self.client_organization} (via {self.legal_employer})"
+        return self.default_displayed_organization
+
+    def title_for_language(self, language_code: str) -> str:
+        """An operator-approved localized title for `language_code` if one is stored; otherwise
+        the single `approved_role_title`. Never machine-translated on the fly -- a title in a
+        language with no stored entry falls back to English rather than guessing a translation."""
+        return self.localized_titles.get(language_code) or self.approved_role_title
+
+    @property
+    def is_current(self) -> bool:
+        return self.end_status == self.EndStatus.PRESENT
+
+    def duration_months(self, *, as_of: datetime.date | None = None) -> int | None:
+        """Deterministic whole-month duration. Returns `None` when `end_status` is `UNKNOWN` --
+        there is no basis to compute an end point at all (a genuinely open question, never
+        defaulted to zero or to "ongoing"). A missing month component is treated as January for a
+        start date and December for an end date -- a defined, disclosed rounding convention
+        (never a hidden guess) that resolves a year-only precision date to its outer bound."""
+        if self.end_status == self.EndStatus.UNKNOWN:
+            return None
+        start_index = self.start_year * 12 + (self.start_month or 1)
+        if self.end_status == self.EndStatus.PRESENT:
+            reference = as_of or datetime.date.today()
+            end_index = reference.year * 12 + reference.month
+        else:
+            end_index = self.end_year * 12 + (self.end_month or 12)
+        return end_index - start_index
+
+
+class ClaimEngagementMapping(models.Model):
+    """A reviewable link between one `MemoryClaim` and one `CareerEngagement` (D-019).
+
+    Deliberately a **separate table**, never a field on `MemoryClaim` itself: proposing,
+    approving, or rejecting a mapping never mutates a `MemoryClaim` row, so it never conflicts
+    with `_RevisionScopedModel`'s ACTIVE-revision-content-freeze invariant -- a claim that belongs
+    to an already-`ACTIVE` `CandidateMemory` revision can still be mapped to an engagement after
+    the fact, exactly like `MemoryConflict.involved_claims` already references frozen claims
+    without editing them.
+    """
+
+    class Status(models.TextChoices):
+        PROPOSED = "PROPOSED", "Proposed"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+
+    memory_claim = models.ForeignKey(
+        MemoryClaim, on_delete=models.CASCADE, related_name="engagement_mappings"
+    )
+    career_engagement = models.ForeignKey(
+        CareerEngagement, on_delete=models.CASCADE, related_name="claim_mappings"
+    )
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PROPOSED)
+    proposed_reason = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["memory_claim", "career_engagement"], name="unique_claim_engagement_pair"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.memory_claim_id} -> {self.career_engagement_id} ({self.status})"

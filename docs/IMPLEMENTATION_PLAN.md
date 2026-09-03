@@ -292,6 +292,18 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   classification step has real work to do separating genuine evidence from the positioning noise
   that dominates those two files by volume; treat any evidence/positioning misclassification found
   during manual review as a correctness bug, not a style nitpick.
+- **Addendum (D-019, 2026-09-03) — the deterministic static-profile boundary**: implemented ahead
+  of M5/M6, directly motivated by the real, activated CandidateMemory's own data showing the same
+  real employer expressed a dozen different ways across extraction passes. `CareerEngagement`/
+  `ClaimEngagementMapping` (models, admin, `services/engagement_mapping.py`,
+  `services/career_engagement.py`) and the forward-compatible M5/M6 contracts and deterministic
+  helpers in `services/static_profile_boundary.py` are implemented and tested now (see
+  `docs/REQUIREMENT_TRACEABILITY.md`'s CE-001..CE-007), so employer/title/location/date facts are
+  never part of the LLM input/output contract those two milestones will build. No
+  `JobRequirement`/`FitAssessment`/`ResumeDraft` model was created by this addendum — M5 and M6
+  remain not started. No real `CareerEngagement` row was created for the operator's actual
+  employment history; that is deliberate future operator data-entry/review work through the normal
+  admin/service workflow.
 
 ## M4 — Agent Jobber and job intake
 
@@ -342,16 +354,23 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 - **Requirements covered**: AC-001..003, HITL-001, HITL-002, HITL-004, HITL-005, HITL-006,
   NFR-002, D-014's AC portion, D-012's `ANALYSIS`→`PREPARATION` transition on Gate-1 approval.
 - **Scope**: `FitAssessment` model + child `RequirementAssessment` rows (one per relevant
-  `JobRequirement`, disposition `MATCH`/`PARTIAL`/`GAP`/`UNKNOWN` per D-014); retrieval service
-  (confirmed **and** `resume_eligible` claims relevant to one `JobRequirementAnalysis`, from the
-  `ACTIVE` `CandidateMemory` revision only, plus applicable `CandidateRule`s — never the complete
+  `JobRequirement`, disposition `MATCH`/`PARTIAL`/`GAP`/`UNKNOWN` per D-014, evidence via
+  `supporting_memory_claim_ids` **and/or** `supporting_engagement_ids` per D-019 — the
+  `RequirementEvidenceReference` contract already exists in `candidate_memory.services.
+  static_profile_boundary`); retrieval service (confirmed **and** `resume_eligible` claims relevant
+  to one `JobRequirementAnalysis`, from the `ACTIVE` `CandidateMemory` revision only, plus
+  applicable `CandidateRule`s and any `APPROVED` `CareerEngagement`s in scope — never the complete
   source documents or the snapshot, per D-015's runtime-context boundaries in
-  `docs/ARCHITECTURE.md` §9); AC LLM call; disposition-coverage
+  `docs/ARCHITECTURE.md` §9); a **local, LLM-free** static-requirement assessment step for tenure/
+  dates/location/employment-relationship requirements (D-019,
+  `candidate_memory.services.static_profile_boundary.assess_tenure_requirement_locally`/
+  `assess_location_requirement_locally`), run before the AC LLM call so the LLM is only ever asked
+  to judge genuinely narrative fit/gap questions; AC LLM call; disposition-coverage
   validator (every relevant requirement has exactly one disposition; `MATCH`/`PARTIAL` require
-  confirmed-claim evidence; `GAP`/`UNKNOWN` never silently disappear) satisfying NFR-002/D-014;
-  `ReviewFeedback` model; generic approve/feedback view logic in `reviews`; Gate 1 combined AJ+AC
-  template rendering per-requirement dispositions; re-run wiring for feedback targeting AJ or AC
-  (creating new versions per D-010, **approved**).
+  confirmed-claim **or** approved-engagement evidence; `GAP`/`UNKNOWN` never silently disappear)
+  satisfying NFR-002/D-014; `ReviewFeedback` model; generic approve/feedback view logic in
+  `reviews`; Gate 1 combined AJ+AC template rendering per-requirement dispositions; re-run wiring
+  for feedback targeting AJ or AC (creating new versions per D-010, **approved**).
 - **Out of scope**: Agent Builder (M6); freshness/staleness checks against a *downstream* artifact
   (HITL-007 is fully exercised only once `resume_builder` exists — groundwork here is limited to
   storing `based_on_jra_id` and comparing it against `JobApplication.current_jra_id` per D-006).
@@ -389,11 +408,20 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 - **Scope**: `ResumeDraft` model + structured `ResumeElement`s (per
   `docs/RESUME_OUTPUT_STRUCTURE.md`); AB LLM call assembling JRA + FitAssessment + referenced
   MemoryClaims into the structured representation (target positioning, summary, experience,
-  strengths, achievements, skills, certifications, languages, positioning guidance); the
-  no-fabrication validator running against that **structured** data (evidence-attachment/
-  eligibility check per D-014 — not text/embedding similarity); the markdown renderer (runs only
-  after validation passes); Gate 2 rendered-markdown view; feedback-triggered regeneration (new
-  version per D-010); freshness check against `JobApplication.current_fit_assessment_id` (D-006).
+  strengths, achievements, skills, certifications, languages, positioning guidance) — **per D-019,
+  the LLM call never receives or produces employer/title/location/date fields**: an
+  `ExperienceSection` carries only an `engagement_id` (selecting among the `APPROVED`
+  `CareerEngagement`s retrieved for this job) plus evidence-backed bullets, matching the
+  `EngagementNarrativeOutput`/`EngagementBullet` contract already defined in
+  `candidate_memory.services.static_profile_boundary`; the no-fabrication validator running
+  against that **structured** data (evidence-attachment/eligibility check per D-014 — not text/
+  embedding similarity — **extended by D-019** to also resolve every `engagement_id` via
+  `resolve_approved_engagement`, failing the same way a fabricated claim ID does); the
+  deterministic renderer (runs only after validation passes) calls
+  `render_engagement_header(engagement_id, language=...)` for every experience section's header —
+  never anything Agent Builder generated — before rendering that section's bullets; Gate 2
+  rendered-markdown view; feedback-triggered regeneration (new version per D-010); freshness check
+  against `JobApplication.current_fit_assessment_id` (D-006).
 - **Out of scope**: PDF/DOCX rendering (permanently out of v1 scope, NG-001/AB-004).
 - **Dependencies**: M5. **Previously blocking, now resolved**: the resume template question
   (D-007/FUT-001) is resolved via `docs/RESUME_OUTPUT_STRUCTURE.md` — this milestone is no longer

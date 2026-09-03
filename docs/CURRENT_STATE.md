@@ -566,8 +566,33 @@ operator-editable). `candidate_matching`/`resume_builder`/`reviews` remain compl
 
 D-001 through D-015 are all APPROVED (several "with modification"); D-013 is superseded by D-010.
 D-016 (`FAILED` lifecycle state) remains PROPOSED, not yet product-owner-approved. D-017 (line-wrap
-provenance risk) is now **APPROVED AND IMPLEMENTED**. Neither D-016 nor anything else is blocking
-for any milestone through M7 as currently scoped.
+provenance risk), D-018 (Candidate Memory recovery), and D-019 (the deterministic static-profile
+boundary — `CareerEngagement`/`ClaimEngagementMapping`, see below) are all **APPROVED AND
+IMPLEMENTED**. Neither D-016 nor anything else is blocking for any milestone through M7 as
+currently scoped.
+
+## Deterministic static-profile boundary (D-019, 2026-09-03)
+
+Implemented ahead of M5/M6, before either milestone starts: `CareerEngagement` (an admin-editable
+registry, independent of any `CandidateMemory` revision's own lifecycle, gated by its own
+`approval_status`) and `ClaimEngagementMapping` (a reviewable, deterministic mapping between a
+`MemoryClaim` and a `CareerEngagement` — a separate table, never a `MemoryClaim` field, so it never
+conflicts with the ACTIVE-revision-content-freeze invariant). `services/engagement_mapping.py`
+proposes a mapping only on an exact normalized identity match, leaving anything ambiguous or
+unmatched for the operator. `services/career_engagement.py` computes total non-overlapping
+experience across engagements (merging overlapping ranges so they are never double-counted).
+`services/static_profile_boundary.py` defines the forward-compatible M5/M6 contracts themselves --
+`RequirementEvidenceReference` (`supporting_memory_claim_ids` + `supporting_engagement_ids`),
+`EngagementNarrativeOutput`/`EngagementBullet` (no employer/title/location/date field, `extra=
+"forbid"`), `render_engagement_header` (resolves those fields exclusively from an `APPROVED`
+`CareerEngagement`, fails closed on an unknown/unapproved `engagement_id`), and two local
+static-requirement assessors (tenure, location) that make an LLM call unnecessary for that kind of
+disposition. Migration `candidate_memory.0006_careerengagement_claimengagementmapping`; tests in
+`test_career_engagement.py`, `test_engagement_mapping.py`, `test_static_profile_boundary.py`
+(53 new tests, all deterministic, no LLM adapter involved). **Not done, and deliberately deferred**:
+no real `CareerEngagement` row exists yet for the operator's actual employment history -- creating
+and approving those is future operator data-entry/review work through the normal admin/service
+workflow, never hardcoded into a migration or seed script; M5/M6 themselves remain not started.
 
 ## Next action
 
