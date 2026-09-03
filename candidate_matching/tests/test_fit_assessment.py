@@ -13,7 +13,7 @@ from .factories import (
     make_job_application_with_jra,
     make_narrative_claim,
     make_revision,
-    scripted_assessment,
+    scripted_agent_candidate,
     valid_assessment_response,
 )
 
@@ -47,7 +47,7 @@ class BuildFitAssessmentTests(TestCase):
             ]
         )
 
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             fit_assessment = build_fit_assessment(application)
 
         assessments = fit_assessment.requirement_assessments.all()
@@ -67,7 +67,7 @@ class BuildFitAssessmentTests(TestCase):
 
         # An LLM response that has nothing for JR-001 would leave it uncovered if it were routed
         # to the LLM -- since it's static, the LLM is never called for it at all.
-        with scripted_assessment({"requirement_assessments": []}):
+        with scripted_agent_candidate({"requirement_assessments": []}):
             fit_assessment = build_fit_assessment(application)
 
         assessment = fit_assessment.requirement_assessments.get(requirement_id="JR-001")
@@ -92,7 +92,7 @@ class BuildFitAssessmentTests(TestCase):
                 }
             ]
         )
-        with scripted_assessment(response):
+        with scripted_agent_candidate(response):
             fit_assessment = build_fit_assessment(application)
 
         assessment = fit_assessment.requirement_assessments.get(requirement_id="JR-001")
@@ -116,7 +116,7 @@ class BuildFitAssessmentTests(TestCase):
                 }
             ]
         )
-        with scripted_assessment(response):
+        with scripted_agent_candidate(response):
             fit_assessment = build_fit_assessment(application)
 
         assessment = fit_assessment.requirement_assessments.get(requirement_id="JR-001")
@@ -129,7 +129,7 @@ class BuildFitAssessmentTests(TestCase):
         application = make_job_application_with_jra(
             requirements=[{"category": "MANDATORY", "text": "Some narrative requirement"}]
         )
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             fit_assessment = build_fit_assessment(application)
 
         self.assertEqual(fit_assessment.retrieved_claim_ids, [claim.claim_id])
@@ -140,7 +140,7 @@ class BuildFitAssessmentTests(TestCase):
         application = make_job_application_with_jra(
             requirements=[{"category": "MANDATORY", "text": "Some narrative requirement"}]
         )
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             first = build_fit_assessment(application)
             second = build_fit_assessment(application)
 

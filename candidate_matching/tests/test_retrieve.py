@@ -63,7 +63,7 @@ class RetrieveContextTests(TestCase):
 
         context = retrieve_context(rev)
         self.assertEqual(len(context.claims), 1)
-        self.assertEqual(context.claims[0].engagement_id, engagement.engagement_id)
+        self.assertEqual(context.claims[0].approved_engagement_ids, (engagement.engagement_id,))
         self.assertEqual(context.engagement_ids, [engagement.engagement_id])
 
     def test_includes_global_claim_with_no_mapping_at_all(self):
@@ -73,7 +73,7 @@ class RetrieveContextTests(TestCase):
 
         context = retrieve_context(rev)
         self.assertEqual(context.claim_ids, [global_claim.claim_id])
-        self.assertIsNone(context.claims[0].engagement_id)
+        self.assertEqual(context.claims[0].approved_engagement_ids, ())
 
     def test_excludes_claim_with_only_a_proposed_or_rejected_mapping(self):
         rev = make_revision(status=CandidateMemory.Status.BUILDING)

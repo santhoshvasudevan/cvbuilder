@@ -6,7 +6,7 @@ from candidate_matching.tests.factories import (
     freeze_revision,
     make_job_application_with_jra,
     make_revision,
-    scripted_assessment,
+    scripted_agent_candidate,
     valid_assessment_response,
 )
 from candidate_memory.models import CandidateMemory
@@ -22,7 +22,7 @@ class RunAgentCandidateTests(TestCase):
         rev = make_revision(status=CandidateMemory.Status.BUILDING)
         freeze_revision(rev, CandidateMemory.Status.ACTIVE)
         application = make_job_application_with_jra()
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             fit_assessment = run_agent_candidate(application)
         application.refresh_from_db()
         self.assertEqual(application.current_fit_assessment_id, fit_assessment.pk)
@@ -39,7 +39,7 @@ class SubmitGate1FeedbackTests(TestCase):
             submit_gate1_feedback(self.application, target="AB", comments="wrong gate")
 
     def test_ac_feedback_records_row_and_creates_new_fit_assessment_version(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             submit_gate1_feedback(self.application, target=ReviewFeedback.Target.AC, comments="please redo")
 
         feedback = ReviewFeedback.objects.get(job_application=self.application)
@@ -71,7 +71,7 @@ class ApproveGate1Tests(TestCase):
             approve_gate1(self.application)
 
     def test_cannot_approve_a_stale_fit_assessment(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             run_agent_candidate(self.application)
         with scripted_analysis(valid_analysis_response()):
             from job_intake.services.intake import rerun_analysis
@@ -82,14 +82,14 @@ class ApproveGate1Tests(TestCase):
             approve_gate1(self.application)
 
     def test_approving_advances_to_preparation(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             run_agent_candidate(self.application)
         approve_gate1(self.application)
         self.application.refresh_from_db()
         self.assertEqual(self.application.pipeline_phase, JobApplication.PipelinePhase.PREPARATION)
 
     def test_approval_survives_a_fresh_query_not_an_in_memory_assumption(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             run_agent_candidate(self.application)
         approve_gate1(self.application)
 

@@ -6,6 +6,7 @@ variables / a local .env file, never hardcoded or committed (requirements.md Sec
 """
 
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -15,6 +16,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load .env (if present) into the process environment before reading any setting below.
 load_dotenv(BASE_DIR / ".env")
+
+# True only under `manage.py test` (or a test runner invoking manage.py with "test" as the
+# subcommand). Used exactly once, by `llm_provider.adapters.get_adapter_for_stage`, to refuse
+# routing a real pipeline stage to a FAKE provider outside an automated test run -- the FAKE
+# adapter type exists for deterministic tests only, never as an accidentally-left-configured
+# production routing target. Tests that need a FakeAdapter without this flag (e.g. exercising the
+# guard itself) inject the adapter explicitly rather than relying on this flag being False.
+TESTING = "test" in sys.argv
 
 
 def _env_bool(name: str, default: bool) -> bool:

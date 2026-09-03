@@ -7,7 +7,7 @@ from candidate_matching.tests.factories import (
     freeze_revision,
     make_job_application_with_jra,
     make_revision,
-    scripted_assessment,
+    scripted_agent_candidate,
     valid_assessment_response,
 )
 from candidate_memory.models import CandidateMemory
@@ -27,7 +27,7 @@ class Gate1ViewTests(TestCase):
         self.assertContains(response, "No Agent Candidate assessment exists yet.")
 
     def test_run_ac_action_produces_an_assessment_and_redirects(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             response = self.client.post(self.url, {"action": "run_ac"})
         self.assertEqual(response.status_code, 302)
         self.application.refresh_from_db()
@@ -37,14 +37,14 @@ class Gate1ViewTests(TestCase):
         # The fixture response cites no real evidence (no MemoryClaim/CareerEngagement exists in
         # this test's ACTIVE revision), so the honest, correctly-sanitized outcome is a disclosed
         # UNKNOWN downgrade, not a bare MATCH -- see disposition_coverage.sanitize_items.
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             self.client.post(self.url, {"action": "run_ac"})
         response = self.client.get(self.url)
         self.assertContains(response, "UNKNOWN")
         self.assertContains(response, "downgraded to UNKNOWN")
 
     def test_approve_action_advances_phase(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             self.client.post(self.url, {"action": "run_ac"})
         response = self.client.post(self.url, {"action": "approve"})
         self.assertEqual(response.status_code, 302)
@@ -57,7 +57,7 @@ class Gate1ViewTests(TestCase):
         self.assertContains(response, "run Agent Candidate first")
 
     def test_ac_feedback_action_records_feedback_and_reruns(self):
-        with scripted_assessment(valid_assessment_response()):
+        with scripted_agent_candidate(valid_assessment_response()):
             self.client.post(self.url, {"action": "run_ac"})
             response = self.client.post(
                 self.url, {"action": "feedback", "target": "AC", "comments": "please redo"}

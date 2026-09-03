@@ -25,3 +25,21 @@ class AgentCandidateAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     requirement_assessments: list[RequirementAssessmentItem]
+
+
+class RequirementRelevanceItem(BaseModel):
+    """One JobRequirement's relevance verdict over the bounded candidate pool (D-015's bounded
+    relevance-ranking step, audit hardening 2026-09-03). An empty `relevant_claim_ids` list is a
+    real, explicit answer ("nothing in the candidate pool is relevant to this requirement") --
+    never treated as a schema omission, and never allowed to imply MATCH on its own."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str
+    relevant_claim_ids: list[str] = Field(default_factory=list)
+
+
+class RelevanceRankingOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rankings: list[RequirementRelevanceItem]

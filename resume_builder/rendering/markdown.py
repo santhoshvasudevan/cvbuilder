@@ -48,7 +48,7 @@ def _place_achievements(
             covered_claim_ids.update(element.supporting_memory_claim_ids)
         kept.append(element)
 
-    claim_engagement = {claim.claim_id: claim.engagement_id for claim in retrieval.claims}
+    claim_engagements = {claim.claim_id: claim.approved_engagement_ids for claim in retrieval.claims}
     order_counters: dict[tuple[str, str], int] = {}
     for element in kept:
         order_counters[(element.section, element.engagement_id)] = max(
@@ -58,10 +58,9 @@ def _place_achievements(
     for achievement in achievements:
         if covered_claim_ids.intersection(achievement.supporting_memory_claim_ids):
             continue
-        mapped_engagements = {
-            claim_engagement.get(claim_id) for claim_id in achievement.supporting_memory_claim_ids
-        }
-        mapped_engagements.discard(None)
+        mapped_engagements: set[str] = set()
+        for claim_id in achievement.supporting_memory_claim_ids:
+            mapped_engagements.update(claim_engagements.get(claim_id, ()))
         if len(mapped_engagements) == 1:
             section, engagement_id = ResumeElement.Section.EXPERIENCE_BULLET, next(iter(mapped_engagements))
         else:

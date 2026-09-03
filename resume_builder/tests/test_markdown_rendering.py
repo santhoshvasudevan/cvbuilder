@@ -14,7 +14,8 @@ from .factories import make_engagement
 def _retrieval(claims_by_engagement: dict[str, str | None]) -> RetrievalContext:
     claims = [
         RetrievedClaim(
-            claim_id=cid, text="t", claim_type="responsibility", subject_scope="s", engagement_id=eid
+            claim_id=cid, text="t", claim_type="responsibility", subject_scope="s",
+            approved_engagement_ids=(eid,) if eid else (),
         )
         for cid, eid in claims_by_engagement.items()
     ]

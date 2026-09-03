@@ -58,7 +58,11 @@ def build_request(
 ) -> NormalizedLLMRequest:
     context_lines = ["Candidate narrative claims:"]
     for claim in retrieval.claims:
-        engagement_note = f" [engagement: {claim.engagement_id}]" if claim.engagement_id else " [global]"
+        engagement_note = (
+            f" [engagements: {', '.join(claim.approved_engagement_ids)}]"
+            if claim.approved_engagement_ids
+            else " [global]"
+        )
         context_lines.append(f"- ({claim.claim_id}) [{claim.claim_type}]{engagement_note} {claim.text}")
 
     context_lines.append("\nApproved career engagements:")

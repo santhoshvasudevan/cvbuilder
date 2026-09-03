@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from django.test import TestCase
 
-from candidate_matching.services.retrieve import NoActiveCandidateMemoryError
 from job_applications.models import JobApplication
 
 from ..models import ResumeElement
@@ -24,12 +23,15 @@ class BuildResumeDraftTests(TestCase):
         with self.assertRaises(ResumeBuilderError):
             build_resume_draft(application)
 
-    def test_raises_without_an_active_candidate_memory(self):
+    def test_raises_when_candidate_memory_no_longer_active(self):
+        # M6 builds strictly from what the current FitAssessment already selected (audit
+        # hardening) -- if none of those claims are still on an ACTIVE revision, this must fail
+        # closed with a clear, specific error rather than silently building an empty context.
         from candidate_memory.models import CandidateMemory
 
         application, claim_id, engagement_id = make_ready_for_gate2_application()
         CandidateMemory.objects.update(status=CandidateMemory.Status.SUPERSEDED)
-        with self.assertRaises(NoActiveCandidateMemoryError):
+        with self.assertRaises(ResumeBuilderError):
             build_resume_draft(application)
 
     def test_successful_build_creates_draft_and_elements(self):

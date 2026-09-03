@@ -1,32 +1,23 @@
-"""Bounded, deterministic retrieval from the ACTIVE CandidateMemory for Agent Candidate (M5,
-requirements.md Sec 6, D-015's runtime-context boundaries, D-019).
+"""The eligibility layer of retrieval from the ACTIVE CandidateMemory for Agent Candidate/Agent
+Builder (M5/M6, requirements.md Sec 6, D-015's runtime-context boundaries, D-019).
 
-This never sends the entire CandidateMemory (or a source document, or the reference snapshot) to
-an LLM -- it selects a bounded subset by plain PostgreSQL queries and hands back exactly that
-subset, recording exactly which claim/engagement IDs were included (candidate_matching.models.
-FitAssessment.retrieved_claim_ids/retrieved_engagement_ids is populated straight from this
-result).
+This module only ever applies structural eligibility filters -- it is deliberately NOT the bounded
+context sent to a provider by itself (audit hardening, 2026-09-03): `services/bounded_retrieval.py`
+is what turns this eligible pool into the actual, capped, ranked context a request carries. Never
+send the output of `retrieve_context()` directly to an LLM.
 
-Included:
-- every CONFIRMED, resume_eligible, narrative (non-static) MemoryClaim that has an APPROVED
-  ClaimEngagementMapping to an APPROVED CareerEngagement ("approved engagement-mapped narrative
-  claims");
-- every CONFIRMED, resume_eligible, narrative MemoryClaim with no engagement mapping at all --
-  these are claims with no single-employer identity (career-level, skill, language, ...) and are
-  "relevant global claims" by construction: nothing employer-specific ever reaches this bucket,
-  since an employer-specific claim either already has an approved mapping (the bucket above) or is
-  a genuinely unresolved/ambiguous mapping candidate that stays excluded here (never guessed at
-  retrieval time -- see D-019 and `services/engagement_mapping.py`);
-- every APPROVED CareerEngagement (for the local static-requirement assessors and as read-only
-  context for the LLM to cite by engagement_id);
-- every CandidateRule on the ACTIVE revision (constraint/positioning planes -- read-only context
-  that can shape a gap explanation, e.g. "still learning Go", but can never itself satisfy a
-  MATCH/PARTIAL disposition).
+Eligibility, applied here:
+- CONFIRMED, resume_eligible, narrative (non-static-type) MemoryClaims only;
+- a claim with an APPROVED ClaimEngagementMapping is tagged with the *complete* set of engagements
+  it is approved for (a claim can legitimately be approved for more than one -- see D-019
+  refinement, audit hardening 2026-09-03: never assume a single nullable engagement);
+- a claim with only PROPOSED/REJECTED mappings (no APPROVED one) is excluded outright -- an
+  engagement-specific claim never falls back to being treated as global;
+- a claim with no mapping at all is included with an empty `approved_engagement_ids` tuple
+  ("global");
+- every APPROVED CareerEngagement and every CandidateRule on the revision.
 
-Excluded, always: STATIC_ENGAGEMENT_CLAIM_TYPES (employment_dates/employment_location/position/
-position_title -- CareerEngagement already owns this content, D-019), any claim that is not both
-CONFIRMED and resume_eligible, and any claim whose engagement mapping is only PROPOSED/REJECTED
-(not yet APPROVED).
+Never the full CandidateMemory, a source document, or the reference snapshot.
 """
 
 from __future__ import annotations
@@ -47,7 +38,12 @@ class RetrievedClaim:
     text: str
     claim_type: str
     subject_scope: str
-    engagement_id: str | None
+    approved_engagement_ids: tuple[str, ...] = ()
+    duplicate_group_key: str = ""
+
+    @property
+    def is_global(self) -> bool:
+        return not self.approved_engagement_ids
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,6 +58,7 @@ class RetrievedEngagement:
 
 @dataclasses.dataclass(frozen=True)
 class RetrievedRule:
+    rule_id: int
     rule_type: str
     text: str
     scope: str
@@ -93,30 +90,36 @@ def get_active_candidate_memory() -> CandidateMemory:
         ) from exc
 
 
-def retrieve_context(candidate_memory: CandidateMemory) -> RetrievalContext:
+def retrieve_eligible_pool(candidate_memory: CandidateMemory) -> RetrievalContext:
+    """The full structurally-eligible pool -- still not bounded/relevance-filtered. Callers must
+    go through `services/bounded_retrieval.py` before this reaches a provider request."""
     approved_engagements = list(
         CareerEngagement.objects.filter(approval_status=CareerEngagement.ApprovalStatus.APPROVED)
     )
     engagement_by_pk = {engagement.pk: engagement for engagement in approved_engagements}
 
-    eligible_claims = candidate_memory.claims.filter(
-        confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
-        resume_eligible=True,
-    ).exclude(claim_type__in=STATIC_ENGAGEMENT_CLAIM_TYPES).prefetch_related("engagement_mappings")
+    eligible_claims = (
+        candidate_memory.claims.filter(
+            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
+            resume_eligible=True,
+        )
+        .exclude(claim_type__in=STATIC_ENGAGEMENT_CLAIM_TYPES)
+        .prefetch_related("engagement_mappings")
+    )
 
     retrieved_claims: list[RetrievedClaim] = []
     for claim in eligible_claims:
-        approved_mapping = next(
-            (
-                mapping
-                for mapping in claim.engagement_mappings.all()
+        mappings = list(claim.engagement_mappings.all())
+        approved_engagement_ids = tuple(
+            sorted(
+                engagement_by_pk[mapping.career_engagement_id].engagement_id
+                for mapping in mappings
                 if mapping.status == mapping.Status.APPROVED
                 and mapping.career_engagement_id in engagement_by_pk
-            ),
-            None,
+            )
         )
-        has_any_mapping = any(claim.engagement_mappings.all())
-        if has_any_mapping and approved_mapping is None:
+        has_any_mapping = bool(mappings)
+        if has_any_mapping and not approved_engagement_ids:
             # Engagement-specific but only PROPOSED/REJECTED -- not yet operator-approved for
             # placement, so it stays excluded from this run rather than guessed.
             continue
@@ -126,11 +129,8 @@ def retrieve_context(candidate_memory: CandidateMemory) -> RetrievalContext:
                 text=claim.canonical_text_en,
                 claim_type=claim.claim_type,
                 subject_scope=claim.subject_scope,
-                engagement_id=(
-                    engagement_by_pk[approved_mapping.career_engagement_id].engagement_id
-                    if approved_mapping
-                    else None
-                ),
+                duplicate_group_key=claim.duplicate_group_key,
+                approved_engagement_ids=approved_engagement_ids,
             )
         )
 
@@ -147,7 +147,7 @@ def retrieve_context(candidate_memory: CandidateMemory) -> RetrievalContext:
     ]
 
     retrieved_rules = [
-        RetrievedRule(rule_type=rule.rule_type, text=rule.text, scope=rule.scope)
+        RetrievedRule(rule_id=rule.pk, rule_type=rule.rule_type, text=rule.text, scope=rule.scope)
         for rule in CandidateRule.objects.filter(candidate_memory=candidate_memory)
     ]
 
@@ -157,3 +157,9 @@ def retrieve_context(candidate_memory: CandidateMemory) -> RetrievalContext:
         engagements=retrieved_engagements,
         rules=retrieved_rules,
     )
+
+
+# Backward-compatible alias -- pre-hardening callers/tests used this name for what is now the
+# unbounded eligibility pool. Prefer `retrieve_eligible_pool` in new code; both names refer to the
+# same function.
+retrieve_context = retrieve_eligible_pool

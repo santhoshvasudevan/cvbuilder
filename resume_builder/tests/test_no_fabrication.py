@@ -16,7 +16,8 @@ def _retrieval(claim_ids, engagement_ids) -> RetrievalContext:
         candidate_memory_id=1,
         claims=[
             RetrievedClaim(
-                claim_id=cid, text="t", claim_type="responsibility", subject_scope="s", engagement_id=None
+                claim_id=cid, text="t", claim_type="responsibility", subject_scope="s",
+                approved_engagement_ids=(),
             )
             for cid in claim_ids
         ],

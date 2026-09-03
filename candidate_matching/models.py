@@ -36,6 +36,16 @@ class FitAssessment(models.Model):
         blank=True,
         help_text="Exactly which APPROVED CareerEngagement IDs were made available for this run.",
     )
+    retrieval_manifest = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Inspectable record of the bounded retrieval pipeline for this run (audit "
+        "hardening, 2026-09-03): eligible/duplicate/candidate/selected counts, excluded-with-"
+        "reason counts, per-requirement selected claim IDs, rule counts, the estimated request "
+        "token size, and the cap configuration in effect -- see "
+        "candidate_matching.services.bounded_retrieval.RetrievalManifest. Never raw provider "
+        "prompts or responses.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -27,6 +27,9 @@ __all__ = [
     "make_job_application_with_jra",
     "make_fake_stage_assignment",
     "scripted_assessment",
+    "scripted_ranking",
+    "scripted_ranking_selecting_all",
+    "scripted_agent_candidate",
     "valid_assessment_response",
 ]
 
@@ -112,13 +115,71 @@ def make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_MATCH) -> LLM
 def scripted_assessment(fixed_response: dict):
     """Patch `candidate_matching.services.assess.get_adapter_for_stage` so the AC assessment call
     in the wrapped block returns `fixed_response`, via the real `FakeAdapter`."""
-    model = make_fake_stage_assignment()
+    model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_MATCH)
 
     def _get_adapter_for_stage(stage):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with mock.patch("candidate_matching.services.assess.get_adapter_for_stage", _get_adapter_for_stage):
         yield
+
+
+@contextlib.contextmanager
+def scripted_ranking(fixed_response: dict):
+    """Patch `candidate_matching.services.rank.get_adapter_for_stage` so the D-015 relevance-
+    ranking call in the wrapped block returns `fixed_response`, via the real `FakeAdapter`. Use
+    this when a test needs precise control over which claim_ids the ranking step "selects" (e.g.
+    to prove a fabricated or missing-requirement ranking result is handled correctly)."""
+    model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_RANK)
+
+    def _get_adapter_for_stage(stage):
+        return FakeAdapter(model, fixed_response=fixed_response)
+
+    with mock.patch("candidate_matching.services.rank.get_adapter_for_stage", _get_adapter_for_stage):
+        yield
+
+
+@contextlib.contextmanager
+def scripted_ranking_selecting_all():
+    """Convenience for tests that don't care about ranking behavior itself: patches
+    `candidate_matching.services.bounded_retrieval.rank_relevance` so every claim actually present
+    in the real candidate pool for a given call is returned as relevant for every requirement --
+    still routed through a real `FakeAdapter`/`StageModelAssignment(AC_RANK)` and the real
+    `RelevanceRankingOutput` schema validation, just without hand-authoring the exact candidate
+    pool contents (which are the deterministic, data-dependent output of lexical scoring) in every
+    test."""
+    model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_RANK)
+
+    def _fake_rank_relevance(candidate_pool, requirements):
+        from candidate_matching.services.rank import build_request
+
+        fixed_response = {
+            "rankings": [
+                {
+                    "requirement_id": requirement["requirement_id"],
+                    "relevant_claim_ids": [claim.claim_id for claim in candidate_pool],
+                }
+                for requirement in requirements
+            ]
+        }
+        adapter = FakeAdapter(model, fixed_response=fixed_response)
+        request = build_request(candidate_pool, requirements)
+        return adapter.generate(request)
+
+    with mock.patch(
+        "candidate_matching.services.bounded_retrieval.rank_relevance", _fake_rank_relevance
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def scripted_agent_candidate(assessment_response: dict):
+    """The common case: script the D-015 ranking step to pass through every real candidate as
+    relevant, and script the AC_MATCH assessment call with `assessment_response`. Equivalent to
+    nesting `scripted_ranking_selecting_all()` and `scripted_assessment(assessment_response)`."""
+    with scripted_ranking_selecting_all():
+        with scripted_assessment(assessment_response):
+            yield
 
 
 def valid_assessment_response(**overrides) -> dict:
