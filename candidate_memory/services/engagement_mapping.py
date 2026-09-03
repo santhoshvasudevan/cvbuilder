@@ -47,12 +47,41 @@ STATIC_ENGAGEMENT_CLAIM_TYPES = frozenset(
 )
 
 
-class StaticClaimMappingError(Exception):
+class MappingApprovalError(Exception):
+    """Base class for every reason `approve_mapping`/`approve_narrative_mapping` refuses to
+    approve a `ClaimEngagementMapping` -- catch this to handle any refusal generically (e.g. in an
+    admin bulk action reporting skipped rows), or one of the specific subclasses below for a
+    particular reason."""
+
+
+class StaticClaimMappingError(MappingApprovalError):
     """Raised when an operator (or an automated action) attempts to approve a
     `ClaimEngagementMapping` for a claim whose `claim_type` is in `STATIC_ENGAGEMENT_CLAIM_TYPES`.
     Such a claim's facts are already canonically owned by the mapping's own `career_engagement` --
     approving it as a narrative mapping would be redundant at best and contradictory at worst if
     the claim's own (now-superseded) text ever disagreed with the engagement record."""
+
+
+class MappingNotProposedError(MappingApprovalError):
+    """Raised when attempting to approve a mapping that is not currently `PROPOSED` -- an
+    already-`APPROVED` or `REJECTED` mapping must never be silently re-approved."""
+
+
+class ClaimNotEligibleError(MappingApprovalError):
+    """Raised when the mapping's claim is not both `CONFIRMED` and `resume_eligible` -- only a
+    claim that could actually become a résumé bullet may support an approved mapping."""
+
+
+class EngagementNotApprovedError(MappingApprovalError):
+    """Raised when the mapping's `career_engagement` is not `APPROVED` -- a mapping can never be
+    more trustworthy than the engagement record it points at."""
+
+
+class InactiveRevisionError(MappingApprovalError):
+    """Raised when the mapping's claim belongs to a `CandidateMemory` revision that is not the
+    currently `ACTIVE` one -- approving a mapping against a superseded/failed/still-under-review
+    revision would be meaningless, since only the `ACTIVE` revision's claims can ever reach a
+    rendered resume."""
 
 
 def _normalize(value: str) -> str:
@@ -159,11 +188,18 @@ def propose_claim_engagement_mappings(candidate_memory: CandidateMemory) -> Mapp
     )
 
 
-def approve_mapping(mapping: ClaimEngagementMapping) -> ClaimEngagementMapping:
+def approve_mapping(
+    mapping: ClaimEngagementMapping, *, approved_by=None
+) -> ClaimEngagementMapping:
     """Refuses (`StaticClaimMappingError`, fail closed) to approve a mapping whose claim is a
-    static engagement claim type -- see module docstring. This is the sole approval entry point;
-    the admin's bulk approve action calls this per row rather than bulk-updating status directly,
-    so the refusal is enforced through the real workflow, not just available as an unused check."""
+    static engagement claim type -- see module docstring. This is the base approval entry point
+    every approval path (the admin's original bulk approve action, and `approve_narrative_mapping`
+    below) ultimately calls, rather than bulk-updating status directly, so the refusal is enforced
+    through the real workflow, not just available as an unused check.
+
+    `approved_by`, when given (a `django.contrib.auth.models.User`), is recorded on the mapping --
+    part of the audit trail alongside `reviewed_at`, which continues to double as the approval
+    timestamp when `status` ends up `APPROVED`."""
     if mapping.memory_claim.claim_type in STATIC_ENGAGEMENT_CLAIM_TYPES:
         raise StaticClaimMappingError(
             f"{mapping.memory_claim.claim_id} is a static engagement claim "
@@ -173,8 +209,53 @@ def approve_mapping(mapping: ClaimEngagementMapping) -> ClaimEngagementMapping:
         )
     mapping.status = ClaimEngagementMapping.Status.APPROVED
     mapping.reviewed_at = timezone.now()
+    mapping.approved_by = approved_by
     mapping.save()
     return mapping
+
+
+def approve_narrative_mapping(
+    mapping: ClaimEngagementMapping, *, approved_by
+) -> ClaimEngagementMapping:
+    """The stricter approval path behind the admin's "Approve selected narrative mappings" action
+    (2026-09-03): every guard `approve_mapping` already enforces, plus --
+
+    - only a currently `PROPOSED` mapping may be approved (`MappingNotProposedError`) -- an
+      already-`APPROVED` or `REJECTED` mapping is never touched;
+    - the claim must be `CONFIRMED` and `resume_eligible` (`ClaimNotEligibleError`);
+    - `career_engagement` must be `APPROVED` (`EngagementNotApprovedError`);
+    - the claim's own `CandidateMemory` must be the currently `ACTIVE` revision
+      (`InactiveRevisionError`) -- a mapping against a superseded/failed/still-under-review
+      revision can never reach a rendered resume, so approving it would be meaningless.
+
+    `approved_by` is required (not optional, unlike the base `approve_mapping`) since this path
+    exists specifically to keep a precise audit trail of who ran the stricter, operator-facing
+    approval action."""
+    if mapping.status != ClaimEngagementMapping.Status.PROPOSED:
+        raise MappingNotProposedError(
+            f"{mapping.memory_claim.claim_id} mapping is {mapping.status}, not PROPOSED -- only a "
+            "PROPOSED mapping may be approved."
+        )
+    claim = mapping.memory_claim
+    if (
+        claim.confirmation_status != MemoryClaim.ConfirmationStatus.CONFIRMED
+        or not claim.resume_eligible
+    ):
+        raise ClaimNotEligibleError(
+            f"{claim.claim_id} is not both CONFIRMED and resume_eligible "
+            f"(confirmation_status={claim.confirmation_status}, resume_eligible={claim.resume_eligible})."
+        )
+    if mapping.career_engagement.approval_status != CareerEngagement.ApprovalStatus.APPROVED:
+        raise EngagementNotApprovedError(
+            f"CareerEngagement {mapping.career_engagement.engagement_id} is "
+            f"{mapping.career_engagement.approval_status}, not APPROVED."
+        )
+    if claim.candidate_memory.status != CandidateMemory.Status.ACTIVE:
+        raise InactiveRevisionError(
+            f"{claim.claim_id} belongs to CandidateMemory revision {claim.candidate_memory_id} "
+            f"({claim.candidate_memory.status}), not the currently ACTIVE revision."
+        )
+    return approve_mapping(mapping, approved_by=approved_by)
 
 
 def reject_mapping(mapping: ClaimEngagementMapping) -> ClaimEngagementMapping:

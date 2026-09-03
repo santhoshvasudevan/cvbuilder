@@ -1,0 +1,37 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">Home</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+&rsaquo; <a href="{% url opts|admin_urlname:'changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+&rsaquo; Approve selected narrative mappings
+</div>
+{% endblock %}
+
+{% block content %}
+<p>You are about to approve {{ total_count }} narrative mapping{{ total_count|pluralize }}, grouped by
+CareerEngagement:</p>
+<ul>
+{% for engagement_id, count in counts_by_engagement.items %}
+    <li>{{ engagement_id }}: {{ count }} mapping{{ count|pluralize }}</li>
+{% endfor %}
+</ul>
+<p>Each mapping will still be individually re-checked before being approved -- must be currently
+PROPOSED; its claim must be CONFIRMED and resume-eligible; its CareerEngagement must be APPROVED;
+its claim's CandidateMemory revision must be the currently ACTIVE one; and its claim must not be a
+static engagement claim type. Any mapping that fails one of these checks is skipped and reported,
+never silently approved.</p>
+<form method="post">{% csrf_token %}
+<div>
+{% for obj in queryset %}
+<input type="hidden" name="{{ action_checkbox_name }}" value="{{ obj.pk }}">
+{% endfor %}
+<input type="hidden" name="action" value="approve_narrative_mappings">
+<input type="hidden" name="post" value="yes">
+<input type="submit" value="Yes, approve these mappings">
+<a href="{% url opts|admin_urlname:'changelist' %}" class="button cancel-link">No, take me back</a>
+</div>
+</form>
+{% endblock %}

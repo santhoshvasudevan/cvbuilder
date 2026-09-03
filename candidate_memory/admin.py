@@ -1,4 +1,9 @@
+from collections import Counter
+
 from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db import transaction
+from django.template.response import TemplateResponse
 from django.utils.html import format_html, format_html_join
 
 from .models import (
@@ -161,9 +166,10 @@ class ClaimEngagementMappingAdmin(admin.ModelAdmin):
         "proposed_reason",
         "created_at",
         "reviewed_at",
+        "approved_by",
     )
     list_filter = ("status",)
-    readonly_fields = ("created_at", "evidence_detail")
+    readonly_fields = ("created_at", "reviewed_at", "approved_by", "evidence_detail")
     fields = (
         "evidence_detail",
         "memory_claim",
@@ -172,16 +178,26 @@ class ClaimEngagementMappingAdmin(admin.ModelAdmin):
         "proposed_reason",
         "created_at",
         "reviewed_at",
+        "approved_by",
     )
-    actions = ["approve_mappings", "reject_mappings"]
+    actions = ["approve_mappings", "reject_mappings", "approve_narrative_mappings"]
 
     def get_queryset(self, request):
         return (
             super()
             .get_queryset(request)
-            .select_related("memory_claim", "career_engagement")
+            .select_related("memory_claim", "memory_claim__candidate_memory", "career_engagement")
             .prefetch_related("memory_claim__supports__memory_source_document")
         )
+
+    def get_actions(self, request):
+        # "Approve selected narrative mappings" (D-019, 2026-09-03) is restricted to superusers
+        # only -- it never even appears in the action dropdown for anyone else, and the action
+        # itself defensively re-checks this in case of a direct POST.
+        actions = super().get_actions(request)
+        if not request.user.is_superuser:
+            actions.pop("approve_narrative_mappings", None)
+        return actions
 
     @admin.display(description="Claim")
     def claim_preview(self, obj):
@@ -291,3 +307,56 @@ class ClaimEngagementMappingAdmin(admin.ModelAdmin):
     def reject_mappings(self, request, queryset):
         for mapping in queryset:
             engagement_mapping.reject_mapping(mapping)
+
+    @admin.action(description="Approve selected narrative mappings")
+    def approve_narrative_mappings(self, request, queryset):
+        """Superuser-only, two-step bulk approval (D-019, 2026-09-03): the first POST (a plain
+        action submit) renders a confirmation page showing counts grouped by CareerEngagement;
+        only the second POST (from that page, carrying post=yes) actually approves anything.
+        Every row is re-checked by `services.engagement_mapping.approve_narrative_mapping` inside
+        one transaction -- PROPOSED-only, confirmed+resume_eligible claim, APPROVED engagement,
+        ACTIVE revision, never a static engagement claim type -- and a row that fails any of those
+        is skipped and reported, never silently approved and never left partially modified."""
+        if not request.user.is_superuser:
+            self.message_user(
+                request, "Only superusers may approve narrative mappings.", level=messages.ERROR
+            )
+            return None
+
+        if request.POST.get("post") == "yes":
+            approved = 0
+            refused = []
+            with transaction.atomic():
+                for mapping in queryset:
+                    try:
+                        engagement_mapping.approve_narrative_mapping(mapping, approved_by=request.user)
+                    except engagement_mapping.MappingApprovalError as exc:
+                        refused.append(f"{mapping.memory_claim.claim_id}: {exc}")
+                    else:
+                        approved += 1
+            if approved:
+                self.message_user(request, f"Approved {approved} narrative mapping(s).")
+            if refused:
+                self.message_user(
+                    request, "Refused to approve: " + "; ".join(refused), level=messages.WARNING
+                )
+            return None
+
+        counts_by_engagement = Counter()
+        for mapping in queryset:
+            counts_by_engagement[mapping.career_engagement.engagement_id] += 1
+
+        context = {
+            **self.admin_site.each_context(request),
+            "title": "Approve selected narrative mappings",
+            "queryset": queryset,
+            "counts_by_engagement": dict(sorted(counts_by_engagement.items())),
+            "total_count": queryset.count(),
+            "action_checkbox_name": ACTION_CHECKBOX_NAME,
+            "opts": self.model._meta,
+        }
+        return TemplateResponse(
+            request,
+            "admin/candidate_memory/claimengagementmapping/approve_narrative_mappings_confirmation.html",
+            context,
+        )

@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
@@ -588,7 +589,17 @@ class ClaimEngagementMapping(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PROPOSED)
     proposed_reason = models.CharField(max_length=200, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Set whenever status changes away from PROPOSED -- doubles as the approval "
+        "timestamp when status=APPROVED.",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="approved_claim_engagement_mappings",
+        help_text="The operator who approved this mapping (set only on approval, never on "
+        "rejection or proposal) -- part of the audit trail alongside reviewed_at.",
+    )
 
     class Meta:
         constraints = [

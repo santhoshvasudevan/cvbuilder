@@ -6,13 +6,20 @@ No LLM call, no source re-extraction, anywhere in this file."""
 
 from __future__ import annotations
 
+from django.contrib.auth.models import User
 from django.test import TestCase
 
 from ..models import CandidateMemory, CareerEngagement, ClaimEngagementMapping, MemoryClaim
 from ..services.engagement_mapping import (
     STATIC_ENGAGEMENT_CLAIM_TYPES,
+    ClaimNotEligibleError,
+    EngagementNotApprovedError,
+    InactiveRevisionError,
+    MappingApprovalError,
+    MappingNotProposedError,
     StaticClaimMappingError,
     approve_mapping,
+    approve_narrative_mapping,
     approved_narrative_claim_ids_for_engagement,
     find_mappings_needing_review,
     propose_claim_engagement_mappings,
@@ -296,3 +303,112 @@ class ApprovedNarrativeClaimIdsForEngagementTests(TestCase):
         claim_ids = approved_narrative_claim_ids_for_engagement(engagement)
 
         self.assertEqual(claim_ids, [approved_claim.claim_id])
+
+
+class ApproveNarrativeMappingTests(TestCase):
+    """The stricter approval path behind the admin's "Approve selected narrative mappings"
+    action (2026-09-03)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="approver", password="pw")
+
+    def _eligible_setup(self):
+        rev = make_revision()
+        engagement = _make_engagement()
+        claim = _make_narrative_claim(rev)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+        return mapping
+
+    def test_approves_and_records_approved_by_when_every_guard_passes(self):
+        mapping = self._eligible_setup()
+
+        approved = approve_narrative_mapping(mapping, approved_by=self.user)
+
+        self.assertEqual(approved.status, ClaimEngagementMapping.Status.APPROVED)
+        self.assertEqual(approved.approved_by, self.user)
+        self.assertIsNotNone(approved.reviewed_at)
+
+    def test_refuses_a_mapping_that_is_not_proposed(self):
+        mapping = self._eligible_setup()
+        mapping.status = ClaimEngagementMapping.Status.REJECTED
+        mapping.save()
+
+        with self.assertRaises(MappingNotProposedError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.REJECTED)
+        self.assertIsNone(mapping.approved_by)
+
+    def test_never_re_approves_an_already_approved_mapping(self):
+        mapping = self._eligible_setup()
+        mapping.status = ClaimEngagementMapping.Status.APPROVED
+        mapping.save()
+
+        with self.assertRaises(MappingNotProposedError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+    def test_refuses_a_static_engagement_claim(self):
+        rev = make_revision()
+        engagement = _make_engagement()
+        claim = make_claim(
+            rev, claim_type="employment_dates",
+            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED, resume_eligible=True,
+        )
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(StaticClaimMappingError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+    def test_refuses_an_unconfirmed_claim(self):
+        rev = make_revision()
+        engagement = _make_engagement()
+        claim = _make_narrative_claim(rev, confirmation_status=MemoryClaim.ConfirmationStatus.UNCONFIRMED)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(ClaimNotEligibleError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+    def test_refuses_a_non_resume_eligible_claim(self):
+        rev = make_revision()
+        engagement = _make_engagement()
+        claim = _make_narrative_claim(rev, resume_eligible=False)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(ClaimNotEligibleError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+    def test_refuses_an_unapproved_engagement(self):
+        rev = make_revision()
+        engagement = _make_engagement(approval_status=CareerEngagement.ApprovalStatus.DRAFT)
+        claim = _make_narrative_claim(rev)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(EngagementNotApprovedError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+    def test_refuses_a_claim_from_an_inactive_revision(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        engagement = _make_engagement()
+        claim = _make_narrative_claim(rev)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(InactiveRevisionError):
+            approve_narrative_mapping(mapping, approved_by=self.user)
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+
+    def test_all_refusals_are_mapping_approval_errors(self):
+        rev = make_revision(status=CandidateMemory.Status.NEEDS_REVIEW)
+        engagement = _make_engagement()
+        claim = _make_narrative_claim(rev)
+        mapping = ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=engagement)
+
+        with self.assertRaises(MappingApprovalError):
+            approve_narrative_mapping(mapping, approved_by=self.user)

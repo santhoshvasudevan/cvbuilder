@@ -8,8 +8,14 @@ from django.contrib.auth.models import Permission, User
 from django.test import TestCase
 from django.urls import reverse
 
-from ..models import CareerEngagement, ClaimEngagementMapping, MemoryClaim, MemoryClaimSupport
-from .factories import make_claim, make_revision, make_source
+from ..models import (
+    CandidateMemory,
+    CareerEngagement,
+    ClaimEngagementMapping,
+    MemoryClaim,
+    MemoryClaimSupport,
+)
+from .factories import freeze_revision, make_claim, make_revision, make_source
 
 
 def _make_engagement(**kwargs) -> CareerEngagement:
@@ -261,3 +267,138 @@ class ClaimEngagementMappingAdminApproveActionTests(TestCase):
         narrative_mapping.refresh_from_db()
         self.assertEqual(static_mapping.status, ClaimEngagementMapping.Status.PROPOSED)
         self.assertEqual(narrative_mapping.status, ClaimEngagementMapping.Status.APPROVED)
+
+
+class ApproveNarrativeMappingsAdminActionTests(TestCase):
+    """The "Approve selected narrative mappings" bulk action (2026-09-03): superuser-only,
+    two-step confirmation, routed through services.engagement_mapping.approve_narrative_mapping
+    and a real transaction."""
+
+    def setUp(self):
+        self.superuser = User.objects.create_superuser(
+            username="narrative-approver", email="na@example.com", password="pw"
+        )
+        self.rev = make_revision()
+        self.engagement = _make_engagement()
+
+    def _eligible_mapping(self, **claim_overrides):
+        defaults = dict(
+            claim_type="responsibility",
+            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
+            resume_eligible=True,
+        )
+        defaults.update(claim_overrides)
+        claim = make_claim(self.rev, **defaults)
+        return ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=self.engagement)
+
+    def _post_action(self, mapping_ids, *, confirm=False):
+        data = {
+            "action": "approve_narrative_mappings",
+            "_selected_action": [str(pk) for pk in mapping_ids],
+        }
+        if confirm:
+            data["post"] = "yes"
+        return self.client.post(
+            reverse("admin:candidate_memory_claimengagementmapping_changelist"), data, follow=True
+        )
+
+    def test_action_is_absent_from_the_dropdown_for_a_non_superuser(self):
+        staff_user = User.objects.create_user(username="staff-only", password="pw", is_staff=True)
+        for perm in ("view", "change"):
+            staff_user.user_permissions.add(
+                Permission.objects.get(
+                    content_type__app_label="candidate_memory",
+                    codename=f"{perm}_claimengagementmapping",
+                )
+            )
+        self.client.force_login(staff_user)
+
+        response = self.client.get(reverse("admin:candidate_memory_claimengagementmapping_changelist"))
+
+        self.assertNotIn(b"Approve selected narrative mappings", response.content)
+
+    def test_a_non_superuser_directly_posting_the_action_is_refused(self):
+        staff_user = User.objects.create_user(username="staff-poster", password="pw", is_staff=True)
+        for perm in ("view", "change"):
+            staff_user.user_permissions.add(
+                Permission.objects.get(
+                    content_type__app_label="candidate_memory",
+                    codename=f"{perm}_claimengagementmapping",
+                )
+            )
+        self.client.force_login(staff_user)
+        mapping = self._eligible_mapping()
+        freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
+
+        self._post_action([mapping.pk], confirm=True)
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+
+    def test_first_post_shows_confirmation_page_grouped_by_engagement_without_approving(self):
+        self.client.force_login(self.superuser)
+        mapping = self._eligible_mapping()
+        freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
+
+        response = self._post_action([mapping.pk], confirm=False)
+
+        self.assertContains(response, "Approve selected narrative mappings")
+        self.assertContains(response, self.engagement.engagement_id)
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+
+    def test_second_post_approves_and_records_approved_by(self):
+        self.client.force_login(self.superuser)
+        mapping = self._eligible_mapping()
+        freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
+
+        self._post_action([mapping.pk], confirm=True)
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.APPROVED)
+        self.assertEqual(mapping.approved_by, self.superuser)
+        self.assertIsNotNone(mapping.reviewed_at)
+
+    def test_refuses_and_reports_a_mapping_from_an_inactive_revision(self):
+        self.client.force_login(self.superuser)
+        # self.rev is left at its default BUILDING status -- never frozen to ACTIVE.
+        mapping = self._eligible_mapping()
+
+        response = self._post_action([mapping.pk], confirm=True)
+
+        mapping.refresh_from_db()
+        self.assertEqual(mapping.status, ClaimEngagementMapping.Status.PROPOSED)
+        self.assertIn(mapping.memory_claim.claim_id.encode(), response.content)
+
+    def test_never_touches_an_already_approved_or_rejected_mapping(self):
+        self.client.force_login(self.superuser)
+        approved_mapping = self._eligible_mapping()
+        rejected_mapping = self._eligible_mapping()
+        freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
+        approved_mapping.status = ClaimEngagementMapping.Status.APPROVED
+        approved_mapping.save()
+        rejected_mapping.status = ClaimEngagementMapping.Status.REJECTED
+        rejected_mapping.save()
+
+        self._post_action([approved_mapping.pk, rejected_mapping.pk], confirm=True)
+
+        approved_mapping.refresh_from_db()
+        rejected_mapping.refresh_from_db()
+        self.assertEqual(approved_mapping.status, ClaimEngagementMapping.Status.APPROVED)
+        self.assertEqual(rejected_mapping.status, ClaimEngagementMapping.Status.REJECTED)
+
+    def test_mixed_batch_approves_eligible_and_reports_the_rest(self):
+        self.client.force_login(self.superuser)
+        eligible = self._eligible_mapping()
+        static_claim = make_claim(self.rev, claim_type="employment_dates")
+        static_mapping = ClaimEngagementMapping.objects.create(
+            memory_claim=static_claim, career_engagement=self.engagement
+        )
+        freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
+
+        self._post_action([eligible.pk, static_mapping.pk], confirm=True)
+
+        eligible.refresh_from_db()
+        static_mapping.refresh_from_db()
+        self.assertEqual(eligible.status, ClaimEngagementMapping.Status.APPROVED)
+        self.assertEqual(static_mapping.status, ClaimEngagementMapping.Status.PROPOSED)
