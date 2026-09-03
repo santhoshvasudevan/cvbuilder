@@ -30,7 +30,12 @@ from llm_provider.models import LLMCallLog, StageModelAssignment
 from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, MemorySourceDocument
 from . import revision as revision_service
 from . import storage as storage_service
-from .chunking import SourceChunk, chunk_source, split_chunk_in_half
+from .chunking import (
+    SourceChunk,
+    chunk_source,
+    split_chunk_in_half,
+    split_chunk_into_individual_lines,
+)
 from .comparable_values import COMPARABLE_CLAIM_TYPES, has_valid_structured_value
 from .confirmation import evaluate_auto_confirmation
 from .conflicts import detect_and_resolve_conflicts
@@ -239,9 +244,18 @@ def _process_chunk_with_recovery(
         and result.error.category == LLMErrorCategory.CONFIGURATION
         and "finish_reason=length" in result.error.message
     )
-    split = split_chunk_in_half(chunk) if (is_truncation and depth < MAX_SPLIT_DEPTH) else None
+    split: list[SourceChunk] | tuple[SourceChunk, SourceChunk] | None = None
+    if is_truncation and depth < MAX_SPLIT_DEPTH:
+        split = split_chunk_in_half(chunk)
+        if split is None and len(chunk.lines) > 1:
+            # Already at the line-count floor (MIN_SPLIT_CHUNK_LINES) but still more than one
+            # physical line -- fall back to one-line-per-chunk granularity (recovery, 2026-09-03):
+            # a "minimum-size" chunk can still be too large in *characters* when each line is its
+            # own long Markdown bullet. An empty list here (chunk is already a single line) keeps
+            # `split` falsy, same as the original None case.
+            split = split_chunk_into_individual_lines(chunk) or None
 
-    if is_truncation and split is not None:
+    if is_truncation and split:
         _record_chunk_attempt(
             new_revision=new_revision,
             source_document=source_document,
@@ -335,28 +349,42 @@ def retry_failed_chunks(candidate_memory: CandidateMemory, *, max_live_calls: in
         candidate_memory.chunk_attempts.filter(status=ChunkExtractionAttempt.Status.FAILED)
         .select_related("source_document")
     )
+
+    # Deduplicate by (source_document, start_line, end_line): a range that has already been
+    # retried once and failed again has *two* FAILED rows (the original attempt_number=1 and the
+    # prior retry's attempt_number=2, etc.) -- retrying each independently would redundantly repeat
+    # the same call. Only the highest attempt_number per distinct range is actually retried; every
+    # row for that range (old and new) is updated together from the one outcome, since they all
+    # describe the exact same not-yet-covered source content.
+    by_range: dict[tuple[int, int, int], list[ChunkExtractionAttempt]] = {}
+    for attempt in failed_attempts:
+        key = (attempt.source_document_id, attempt.start_line, attempt.end_line)
+        by_range.setdefault(key, []).append(attempt)
+
     call_budget = {"remaining": max_live_calls}
     build_summary = {"extraction_errors": 0, "claims_extracted": 0, "rules_extracted": 0}
     recovered = 0
     still_failed = 0
 
-    for attempt in failed_attempts:
+    for (_source_id, _start, _end), attempts_for_range in by_range.items():
+        latest_attempt = max(attempts_for_range, key=lambda a: a.attempt_number)
+
         if call_budget["remaining"] <= 0:
-            still_failed += 1
+            still_failed += len(attempts_for_range)
             continue
 
-        source_document = attempt.source_document
-        if source_document.content_sha256 != attempt.source_content_sha256:
+        source_document = latest_attempt.source_document
+        if source_document.content_sha256 != latest_attempt.source_content_sha256:
             # The source changed since this attempt was recorded -- never safe to retry against
             # different content under the same attempt's stored provenance; leave it FAILED.
-            still_failed += 1
+            still_failed += len(attempts_for_range)
             continue
 
         lines = source_document.raw_content.splitlines()
         chunk = SourceChunk(
-            start_line=attempt.start_line,
-            end_line=attempt.end_line,
-            lines=tuple(lines[attempt.start_line - 1 : attempt.end_line]),
+            start_line=latest_attempt.start_line,
+            end_line=latest_attempt.end_line,
+            lines=tuple(lines[latest_attempt.start_line - 1 : latest_attempt.end_line]),
         )
         before_ids = set(
             ChunkExtractionAttempt.objects.filter(candidate_memory=candidate_memory)
@@ -369,7 +397,7 @@ def retry_failed_chunks(candidate_memory: CandidateMemory, *, max_live_calls: in
             source_document=source_document,
             new_revision=candidate_memory,
             build_summary=build_summary,
-            attempt_number=attempt.attempt_number + 1,
+            attempt_number=latest_attempt.attempt_number + 1,
             call_budget=call_budget,
         )
         after_ids = set(
@@ -380,11 +408,12 @@ def retry_failed_chunks(candidate_memory: CandidateMemory, *, max_live_calls: in
         if new_attempts.exists() and not new_attempts.filter(
             status=ChunkExtractionAttempt.Status.FAILED
         ).exists():
-            attempt.status = ChunkExtractionAttempt.Status.SUPERSEDED
-            attempt.save()
-            recovered += 1
+            for attempt in attempts_for_range:
+                attempt.status = ChunkExtractionAttempt.Status.SUPERSEDED
+                attempt.save()
+            recovered += len(attempts_for_range)
         else:
-            still_failed += 1
+            still_failed += len(attempts_for_range)
 
     candidate_memory.refresh_from_db()
     summary = dict(candidate_memory.build_summary)

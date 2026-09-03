@@ -16,7 +16,7 @@ from ..models import CandidateMemory, ChunkExtractionAttempt, MemoryClaim, Memor
 from ..schemas import ChunkExtractionResult, ContentPlane, ExtractedItem, SourcePassage
 from ..services import bootstrap as bootstrap_service
 from ..services.bootstrap import ReadSource
-from ..services.chunking import SourceChunk, split_chunk_in_half
+from ..services.chunking import SourceChunk, split_chunk_in_half, split_chunk_into_individual_lines
 from ..services.storage import store_extracted_item
 from .factories import make_revision, make_source, scripted_extraction
 
@@ -50,6 +50,21 @@ class SplitChunkInHalfTests(SimpleTestCase):
     def test_returns_none_at_or_below_minimum_size(self):
         chunk = SourceChunk(start_line=1, end_line=5, lines=tuple(f"line{i}" for i in range(5)))
         self.assertIsNone(split_chunk_in_half(chunk))
+
+
+class SplitChunkIntoIndividualLinesTests(SimpleTestCase):
+    def test_splits_into_one_chunk_per_physical_line_preserving_line_numbers(self):
+        chunk = SourceChunk(start_line=32, end_line=36, lines=("a", "b", "c", "d", "e"))
+        result = split_chunk_into_individual_lines(chunk)
+        self.assertEqual(len(result), 5)
+        self.assertEqual([(c.start_line, c.end_line, c.lines) for c in result], [
+            (32, 32, ("a",)), (33, 33, ("b",)), (34, 34, ("c",)),
+            (35, 35, ("d",)), (36, 36, ("e",)),
+        ])
+
+    def test_returns_empty_list_for_a_single_line_chunk(self):
+        chunk = SourceChunk(start_line=1, end_line=1, lines=("only line",))
+        self.assertEqual(split_chunk_into_individual_lines(chunk), [])
 
 
 class RecursiveSplitOnTruncationTests(TestCase):
@@ -89,6 +104,29 @@ class RecursiveSplitOnTruncationTests(TestCase):
         )
         self.assertEqual(build_summary["extraction_errors"], 0)
 
+    def test_minimum_size_chunk_falls_back_to_individual_line_split(self):
+        """Recovery (2026-09-03): a chunk already at MIN_SPLIT_CHUNK_LINES (5) that still
+        truncates -- e.g. 5 physical lines that are each their own long Markdown bullet, as
+        observed in the real corpus -- falls back to one-line-per-chunk granularity instead of
+        failing closed immediately."""
+        chunk = self._chunk(5)  # already at the line-count floor
+
+        def side_effect(chunk_arg, **kwargs):
+            return _truncation_result() if len(chunk_arg.lines) > 1 else _success_result()
+
+        rev, build_summary = self._run(chunk, side_effect)
+
+        attempts = list(ChunkExtractionAttempt.objects.filter(candidate_memory=rev))
+        # 1 SUPERSEDED (the original 5-line attempt) + 5 SUCCESS (one per individual line).
+        self.assertEqual(len(attempts), 6)
+        self.assertEqual(
+            sum(1 for a in attempts if a.status == ChunkExtractionAttempt.Status.SUPERSEDED), 1
+        )
+        success_attempts = [a for a in attempts if a.status == ChunkExtractionAttempt.Status.SUCCESS]
+        self.assertEqual(len(success_attempts), 5)
+        self.assertTrue(all(a.start_line == a.end_line for a in success_attempts))
+        self.assertEqual(build_summary["extraction_errors"], 0)
+
     def test_fails_closed_when_minimum_size_chunk_still_truncates(self):
         chunk = self._chunk(20)
         rev, build_summary = self._run(chunk, lambda chunk_arg, **kwargs: _truncation_result())
@@ -98,12 +136,11 @@ class RecursiveSplitOnTruncationTests(TestCase):
         )
         self.assertTrue(failed.exists())
         self.assertGreater(build_summary["extraction_errors"], 0)
-        # Never split below the minimum -- no attempt row covers fewer than 6 lines' worth of an
-        # original chunk that was itself already at or above the minimum before splitting.
-        smallest = min(a.end_line - a.start_line + 1 for a in ChunkExtractionAttempt.objects.filter(
-            candidate_memory=rev, status=ChunkExtractionAttempt.Status.FAILED
-        ))
-        self.assertGreaterEqual(smallest, 5)
+        # Every FAILED row must be a single physical line -- the finest granularity the recovery
+        # falls back to (individual-line split) once MIN_SPLIT_CHUNK_LINES is reached and the
+        # chunk still truncates; nothing coarser is ever left as the final, unresolved state.
+        for a in failed:
+            self.assertEqual(a.end_line, a.start_line)
 
     def test_only_failed_chunks_are_split_never_a_healthy_one(self):
         chunk = self._chunk(20)
@@ -327,6 +364,31 @@ class RetryFailedChunksTests(TestCase):
             attempt_number=attempt_number,
         )
 
+    def test_duplicate_failed_rows_for_the_same_range_are_retried_only_once(self):
+        """Two FAILED rows for the exact same (source, start_line, end_line) -- e.g. the original
+        attempt plus a previous retry's own failed attempt -- must produce exactly one live call,
+        not two; both historical rows are updated together from that one outcome."""
+        rev = make_revision()
+        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        first = self._make_failed_attempt(rev, source, start_line=1, end_line=10, attempt_number=1)
+        second = self._make_failed_attempt(rev, source, start_line=1, end_line=10, attempt_number=2)
+
+        call_count = {"n": 0}
+
+        def side_effect(chunk_arg, **kwargs):
+            call_count["n"] += 1
+            return _success_result()
+
+        with mock.patch("candidate_memory.services.bootstrap.extract_chunk", side_effect=side_effect):
+            summary = bootstrap_service.retry_failed_chunks(rev, max_live_calls=40)
+
+        self.assertEqual(call_count["n"], 1)
+        self.assertEqual(summary.live_calls_made, 1)
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.status, ChunkExtractionAttempt.Status.SUPERSEDED)
+        self.assertEqual(second.status, ChunkExtractionAttempt.Status.SUPERSEDED)
+
     def test_retry_uses_stored_source_content_hash_and_line_range(self):
         rev = make_revision()
         source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
@@ -379,9 +441,14 @@ class RetryFailedChunksTests(TestCase):
 
     def test_live_call_budget_is_enforced_and_never_exceeded(self):
         rev = make_revision()
-        source = make_source(rev, raw_content="\n".join(f"line {i}" for i in range(1, 11)) + "\n")
+        source = make_source(
+            rev, raw_content="\n".join(f"line {i}" for i in range(1, 51)) + "\n"
+        )
+        # Five *distinct* ranges -- deduplication-by-range must not collapse these into fewer
+        # retries, so the budget is genuinely tested against 5 independent chunks.
         for i in range(5):
-            self._make_failed_attempt(rev, source, start_line=1, end_line=10, attempt_number=i + 1)
+            start = i * 10 + 1
+            self._make_failed_attempt(rev, source, start_line=start, end_line=start + 9)
 
         call_count = {"n": 0}
 

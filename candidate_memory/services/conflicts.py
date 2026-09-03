@@ -54,13 +54,24 @@ def detect_and_resolve_conflicts(candidate_memory: CandidateMemory) -> list[Memo
         if len(by_structural_key) < 2:
             continue  # every claim in this group agrees structurally -- no conflict
 
+        conflict_key = f"{claim_type}:{subject_scope}"
+        # Idempotency (Candidate Memory recovery, 2026-09-03): a conflict_key that already has a
+        # MemoryConflict row -- of any status, including an already-RESOLVED or DISMISSED one --
+        # is never re-created. Re-running detection after new content is added (e.g. a targeted
+        # chunk retry) must never duplicate a conflict for the same revision and competing claims,
+        # and must never re-litigate/reopen a decision the operator (or an earlier auto-resolution)
+        # already made -- new claims that happen to join this same structural group are left
+        # exactly as they already are (fail closed: unconfirmed, not silently retired or reopened).
+        if candidate_memory.conflicts.filter(conflict_key=conflict_key).exists():
+            continue
+
         winner = min(group_claims, key=_min_source_precedence)
         winner_precedence = _min_source_precedence(winner)
         losers = [c for c in group_claims if c is not winner]
 
         conflict = MemoryConflict.objects.create(
             candidate_memory=candidate_memory,
-            conflict_key=f"{claim_type}:{subject_scope}",
+            conflict_key=conflict_key,
             description=(
                 f"Multiple conflicting '{claim_type}' facts for '{subject_scope}': "
                 + "; ".join(f"{c.claim_id}={_structural_key(c)!r}" for c in group_claims)

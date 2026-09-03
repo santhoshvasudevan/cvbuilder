@@ -117,6 +117,27 @@ def split_chunk_in_half(chunk: SourceChunk) -> tuple[SourceChunk, SourceChunk] |
     return first, second
 
 
+def split_chunk_into_individual_lines(chunk: SourceChunk) -> list[SourceChunk]:
+    """Last-resort, finer-grained split used only when `split_chunk_in_half` can no longer
+    subdivide by line count (`chunk` is already at or below `MIN_SPLIT_CHUNK_LINES`) but the
+    chunk still truncates -- e.g. a "5-line" chunk whose physical lines are each an entire
+    600-1000+ character Markdown bullet (one alternate résumé summary per line, observed in the
+    real corpus), where line *count* alone understates how much content still needs extracting.
+    Splits into exactly one `SourceChunk` per physical line, each preserving its own original
+    document line number exactly (never renumbered, never merged) -- the finest granularity this
+    chunker supports.
+
+    Returns an empty list when `chunk` is already a single line -- there is nothing finer to
+    split into, and the caller must fail closed rather than split forever.
+    """
+    if len(chunk.lines) <= 1:
+        return []
+    return [
+        SourceChunk(start_line=chunk.start_line + i, end_line=chunk.start_line + i, lines=(line,))
+        for i, line in enumerate(chunk.lines)
+    ]
+
+
 def render_chunk_for_prompt(chunk: SourceChunk) -> str:
     """Render a chunk with each line prefixed by its *original* document line number, so the
     model can report back accurate start_line/end_line values in its structured output."""
