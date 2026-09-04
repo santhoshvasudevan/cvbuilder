@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class RequirementCategory(str, Enum):
+    # Use MANDATORY only when the posting states or clearly requires it (e.g. "must have",
+    # "required", "X+ years required") -- never for ordinary desirable content (2026-09-04 AJ
+    # hardening, D-022).
     MANDATORY = "MANDATORY"
+    # Use PREFERRED for anything the posting frames as preferred/desirable/advantageous/a plus/
+    # nice-to-have -- never promoted to MANDATORY just because it sounds important.
     PREFERRED = "PREFERRED"
     RESPONSIBILITY = "RESPONSIBILITY"
     ATS_SIGNAL = "ATS_SIGNAL"
@@ -47,6 +52,33 @@ class ExtractedRequirement(BaseModel):
         return value
 
 
+class ScreeningRisk(BaseModel):
+    """One explicit hiring constraint or condition stated by the posting itself (2026-09-04 AJ
+    hardening, D-022): a work-authorization requirement, a mandatory on-call rotation, a security-
+    clearance requirement, a relocation requirement, and similar things a recruiter would flag as
+    needing operator attention -- never a restatement of an ordinary responsibility/qualification
+    as if it were a candidate's gap. Agent Jobber has no Candidate Memory context (D-022): it
+    cannot know what "the candidate" does or doesn't have, so it must never phrase a risk as a
+    judgment about a candidate ("lack of...", "no experience with...", "insufficient...") -- only
+    as a condition the posting itself states. `source_context` is mandatory here (unlike
+    `ExtractedRequirement`'s optional one) precisely because an unstated risk is not an explicit
+    constraint at all -- it would be exactly the kind of ungrounded inference this schema exists
+    to forbid.
+    """
+
+    text: str = Field(description="The explicit hiring constraint/condition, in English.")
+    source_context: str = Field(
+        description="The exact quotation from the posting stating this constraint/condition."
+    )
+
+    @field_validator("text", "source_context")
+    @classmethod
+    def _fields_must_be_non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text and source_context must not be blank.")
+        return value
+
+
 class AgentJobberAnalysis(BaseModel):
     """Agent Jobber's complete structured output for one job posting (requirements.md Sec 5)."""
 
@@ -59,11 +91,17 @@ class AgentJobberAnalysis(BaseModel):
     work_arrangement: str = Field(
         default="", description="Remote/hybrid/onsite or similar, only if the posting states it."
     )
-    requirements: list[ExtractedRequirement] = Field(default_factory=list)
-    screening_risks: list[str] = Field(
+    requirements: list[ExtractedRequirement] = Field(
         default_factory=list,
-        description="Things that might get a candidate filtered out (recruiter-lens judgment, "
-        "not necessarily stated outright in the posting).",
+        description="Every explicit responsibility, qualification, skill, and experience "
+        "expectation the posting states becomes one atomic item here -- MANDATORY, PREFERRED, "
+        "RESPONSIBILITY, ATS_SIGNAL, or IMPLIED_EXPECTATION. Never rephrase this content as a "
+        "screening risk instead.",
+    )
+    screening_risks: list[ScreeningRisk] = Field(
+        default_factory=list,
+        description="Only explicit hiring constraints/conditions the posting itself states -- "
+        "never a candidate-gap restatement of a responsibility or qualification.",
     )
 
     @field_validator("posting_language")

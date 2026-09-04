@@ -127,7 +127,25 @@ milestone scope):
   low-quality result); `source_type` + raw input always persisted regardless of path taken; every
   material requirement is assigned a stable, unique `JR-xxx` ID and category within one
   `JobRequirementAnalysis` version; a new `JobApplication` is created/attached on intake with
-  `pipeline_phase` starting at `NEW`.
+  `pipeline_phase` starting at `NEW`. **(D-022, 2026-09-04, committed)** a real controlled Gate-1
+  preparation run surfaced a schema-valid `AgentJobberAnalysis` with zero `JobRequirement`s and
+  posting responsibilities recast as candidate-gap screening risks (JobApplication id=9) --
+  `job_intake/validators/sanity.py::find_sanity_violations` is a deterministic, lexical-only
+  (never fuzzy) semantic gate between schema validation and persistence, tested directly
+  (`test_sanity_validator.py`) against: the exact observed failure shape (zero requirements +
+  gap-phrased screening risks, reproduced verbatim); valid MANDATORY/PREFERRED/RESPONSIBILITY
+  extraction with real provenance (no violations); a genuine, quoted screening constraint (no
+  violations); `IMPLIED_EXPECTATION` correctly exempt from the provenance requirement; a duplicate
+  requirement (same category + normalized text); a requirement/risk whose `source_context` is not
+  an exact substring of the posting actually analyzed; and zero requirements on a short,
+  genuinely-non-substantive posting correctly *not* flagged. `test_semantic_validation_intake.py`
+  covers the same ground at the `run_intake` integration level -- atomicity (nothing persisted, no
+  pipeline-phase advancement), the underlying `LLMCallLog` row still written without raw posting
+  content, and a valid analysis still persisting normally. `candidate_matching/tests/
+  test_fit_assessment.py` adds the M5-side guard: `build_fit_assessment` refuses a current JRA with
+  zero `JobRequirement`s, exercised against a fixture built the same way the real legacy JRA id=9
+  exists (JobRequirement rows never created), proving the check is a fresh runtime property, not
+  something that has to be baked in at creation time.
 - **M5 (`candidate_matching`, `reviews`), implemented 2026-09-03**: retrieval precision (irrelevant/unconfirmed claims
   excluded from a fixture memory); the disposition-coverage validator (every relevant
   `JobRequirement` in a fixture gets exactly one `RequirementAssessment`; a fixture with a known

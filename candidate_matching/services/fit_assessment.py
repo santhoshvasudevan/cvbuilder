@@ -53,6 +53,13 @@ def build_fit_assessment(job_application) -> FitAssessment:
     )
 
     requirements = list(jra.requirements.all())
+    if not requirements:
+        raise AgentCandidateError(
+            f"JobRequirementAnalysis {jra.pk} (v{jra.version}) has zero JobRequirements -- Agent "
+            "Candidate refuses to run against an empty analysis (2026-09-04 AJ hardening, D-022: "
+            "this guards every current JRA, including one created before this check existed). "
+            "Re-run Agent Jobber first."
+        )
     ordered_ids = [requirement.requirement_id for requirement in requirements]
 
     local_items: list[AssessmentItemData] = []

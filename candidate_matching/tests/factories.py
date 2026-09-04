@@ -82,9 +82,8 @@ def make_job_application_with_jra(
         employer="Globex Corporation",
         role_title="Senior Backend Engineer",
     )
-    requirements = requirements or [
-        {"category": "MANDATORY", "text": "Own the payments service end to end."},
-    ]
+    if requirements is None:
+        requirements = [{"category": "MANDATORY", "text": "Own the payments service end to end."}]
     for order, requirement in enumerate(requirements, start=1):
         JobRequirement.objects.create(
             job_requirement_analysis=jra,

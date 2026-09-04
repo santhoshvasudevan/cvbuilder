@@ -63,7 +63,17 @@ def analysis_detail_view(request, application_id: int):
     application = get_object_or_404(JobApplication, pk=application_id)
     jra = application.current_jra
     requirements = jra.requirements.all() if jra else JobRequirement.objects.none()
+    # Read-only display check (2026-09-04 AJ hardening, D-022) -- never mutates the JRA, including
+    # a pre-existing one saved before the zero-requirement sanity check existed (e.g. legacy JRA
+    # id=9): a JRA with no requirements has nothing for Gate 1/Agent Candidate to assess and is
+    # flagged here rather than only failing later when M5 is attempted.
+    is_incomplete = jra is not None and not requirements.exists()
     return render(
         request, "job_intake/analysis_detail.html",
-        {"application": application, "jra": jra, "requirements": requirements},
+        {
+            "application": application,
+            "jra": jra,
+            "requirements": requirements,
+            "is_incomplete": is_incomplete,
+        },
     )

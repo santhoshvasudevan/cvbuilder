@@ -50,7 +50,12 @@ class SubmitGate1FeedbackTests(TestCase):
 
     def test_aj_feedback_creates_new_jra_version_and_repoints_pointer(self):
         original_jra_id = self.application.current_jra_id
-        with scripted_analysis(valid_analysis_response(role_title="Updated Title")):
+        # requirements/screening_risks cleared: this test only checks version/role_title routing,
+        # not extraction quality -- and the fixture's default source_context quotations don't
+        # match `make_job_application_with_jra`'s short, unrelated original_input text.
+        with scripted_analysis(
+            valid_analysis_response(role_title="Updated Title", requirements=[], screening_risks=[])
+        ):
             submit_gate1_feedback(
                 self.application, target=ReviewFeedback.Target.AJ, comments="wrong role extracted"
             )
@@ -73,7 +78,8 @@ class ApproveGate1Tests(TestCase):
     def test_cannot_approve_a_stale_fit_assessment(self):
         with scripted_agent_candidate(valid_assessment_response()):
             run_agent_candidate(self.application)
-        with scripted_analysis(valid_analysis_response()):
+        # requirements/screening_risks cleared -- see the AJ-feedback test above for why.
+        with scripted_analysis(valid_analysis_response(requirements=[], screening_risks=[])):
             from job_intake.services.intake import rerun_analysis
 
             rerun_analysis(self.application)

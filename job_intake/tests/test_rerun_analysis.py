@@ -10,14 +10,14 @@ from llm_provider.models import LLMCallLog
 
 from ..models import JobRequirementAnalysis
 from ..services.intake import IntakeValidationError, rerun_analysis, run_intake
-from .factories import scripted_analysis, valid_analysis_response
+from .factories import DEFAULT_POSTING_TEXT, scripted_analysis, valid_analysis_response
 
 
 class RerunAnalysisTests(TestCase):
     def _resolve(self):
         from ..services.intake import resolve_posting_source
 
-        return resolve_posting_source(url="", pasted_text="A pasted job posting about a role.")
+        return resolve_posting_source(url="", pasted_text=DEFAULT_POSTING_TEXT)
 
     def _make_application(self):
         with scripted_analysis(valid_analysis_response()):
@@ -65,7 +65,12 @@ class RerunAnalysisTests(TestCase):
     def test_rerun_with_new_pasted_text_uses_it(self):
         application = self._make_application()
 
-        with scripted_analysis(valid_analysis_response(employer="New Employer Inc")):
+        # requirements/screening_risks cleared: this short, non-substantive new posting text
+        # shares no vocabulary with the default fixture's source_context quotations, and the
+        # test only cares about original_input/employer routing, not extraction quality.
+        with scripted_analysis(
+            valid_analysis_response(employer="New Employer Inc", requirements=[], screening_risks=[])
+        ):
             jra = rerun_analysis(application, pasted_text="A completely different posting text.")
 
         self.assertEqual(jra.original_input, "A completely different posting text.")

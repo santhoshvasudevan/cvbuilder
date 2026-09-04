@@ -807,6 +807,62 @@ set) -- no limit was raised to reach this result. This work is committed: `lexic
 value/migration, and `bounded_retrieval.py`'s wiring, fully tested (769/769 project tests passing,
 including a dedicated `test_normalize.py`), `ruff`/`check`/`makemigrations --check` all clean.
 
+## Agent Jobber semantic sanity gate (2026-09-04, D-022) -- COMMITTED
+
+A controlled live Gate-1 preparation run (primary checkout, real NVIDIA NIM credential, one real
+posting) surfaced a live M4 failure: JobApplication id=9's `AgentJobberAnalysis` was schema-valid
+(posting language and role title correctly detected) but had **zero** `JobRequirement` rows, while
+its 14-item `screening_risks` list restated the posting's own responsibilities/qualifications as
+candidate-gap judgments ("Lack of hands-on experience with...", "No proven ability to...") --
+`run_intake` persisted it as the application's current, "successful" analysis anyway, because
+nothing between schema validation and persistence ever asked whether the result was substantively
+usable. Root cause and fix are recorded in full in D-022; summary:
+
+- **`services/analyze.py`'s `SYSTEM_PROMPT` rewritten**: states explicitly that Agent Jobber has no
+  candidate/history/Candidate-Memory context and must never write a sentence judging whether "the
+  candidate" has, lacks, or falls short of a capability; requires every explicit responsibility/
+  qualification/skill/experience expectation to become an atomic `requirements` item (never
+  summarized into `screening_risks`); tightens MANDATORY (only when the posting states or clearly
+  requires it) vs. PREFERRED (preferred/desirable/advantageous/nice-to-have) usage; narrows
+  `screening_risks` to only explicit hiring constraints/conditions the posting itself states, each
+  requiring a verbatim quotation.
+- **`schemas.py`'s `screening_risks` changed from `list[str]` to `list[ScreeningRisk]`**, a new
+  model requiring non-blank `text` and `source_context` (mirroring `ExtractedRequirement`'s
+  existing, optional one) -- an unstated risk is not an explicit constraint at all. No model
+  migration: `JobRequirementAnalysis.screening_risks` is unchanged as a `JSONField`, now storing
+  `{"text", "source_context"}` objects; a pre-existing legacy JRA's plain-string risks still
+  display correctly via a template fallback.
+- **New deterministic semantic sanity validator** (`job_intake/validators/sanity.py::
+  find_sanity_violations`, lexical/deterministic throughout, never fuzzy matching): rejects zero
+  requirements for a substantive (>=300 char) posting; a non-empty `screening_risks` list produced
+  alongside zero requirements (the exact observed failure shape); candidate-gap marker phrases
+  ("lack of", "no experience", "no proven", "insufficient", and similar) in any requirement or
+  risk text; duplicate requirements (same category + normalized text); and any MANDATORY/PREFERRED/
+  RESPONSIBILITY requirement or screening risk whose `source_context` is not a real, exact
+  substring of the posting text actually analyzed. Wired into `run_intake`/`rerun_analysis`
+  strictly before the persistence transaction opens, via a new `SemanticValidationError` (subclass
+  of the existing `AnalysisFailedError` -- no view-layer change needed to handle it): on any
+  violation, nothing is created (no `JobApplication`, no `JobRequirementAnalysis`, no
+  `JobRequirement`, no pipeline-phase advancement) while the underlying successful provider call's
+  `LLMCallLog` row is still written, as always storing only token/latency/error metadata, never raw
+  content.
+- **New M5 precondition**: `candidate_matching.services.fit_assessment.build_fit_assessment` now
+  refuses (`AgentCandidateError`) to run against a current JRA with zero `JobRequirement` rows --
+  a fresh runtime check, so it correctly covers JobApplication id=9's real, legacy, pre-D-022 JRA
+  (version 1) without editing that row at all (append-only per `JobRequirementAnalysis.save()`,
+  left completely untouched throughout this work).
+- **UI**: `job_intake`'s analysis-detail page computes (never stores) whether the current JRA has
+  zero requirements and shows a clear "INCOMPLETE ANALYSIS ... not eligible for Gate 1" banner when
+  true -- covering both the now-impossible-to-create case and JobApplication id=9's real legacy
+  state, read-only.
+
+No live provider call was made or authorized by this work (all tests use `FakeAdapter`/scripted
+responses); JobApplication id=9's real JRA was inspected read-only only and never rerun or edited.
+Fully tested (809/809 project tests passing, including new `test_sanity_validator.py`,
+`test_semantic_validation_intake.py`, and an M5-precondition test in
+`candidate_matching/tests/test_fit_assessment.py`), `ruff`/`check`/`makemigrations --check` and a
+genuinely fresh migration on an isolated database all clean.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration

@@ -33,22 +33,51 @@ anything the posting's text asks for.
 Detect and work in the posting's own language -- do not assume English; report the detected
 language explicitly.
 
-Adopt a recruiter's mindset for this specific vacancy:
-- Identify mandatory requirements (must-haves) separately from preferred/nice-to-have ones.
-- Identify core responsibilities.
-- Identify likely ATS/keyword-screening signals (terms an applicant-tracking system or a
-  recruiter's keyword search would likely key on).
-- Identify screening risks: things that might get a candidate filtered out.
-- Identify implied expectations: seniority signals, team context, unstated tooling assumptions,
-  and similar things the posting does not state outright but a recruiter would reasonably infer.
-  Category IMPLIED_EXPECTATION exists exactly for these -- never present an implied expectation as
-  if the posting stated it as literal fact, and never invent one the posting gives no real basis
-  for.
+You have no information about any candidate -- no resume, no history, no Candidate Memory. You are
+analyzing the posting alone. Never write anything that judges, assumes, or speculates about
+whether "the candidate" has, lacks, or falls short of any capability -- that comparison happens in
+a completely separate step, later, against a specific candidate's actual record. Any sentence
+shaped like "no experience with X", "lacks Y", "insufficient Z", "no proven ability to...",
+"no track record of...", "never built/delivered...", "weak at...", or similar is a claim about a
+candidate you have never seen -- you must never produce it, in a requirement or anywhere else.
 
-For every material requirement/responsibility/signal, include a supporting quotation/context from
-the posting where practical (leave it blank rather than paraphrasing as if it were a quote). Do not
-invent an employer, role title, or location the posting does not state -- leave the field blank
-rather than guessing.
+Requirements (mandatory step -- every substantive posting has some):
+Every explicit responsibility, qualification, skill, and experience expectation the posting states
+becomes one atomic `requirements` item -- one distinct concern per item, never several concerns
+bundled into one. Use this categorization:
+- MANDATORY: only when the posting states or clearly requires it ("must have", "required", "X+
+  years required", "you will need"). Do not use MANDATORY for something merely described as
+  important or central to the role if the posting does not actually require it.
+- PREFERRED: anything the posting frames as preferred, desirable, advantageous, "a plus", or
+  "nice to have". Never upgrade this to MANDATORY.
+- RESPONSIBILITY: what the role actually does day to day -- duties, deliverables, ongoing
+  activities. A posting with a "responsibilities" or "what you'll do" section always yields
+  RESPONSIBILITY items; do not summarize that section away or fold it into screening risks.
+- ATS_SIGNAL: keyword-screening terms (technologies, certifications, standards) worth surfacing
+  even if not phrased as a full requirement sentence.
+- IMPLIED_EXPECTATION: seniority signals, team context, unstated tooling assumptions, and similar
+  things the posting does not state outright but a recruiter would reasonably infer from context --
+  never presented as if the posting said it literally.
+A posting with real content (a role description, responsibilities, or qualifications) that yields
+zero `requirements` items is treated as a failed analysis downstream -- if the posting describes a
+real job, you must extract its requirements, not summarize them away into `screening_risks` or
+`employer`/`role_title` alone.
+
+Screening risks -- a narrow, separate category:
+`screening_risks` holds ONLY explicit hiring constraints or conditions the posting itself states
+that a recruiter would flag for operator attention -- e.g. a stated work-authorization requirement,
+a mandatory on-call rotation, a security-clearance requirement, a relocation requirement, an unusual
+schedule. Every screening risk requires `source_context`: the exact quotation from the posting
+stating that constraint. If you cannot quote the posting stating it, it is not a screening risk --
+it is either an ordinary requirement (put it in `requirements` instead) or nothing at all. Never
+create a screening risk that restates a responsibility or qualification as a candidate's apparent
+gap (see the candidate-judgment prohibition above) -- that is a misuse of this field, not its
+purpose.
+
+For every requirement (except IMPLIED_EXPECTATION, which by definition is not stated outright and
+whose source_context is grounding context, not a literal quote) and every screening risk, provide a
+verbatim supporting quotation from the posting. Do not invent an employer, role title, or location
+the posting does not state -- leave the field blank rather than guessing.
 """
 
 

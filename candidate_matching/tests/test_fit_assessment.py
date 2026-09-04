@@ -31,6 +31,20 @@ class BuildFitAssessmentTests(TestCase):
         with self.assertRaises(AgentCandidateError):
             build_fit_assessment(application)
 
+    def test_raises_when_the_current_jra_has_zero_job_requirements(self):
+        """M5 precondition (2026-09-04 AJ hardening, D-022): refuses to run against a current JRA
+        with zero JobRequirements -- this guards every such JRA, including one that already
+        existed before this check was added (e.g. the real JobApplication id=9, created before
+        Agent Jobber's own sanity gate existed), since it is a fresh runtime check against
+        whatever the current JRA actually contains, never something baked in at creation time."""
+        rev = make_revision(status=CandidateMemory.Status.BUILDING)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        application = make_job_application_with_jra(requirements=[])
+
+        self.assertEqual(application.current_jra.requirements.count(), 0)
+        with self.assertRaises(AgentCandidateError):
+            build_fit_assessment(application)
+
     def test_every_relevant_requirement_gets_exactly_one_assessment(self):
         rev = make_revision(status=CandidateMemory.Status.BUILDING)
         engagement = make_engagement()

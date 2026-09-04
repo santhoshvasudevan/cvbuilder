@@ -900,3 +900,102 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   (`candidate_matching.services.bounded_retrieval`) — no model migration, since `FitAssessment.
   retrieval_manifest` is already a JSONField (D-020). No live provider call was made or authorized;
   `AC_NORMALIZE` has no real `StageModelAssignment` configured in the development database.
+
+## D-022: Agent Jobber semantic sanity gate — reject a schema-valid, substantively empty analysis
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) — directed by the product owner after a
+  live controlled Gate-1 preparation run against a real posting produced JobApplication id=9: a
+  schema-valid `AgentJobberAnalysis` (posting language and role title correctly detected, an
+  articulate 14-item `screening_risks` list) with **zero** `JobRequirement` rows. `run_intake`
+  persisted it as the application's current, "successful" analysis anyway, because
+  `schemas.AgentJobberAnalysis` only ever validated *shape* (a `requirements` list of any length,
+  including empty, was always schema-legal — see `test_minimal_response_with_no_requirements_
+  still_validates`, unchanged by this decision), and nothing downstream of schema validation asked
+  whether the result was substantively usable.
+- **Root cause (inspected: prompt, schema, persistence, validation path)**: four independent
+  factors compounded into one failure, none of them a schema bug:
+  1. `services/analyze.py`'s prior `SYSTEM_PROMPT` described "screening risks" as "things that
+     might get a candidate filtered out" without ever stating Agent Jobber has no candidate
+     context — an invitation, not a prohibition, to phrase posting content as a judgment about an
+     unseen candidate.
+  2. Nothing in the prompt said a zero-`requirements` result for a real posting is itself wrong;
+     the model was free to fold every responsibility/qualification into `screening_risks` instead
+     of `requirements` and never be told that was a category error.
+  3. `schemas.AgentJobberAnalysis.requirements` had (and, deliberately, still has — see the M2
+     Candidate Memory precedent of schema-permits/service-rejects) no minimum-length constraint,
+     so this was never a `SCHEMA_VALIDATION` error the existing `BaseLLMAdapter.generate` path
+     would have caught.
+  4. `services/intake.py::run_intake`/`rerun_analysis` went straight from a schema-valid
+     `AgentJobberAnalysis` to persistence — there was no semantic check in between at all.
+- **Fix — strengthened AJ contract (`services/analyze.py::SYSTEM_PROMPT`,
+  `schemas.py::RequirementCategory`/`ScreeningRisk`)**: the prompt now states explicitly that
+  Agent Jobber has no candidate/history/Candidate-Memory context and must never write a sentence
+  that judges whether "the candidate" has, lacks, or falls short of a capability (with the exact
+  gap-phrasing patterns to avoid named); that every explicit responsibility/qualification/skill/
+  experience expectation becomes one atomic `requirements` item (never summarized away into
+  `screening_risks`); that MANDATORY is used only when the posting states or clearly requires it,
+  PREFERRED only for preferred/desirable/advantageous/nice-to-have content; and that
+  `screening_risks` holds *only* explicit hiring constraints/conditions the posting itself states
+  (work authorization, mandatory on-call, clearance, relocation, and similar), each requiring a
+  verbatim `source_context` quotation — if it can't be quoted, it isn't a screening risk. The
+  schema's new `ScreeningRisk` model (replacing a bare `list[str]`) makes `source_context`
+  structurally mandatory for every risk (`field_validator`, non-blank), mirroring
+  `ExtractedRequirement`'s existing optional one — a risk without grounding text is not an
+  explicit constraint at all.
+- **Fix — deterministic semantic sanity validator (`job_intake/validators/sanity.py`,
+  `find_sanity_violations`)**: a new layer between schema validation and persistence, lexical and
+  deterministic throughout (never a fuzzy/semantic similarity test, consistent with
+  `candidate_matching.services.dedup`/`candidate_memory.models.MemoryClaimSupport.
+  verify_against_source`'s established convention). Rejects, at minimum: zero `requirements` for a
+  posting at or above `SUBSTANTIVE_TEXT_MIN_CHARS` (300 chars — comfortably above
+  `intake.MIN_PASTED_TEXT_CHARS`'s 20-char floor, which only guards near-empty input, not "too
+  short to be a real posting"); a non-empty `screening_risks` list produced alongside zero
+  `requirements` (the exact observed failure shape); any requirement or screening-risk text
+  containing a candidate-gap marker phrase ("lack of", "no experience", "no proven", "no track
+  record", "insufficient", "absence of", "unable to", and similar — `GAP_LANGUAGE_MARKERS`,
+  matched case-insensitively as a literal substring) — enforcing the "no candidate context"
+  prohibition mechanically, not just in the prompt; a duplicate requirement (same category and
+  same normalized text extracted twice from one posting); and a MANDATORY/PREFERRED/RESPONSIBILITY
+  requirement or *any* screening risk whose `source_context` is not a real, exact substring of the
+  posting text actually analyzed (`ATS_SIGNAL`/`IMPLIED_EXPECTATION` are exempt from this
+  requirement — the former is often a bare keyword, the latter is by definition not stated
+  outright). `run_intake`/`rerun_analysis` call this after a successful, schema-valid provider
+  result and before the persistence transaction begins; any violation raises
+  `SemanticValidationError` (a subclass of the existing `AnalysisFailedError`, so the intake view
+  and Gate-1 feedback re-run already handle it via their existing exception handling, with no view
+  change needed for that path).
+- **Atomicity preserved, nothing new persisted on rejection**: `SemanticValidationError` is raised
+  strictly before `transaction.atomic()` opens (same structural position as the pre-existing
+  `result.is_error` check) — no partial `JobRequirement` row, no `JobApplication`/
+  `JobRequirementAnalysis`, no `current_jra`/pipeline-phase advancement is ever created for a
+  rejected analysis. The underlying provider call's `LLMCallLog` row is still written (LLM-010:
+  every call is logged regardless of what happens next) and, as always, stores only token counts/
+  latency/error-category metadata — never the raw posting or response content — so nothing
+  sensitive is retained by this new failure path either.
+- **M5 precondition, applies to every current JRA including pre-existing ones**:
+  `candidate_matching.services.fit_assessment.build_fit_assessment` now raises
+  `AgentCandidateError` immediately if the current JRA has zero `JobRequirement` rows, before any
+  retrieval or LLM work begins. This is a fresh runtime check against whatever the current JRA
+  actually contains — it is not something baked in at JRA-creation time — so it correctly covers
+  JobApplication id=9's real, legacy, pre-D-022 JRA (version 1, left permanently unedited per
+  `JobRequirementAnalysis`'s append-only guarantee) without touching that row at all.
+- **UI, read-only**: `job_intake` 's analysis-detail page now computes (never stores)
+  `is_incomplete = jra is not None and jra.requirements.count() == 0` and shows a clear warning
+  banner when true ("INCOMPLETE ANALYSIS ... not eligible for Gate 1"), covering both a
+  newly-impossible-to-create case and this exact pre-existing legacy JRA. The "Go to Gate 1" link
+  is left in place rather than hidden — `reviews.views.gate1_view` already catches
+  `AgentCandidateError` cleanly, so clicking through and attempting a run surfaces the same clear
+  error rather than a dead end, and the page's Gate-1 feedback ("re-run Agent Jobber") action
+  remains the intended recovery path.
+- **Alternative considered**: minimum-length `Field` constraint on `AgentJobberAnalysis.
+  requirements` (schema-level rejection). Rejected — Pydantic has no way to make a minimum
+  conditional on posting substantiveness (a genuinely short/non-substantive posting legitimately
+  has zero requirements, per `test_short_posting_with_zero_requirements_is_accepted`), and schema
+  validation cannot see the gap-language/duplicate/provenance problems at all; a dedicated
+  post-schema semantic layer was necessary regardless.
+- **Consequence**: no model migration — `JobRequirementAnalysis.screening_risks` remains the same
+  `JSONField`, now storing `{"text": ..., "source_context": ...}` objects instead of bare strings
+  (a legacy JRA's plain-string risks still display correctly; `analysis_detail.html` falls back to
+  the raw string via `{{ risk.text|default:risk }}`). No live provider call was made or authorized
+  by this decision; JobApplication id=9's real, legacy JRA (v1) was inspected read-only and left
+  completely unedited throughout.

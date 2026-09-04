@@ -9,7 +9,7 @@ from django.urls import reverse
 
 from job_applications.models import JobApplication
 
-from .factories import scripted_analysis, valid_analysis_response
+from .factories import DEFAULT_POSTING_TEXT, scripted_analysis, valid_analysis_response
 
 
 class IntakeViewGetTests(TestCase):
@@ -23,7 +23,7 @@ class IntakeViewPastedTextPostTests(TestCase):
     def test_successful_pasted_submission_redirects_to_detail(self):
         with scripted_analysis(valid_analysis_response()):
             response = self.client.post(
-                reverse("job_intake:intake"), {"url": "", "pasted_text": "Some job posting text."}
+                reverse("job_intake:intake"), {"url": "", "pasted_text": DEFAULT_POSTING_TEXT}
             )
         application = JobApplication.objects.get()
         self.assertRedirects(
@@ -33,7 +33,7 @@ class IntakeViewPastedTextPostTests(TestCase):
     def test_detail_page_shows_requirements_with_stable_ids(self):
         with scripted_analysis(valid_analysis_response()):
             self.client.post(
-                reverse("job_intake:intake"), {"url": "", "pasted_text": "Some job posting text."}
+                reverse("job_intake:intake"), {"url": "", "pasted_text": DEFAULT_POSTING_TEXT}
             )
         application = JobApplication.objects.get()
         response = self.client.get(
@@ -46,7 +46,7 @@ class IntakeViewPastedTextPostTests(TestCase):
         response_body = valid_analysis_response(employer="<script>alert(1)</script>")
         with scripted_analysis(response_body):
             self.client.post(
-                reverse("job_intake:intake"), {"url": "", "pasted_text": "Some job posting text."}
+                reverse("job_intake:intake"), {"url": "", "pasted_text": DEFAULT_POSTING_TEXT}
             )
         application = JobApplication.objects.get()
         response = self.client.get(
@@ -111,7 +111,7 @@ class NoLaterMilestoneControlsTests(TestCase):
         # so those specific controls remain correctly absent.
         with scripted_analysis(valid_analysis_response()):
             self.client.post(
-                reverse("job_intake:intake"), {"url": "", "pasted_text": "Some job posting text."}
+                reverse("job_intake:intake"), {"url": "", "pasted_text": DEFAULT_POSTING_TEXT}
             )
         application = JobApplication.objects.get()
         response = self.client.get(
@@ -120,3 +120,58 @@ class NoLaterMilestoneControlsTests(TestCase):
         self.assertContains(response, "Go to Gate 1 (Candidate Matching)")
         for forbidden in ("Fit Assessment", "Resume Draft"):
             self.assertNotContains(response, forbidden)
+
+
+class IncompleteJraBannerTests(TestCase):
+    """2026-09-04 AJ hardening (D-022): a current JRA with zero JobRequirements -- e.g. one saved
+    before Agent Jobber's own sanity gate existed, mirroring the real legacy JobApplication id=9 --
+    must be clearly flagged as incomplete on its own detail page, entirely read-only."""
+
+    def _make_incomplete_application(self):
+        from ..models import JobRequirementAnalysis
+
+        application = JobApplication.objects.create()
+        jra = JobRequirementAnalysis.objects.create(
+            job_application=application,
+            version=1,
+            source_type=JobRequirementAnalysis.SourceType.PASTED,
+            original_input="A posting with no extracted requirements.",
+            extracted_text="A posting with no extracted requirements.",
+            extracted_text_sha256="0" * 64,
+            posting_language="en",
+        )
+        application.advance_to_analysis(jra=jra)
+        return application
+
+    def test_incomplete_jra_shows_a_clear_warning(self):
+        application = self._make_incomplete_application()
+        response = self.client.get(
+            reverse("job_intake:analysis_detail", kwargs={"application_id": application.pk})
+        )
+        self.assertContains(response, "INCOMPLETE ANALYSIS")
+        self.assertContains(response, "not eligible")
+        self.assertContains(response, "Gate 1")
+
+    def test_complete_jra_shows_no_warning(self):
+        with scripted_analysis(valid_analysis_response()):
+            self.client.post(
+                reverse("job_intake:intake"), {"url": "", "pasted_text": DEFAULT_POSTING_TEXT}
+            )
+        application = JobApplication.objects.get()
+        response = self.client.get(
+            reverse("job_intake:analysis_detail", kwargs={"application_id": application.pk})
+        )
+        self.assertNotContains(response, "INCOMPLETE ANALYSIS")
+
+    def test_viewing_the_incomplete_jra_never_mutates_it(self):
+        application = self._make_incomplete_application()
+        jra_before = application.current_jra
+        original_fields = {f.name: getattr(jra_before, f.name) for f in jra_before._meta.fields}
+
+        self.client.get(reverse("job_intake:analysis_detail", kwargs={"application_id": application.pk}))
+
+        application.refresh_from_db()
+        jra_after = application.current_jra
+        self.assertEqual(jra_after.pk, jra_before.pk)
+        for name, value in original_fields.items():
+            self.assertEqual(getattr(jra_after, name), value)

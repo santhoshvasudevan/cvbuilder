@@ -38,6 +38,19 @@ def scripted_analysis(fixed_response: dict):
         yield
 
 
+# A realistic, substantive (>=300 char) posting whose exact phrasing backs every
+# `source_context` value in `valid_analysis_response()` below (2026-09-04 AJ hardening, D-022's
+# provenance check requires an exact substring match, never a paraphrase) -- the default pasted
+# text most `run_intake`/`rerun_analysis` tests should pair with `valid_analysis_response()`.
+DEFAULT_POSTING_TEXT = (
+    "Senior Backend Engineer at Globex Corporation, based in Springfield, Testland (Remote). "
+    "Must have 5+ years of Python experience. Django experience is a plus. You will own the "
+    "payments service end to end. This role requires close collaboration with the platform team "
+    "to keep the service reliable and secure under sustained transaction volume. Candidates must "
+    "be authorized to work in Testland without visa sponsorship."
+)
+
+
 def valid_analysis_response(**overrides) -> dict:
     response = {
         "employer": "Globex Corporation",
@@ -72,7 +85,14 @@ def valid_analysis_response(**overrides) -> dict:
                 "source_context": "",
             },
         ],
-        "screening_risks": ["No mention of visa sponsorship."],
+        "screening_risks": [
+            {
+                "text": "Candidates must be authorized to work in Testland without visa sponsorship.",
+                "source_context": (
+                    "Candidates must be authorized to work in Testland without visa sponsorship."
+                ),
+            }
+        ],
     }
     response.update(overrides)
     return response

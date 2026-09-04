@@ -16,6 +16,13 @@
   Pipeline phase: {{ application.pipeline_phase }}
 </p>
 
+{% if is_incomplete %}
+<p style="color: #b00020; font-weight: bold;">
+  INCOMPLETE ANALYSIS: this JobRequirementAnalysis produced no requirements and is not eligible
+  for Gate 1 -- Agent Candidate will refuse to run against it. Use Gate 1's "re-run Agent Jobber"
+  feedback action to retry.
+</p>
+{% endif %}
 <p><a href="{% url 'reviews:gate1' application_id=application.pk %}">Go to Gate 1 (Candidate Matching)</a></p>
 
 {% if jra.location or jra.work_arrangement %}
@@ -51,7 +58,9 @@
 {% if jra.screening_risks %}
 <ul>
   {% for risk in jra.screening_risks %}
-  <li>{{ risk }}</li>
+  {# risk.text falls back to risk itself for a pre-D-022 JRA, whose screening_risks were plain
+     strings rather than {text, source_context} objects -- legacy display only, never rewritten. #}
+  <li>{{ risk.text|default:risk }} {% if risk.source_context %}&ndash; &ldquo;{{ risk.source_context }}&rdquo;{% endif %}</li>
   {% endfor %}
 </ul>
 {% else %}
