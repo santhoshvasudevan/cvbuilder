@@ -18,6 +18,13 @@ from candidate_memory.models import CandidateMemory
 
 from .candidate_generation import RequirementCandidates, generate_candidates, union_candidate_pool
 from .dedup import DedupedClaim, deduplicate_claims
+from .normalization_limits import (
+    MAX_DIAGNOSTIC_TERMS,
+    MAX_EQUIVALENTS,
+    MAX_NORMALIZATION_ITEMS,
+    MAX_PRESERVED_TERMS,
+)
+from .normalize import build_search_text, expand_requirements_for_search
 from .rank import rank_relevance
 from .retrieval_limits import (
     MAX_CANDIDATES_PER_REQUIREMENT,
@@ -51,6 +58,11 @@ class RetrievalManifest:
     rules_excluded_positioning_count: int
     estimated_request_tokens: int
     caps: dict[str, int]
+    # AC_NORMALIZE (2026-09-04 recall repair, D-015/D-020): the bounded requirement-normalization
+    # stage's output per requirement, inspectable but never used as evidence -- original_text and
+    # canonical_english_text plus the three bounded term lists that fed candidate_generation.py's
+    # scoring alongside (never in place of) the requirement's own text.
+    requirement_normalization: dict[str, dict]
 
     def as_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -87,20 +99,50 @@ def _cap_selected(
 
 
 def build_bounded_context(
-    candidate_memory: CandidateMemory, requirements: list[dict]
+    candidate_memory: CandidateMemory, requirements: list[dict], *, posting_language: str = "en"
 ) -> tuple[RetrievalContext, RetrievalManifest]:
     eligible = retrieve_eligible_pool(candidate_memory)
     deduped = deduplicate_claims(eligible.claims)
     duplicate_count = len(eligible.claims) - len(deduped)
 
     excluded_counts: dict[str, int] = {}
+    normalization_manifest: dict[str, dict] = {}
 
     if not requirements:
         per_requirement: list[RequirementCandidates] = []
         candidate_pool: list[DedupedClaim] = []
         selected_by_requirement: dict[str, list[str]] = {}
     else:
-        per_requirement = generate_candidates(requirements, deduped)
+        # AC_NORMALIZE receives only requirement_id/text plus the shared posting language --
+        # never CandidateMemory claims, engagements, or any candidate/employment data (see
+        # `normalize.py` module docstring for the boundary this enforces).
+        normalization_requirements = [
+            {"requirement_id": r["requirement_id"], "text": r["text"]} for r in requirements
+        ]
+        normalization_by_id = expand_requirements_for_search(
+            normalization_requirements, posting_language=posting_language
+        )
+
+        search_requirements = []
+        for requirement in requirements:
+            requirement_id = requirement["requirement_id"]
+            normalization = normalization_by_id[requirement_id]
+            search_requirements.append(
+                {
+                    "requirement_id": requirement_id,
+                    "text": build_search_text(requirement["text"], normalization),
+                }
+            )
+            normalization_manifest[requirement_id] = {
+                "original_text": requirement["text"],
+                "canonical_english_text": normalization.canonical_english_text,
+                "diagnostic_terms": list(normalization.diagnostic_terms),
+                "equivalents": list(normalization.equivalents),
+                "preserved_technical_terms": list(normalization.preserved_technical_terms),
+                "source_language": normalization.source_language,
+            }
+
+        per_requirement = generate_candidates(search_requirements, deduped)
         raw_pool = union_candidate_pool(per_requirement)
         candidate_pool, pool_cap_excluded = _cap_ranking_pool(raw_pool, per_requirement)
         if pool_cap_excluded:
@@ -191,7 +233,12 @@ def build_bounded_context(
             "max_selected_claims": MAX_SELECTED_CLAIMS,
             "max_rules": MAX_RULES,
             "max_estimated_request_tokens": MAX_ESTIMATED_REQUEST_TOKENS,
+            "max_normalization_items": MAX_NORMALIZATION_ITEMS,
+            "max_diagnostic_terms": MAX_DIAGNOSTIC_TERMS,
+            "max_equivalents": MAX_EQUIVALENTS,
+            "max_preserved_terms": MAX_PRESERVED_TERMS,
         },
+        requirement_normalization=normalization_manifest,
     )
 
     final_context = RetrievalContext(

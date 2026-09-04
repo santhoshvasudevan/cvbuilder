@@ -71,6 +71,10 @@ class StageModelAssignment(models.Model):
     class Stage(models.TextChoices):
         MEMORY_BUILD = "MEMORY_BUILD", "Memory Build"
         AJ_ANALYZE = "AJ_ANALYZE", "Agent Jobber - Analyze"
+        AC_NORMALIZE = (
+            "AC_NORMALIZE",
+            "Agent Candidate - Requirement Normalization (bounded query expansion, D-015/D-020)",
+        )
         AC_RANK = "AC_RANK", "Agent Candidate - Relevance Ranking (D-015 bounded step)"
         AC_MATCH = "AC_MATCH", "Agent Candidate - Match"
         AB_BUILD = "AB_BUILD", "Agent Builder - Build"

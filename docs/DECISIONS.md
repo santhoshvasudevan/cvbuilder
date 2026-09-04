@@ -374,7 +374,17 @@ requirement text there).
 - No vector database or embedding-based memory is required for v1. PostgreSQL structured retrieval
   plus a bounded LLM relevance-ranking step is sufficient. `pgvector` remains a possible future
   optimization only if measured retrieval quality requires it — not adopted now, not a default to
-  revisit without evidence of a real retrieval-quality problem.
+  revisit without evidence of a real retrieval-quality problem. **Amended 2026-09-04 (D-020, D-021,
+  M5/M6 audit hardening and recall repair)**: "sufficient" is verified against
+  **requirement-level evidence coverage** — every `JobRequirement`'s important concepts have
+  truthful, source-supported evidence somewhere in the bounded pool — not against surviving-exact-
+  claim-ID recall on any specific gold set. A bounded per-requirement cap is expected to keep the
+  strongest representative evidence for a concept, not every claim that happens to restate it;
+  D-020 added a deterministic BM25-scored candidate-generation step plus a bounded LLM
+  relevance-ranking stage (`AC_RANK`) to make that structured retrieval real and measurable, and
+  D-021 added rarity-aware scoring plus a bounded requirement-normalization stage (`AC_NORMALIZE`)
+  to bridge vocabulary mismatch (paraphrase, non-English requirements) that lexical scoring alone
+  cannot close.
 
 ### Bootstrap mechanism (new)
 
@@ -735,3 +745,158 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   real, working assessment and resume draft at a small fraction of the pre-fix request size. No
   live provider call was made or authorized for this work; `AC_RANK`/`AC_MATCH`/`AB_BUILD` have no
   real `StageModelAssignment` configured in the development database.
+
+## D-021: Rarity-aware BM25 candidate scoring and a bounded requirement-normalization stage
+## (AC_NORMALIZE) for D-015's lexical retrieval step
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) — directed by the product owner following
+  an independent re-audit's recall finding against D-020's bounded retrieval pipeline; implemented
+  and measured live against the real ACTIVE CandidateMemory in the same session. An initial
+  verification pass used exact-claim-ID recall (19 predeclared critical claim IDs across five gold
+  profiles) as its acceptance bar and reached 16/19, which the product owner then explicitly
+  replaced with a **requirement-level evidence-coverage** standard: bounded retrieval must ensure
+  every requirement's important concepts are truthfully supported by *some* candidate in the pool,
+  not that every specific claim ID a prior audit happened to point at survives a bounded cap — a
+  real corpus commonly contains several claims that separately restate the same underlying fact
+  (different engagements, different phrasing, near-duplicate skill bullets), and a bounded
+  per-requirement cap is expected to keep the strongest few, not all of them. An acceptance review
+  (Finding 3 below) inspected the three claims that did not reach the pool under the exact-ID
+  standard and confirmed each is genuinely redundant with claims that did — no requirement's
+  evidence coverage is weakened, no requirement risks an incorrect GAP disposition, and no unique
+  capability, engagement, or evidence strength was lost. Committed on that basis.
+- **Requirement**: corrects two independent recall problems found in D-020's
+  `candidate_generation.py`/`lexical_relevance.py` (the deterministic BM25/phrase/acronym scoring
+  layer) and extends D-015's "structured retrieval plus a bounded relevance-ranking step" with one
+  additional stage that runs *before* that scoring, per the product owner's explicit architecture:
+  `JobRequirement -> bounded canonical English search representation -> BM25 candidate generation
+  -> AC_RANK -> AC_MATCH`.
+- **Finding 1 (fixed, same-day iteration)**: `lexical_relevance.py`'s first working version scored
+  a claim by raw shared-token count with no rarity weighting at all, letting corpus-common domain
+  words ("vehicle", "connected", "cloud") outweigh a genuinely rare, diagnostic term
+  ("Kubernetes", ~2.7% document frequency in the real corpus) that should have dominated. **Fixed**
+  with a from-scratch rewrite: BM25 (Robertson/Sparck-Jones IDF + term-frequency saturation) over
+  the actual eligible-claim corpus given at call time, with a corpus-relative common-term
+  dampening rule (document frequency > 8% of the corpus) on top of BM25's own log-IDF; a
+  rarity-weighted exact-phrase (bigram/trigram) bonus, where a matched phrase's weight comes from
+  the *average unigram IDF of its own constituent words* (not the phrase's own document frequency
+  — tried first, and rejected: an exact multi-word phrase is inherently sparse as a string
+  regardless of how common its individual words are, so phrase-level document frequency alone
+  could not tell a common phrase like "connected vehicle" from a rare one like "adaptive cruise
+  control"); a rarity-weighted acronym/technical-proper-noun bonus (a short acronym, or any other
+  capitalized token not at the start of the text, weighted by its own unigram document frequency);
+  and a corpus-driven singular/plural merge (a trailing "s" is stripped only when the resulting
+  singular form is itself a real token elsewhere in the corpus, fixing a fragmentation artifact
+  where "platforms" scored as artificially rare purely because most claims happened to say
+  "platform" — while never touching a domain proper noun like "Kubernetes" that has no matching
+  singular form in the vocabulary). Two further correctness bugs surfaced and were fixed during
+  this same rewrite: (a) the tokenizer's word regex deliberately includes "." to keep decimal/
+  version tokens ("3.5") intact, which glued an ordinary sentence-final period onto that sentence's
+  last word ("platforms." as a token distinct from "platform"), corrupting that word's measured
+  document frequency across the whole corpus; (b) the acronym/technical-proper-noun detector's
+  "not the first word of the text" rule assumed a single sentence, so once
+  `normalize.build_search_text` began concatenating a restated sentence after the original, that
+  second sentence's own ordinary first word ("Experience...") was wrongly flagged as a technical
+  term — and because a stopword's document frequency is never measured (stopwords are filtered out
+  of `build_corpus_stats` entirely), the resulting lookup read that absence as "the rarest possible
+  term" and awarded a large, spurious bonus to every claim containing that ordinary word. Both are
+  now guarded explicitly (trailing-period stripping in tokenization; a stopword exclusion in
+  acronym detection).
+- **Finding 2 (fixed)**: two full-profile recall regressions were found and fixed during
+  verification. A German-language query's grammatical filler words ("mit", "und", "für") were not
+  filtered as stopwords (the existing stopword list is English-only), so they spuriously matched
+  the ~30 German-language claims already present in the real ACTIVE CandidateMemory's own
+  `canonical_text_en` field (a pre-existing bootstrap data-quality gap — not something this
+  decision alters), drowning out genuinely relevant English technical claims. **Fixed** by adding a
+  small set of common German connector/function words to the shared stopword list — the same class
+  of noise word English "and"/"with"/"for" already are, not a translation layer. Separately,
+  concatenating a requirement's near-duplicate canonical restatement (common for an
+  already-clear-English requirement, where "normalize, don't reword" produces close to the
+  original) was found to still shift the exact-phrase bonus via spurious sentence-boundary
+  n-grams enough to push a borderline claim out of the bounded per-requirement cap, even after
+  Finding 1's fixes. **Fixed** in `normalize.build_search_text`: a canonical restatement that is
+  the same content as the original after whitespace/case normalization (the same equality check
+  `dedup.py` already uses to decide two claims are the same content) is not concatenated a second
+  time.
+- **New stage (AC_NORMALIZE)**: added as its own `StageModelAssignment.Stage` value (matching
+  D-020's `AC_RANK` precedent) rather than reusing an existing stage, since it is architecturally
+  distinct (it runs *before* candidate generation, not after) and needs its own auditable
+  `LLMCallLog`/registry assignment. `candidate_matching.services.normalize` receives only a
+  requirement's `requirement_id`/`text` and the job posting's shared `posting_language` — never a
+  MemoryClaim, a CareerEngagement, or any candidate/employment field — and returns one bounded,
+  `extra="forbid"` `RequirementNormalizationItem` per requirement (canonical English text,
+  ≤8 diagnostic terms, ≤6 equivalents, ≤10 preserved technical terms, each ≤60 characters, the
+  restatement itself ≤500 characters — `candidate_matching.services.normalization_limits`),
+  validated as a schema-level constraint (an over-large or malformed response is a
+  `SCHEMA_VALIDATION` error, handled by the same uniform `BaseLLMAdapter.generate` path every
+  other stage uses) rather than truncated after the fact. A response that adds, drops, or renames a
+  requirement_id, or that errors, raises `NormalizationFailedError` in
+  `bounded_retrieval.build_bounded_context` — propagated exactly like D-020's `RankingFailedError`,
+  never silently falling back to unexpanded (degraded-recall) retrieval. The output is a retrieval
+  hint only: `RequirementNormalizationItem` has no field that could carry a claim id or evidence,
+  and is recorded on `FitAssessment.retrieval_manifest` for operator inspection (original text,
+  canonical text, and the three bounded term lists per requirement) but is never read by
+  `resume_builder`'s no-fabrication validator or rendered into a resume.
+- **Finding 3 (acceptance review — resolved: all three genuinely redundant)**: re-running the same
+  five gold profiles the independent re-audit used (with hand-authored, deterministic stand-ins for
+  AC_NORMALIZE's output, written from each job requirement's own stated meaning only, never from a
+  specific claim's wording) achieved 16 of 19 predeclared critical claim IDs reaching the
+  pre-`AC_RANK` candidate pool — the Kubernetes-vs-common-word regression named in the original
+  audit is fixed and independently reproducible (Profile 1 and the German Profile 5 both went from
+  a partial to a full 4/4). The three claims that did not reach the pool under the exact-ID
+  standard were each individually inspected against what *did* reach the pool for the same
+  requirement, comparing actual capability/scope/engagement/evidence strength, not wording
+  similarity:
+  - **MC-7-0146** ("Lead end-to-end solution architecture and integration for connected-vehicle
+    services... Google Cloud platforms... international alliance partners", engagement CE-0001,
+    Profile 2): every distinct concept it carries — solution-architect-level ownership of
+    connected-vehicle services (MC-7-1002, "acting solution architect responsibility for connected
+    vehicle services in complex international alliance projects"), architecture-level cloud/
+    connected-vehicle ownership at the *same* engagement (MC-7-1052, CE-0001), and
+    integration/alliance/partner coordination at the *same* engagement (MC-7-0980, CE-0001;
+    MC-7-0556, CE-0001, "Connectivity Cloud product ownership in Ford Joint Venture alliance
+    program") — is independently present in the pool, several of them tied to the identical
+    engagement. **REDUNDANT — COVERAGE PRESERVED.**
+  - **MC-7-0175** ("Led E2E connectivity integration in the Ford-VW alliance for a Ford-branded
+    customer experience", unmapped/global, Profile 2): the same real-world achievement class
+    (connectivity/alliance integration in the Ford joint-venture context) is present in the pool
+    via MC-7-0556 (CE-0001, explicitly "Ford Joint Venture alliance") and MC-7-0980 (CE-0001,
+    "integration and release activities between OEM, partner, cloud, and development teams") — and
+    both are *engagement-mapped*, which is source-attributable, stronger evidence than MC-7-0175's
+    own unmapped/global status. The "Ford-branded customer experience" framing adds no distinct
+    capability relevant to the requirement (product ownership/OEM stakeholder coordination) beyond
+    what those two already establish. **REDUNDANT — COVERAGE PRESERVED.**
+  - **MC-7-0033** ("Improved connected vehicle data accuracy above 99% through automated
+    validation, dbt checks, data contracts, and monitoring", unmapped, Profile 3): notably, this
+    claim does not itself name SQL, Airflow, or BigQuery — it was already a comparatively weak
+    direct match for a requirement asking for evidence of building pipelines with that specific
+    tool stack. Its core substance (automated data-quality validation via dbt, yielding measurably
+    high accuracy) is present in the pool via MC-7-0376 (CE-0001, "automated quality checks and
+    high data accuracy"), MC-7-0121 ("dbt-style data-quality controls"), and monitoring is
+    explicitly present via MC-7-1026/MC-7-1027 ("dbt, and monitoring") and MC-7-0564
+    ("metric-based alerts"). "Data contracts" as an exact term is not repeated verbatim elsewhere
+    in the pool, but is not itself a distinct capability the requirement asks for beyond the
+    data-quality/validation theme those claims already establish. **REDUNDANT — COVERAGE
+    PRESERVED.**
+  In all three cases the pool retains, for the same requirement, at least one candidate with equal
+  or stronger evidence (often engagement-mapped where the excluded claim was unmapped) covering
+  every distinct concept — no requirement's evidence coverage is weakened and none would
+  incorrectly surface as a `GAP` because of the exclusion.
+- **Alternative considered**: raising `MAX_CANDIDATES_PER_REQUIREMENT`/`MAX_RANKING_CANDIDATES` to
+  force every exact predeclared claim ID into the pool regardless of redundancy. Explicitly
+  rejected by the product owner's own instruction ("do not increase limits as the primary fix," and
+  later "do not tune retrieval merely to force specific claim IDs into the pool") — the caps are a
+  D-020 architectural boundary, not a tuning knob for one gold set, and forcing in a claim already
+  redundant with pool content would not improve the fit assessment's truthfulness.
+- **Requirement-level coverage, not exhaustive duplicate inclusion**: bounded retrieval's guarantee
+  is that every requirement's important concepts have truthful, source-supported evidence
+  *somewhere* in the bounded candidate pool — never that every claim a human reviewer might
+  independently point to survives the cap. A real CandidateMemory routinely contains several claims
+  restating the same underlying fact (different engagements, different phrasing, near-duplicate
+  skill bullets); the bounded per-requirement cap is designed to keep the strongest representative
+  evidence, not all of it. This is the acceptance standard this decision is verified against, not
+  exact-claim-ID recall against a fixed gold set (which risks overfitting the scorer to that set).
+- **Consequence**: `llm_provider.0003_alter_llmcalllog_stage_and_more` adds the `AC_NORMALIZE`
+  stage choice. `RetrievalManifest.requirement_normalization` is a new field
+  (`candidate_matching.services.bounded_retrieval`) — no model migration, since `FitAssessment.
+  retrieval_manifest` is already a JSONField (D-020). No live provider call was made or authorized;
+  `AC_NORMALIZE` has no real `StageModelAssignment` configured in the development database.

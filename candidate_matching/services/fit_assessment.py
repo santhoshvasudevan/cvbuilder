@@ -24,6 +24,7 @@ from ..validators.disposition_coverage import AssessmentItemData, ensure_full_co
 from . import static_requirements
 from .assess import assess_requirements
 from .bounded_retrieval import RankingFailedError, build_bounded_context
+from .normalize import NormalizationFailedError
 from .retrieval_limits import RetrievalBudgetExceededError
 from .retrieve import get_active_candidate_memory
 
@@ -80,8 +81,10 @@ def build_fit_assessment(job_application) -> FitAssessment:
         )
 
     try:
-        retrieval, manifest = build_bounded_context(candidate_memory, narrative_requirements)
-    except (RankingFailedError, RetrievalBudgetExceededError) as exc:
+        retrieval, manifest = build_bounded_context(
+            candidate_memory, narrative_requirements, posting_language=jra.posting_language
+        )
+    except (RankingFailedError, NormalizationFailedError, RetrievalBudgetExceededError) as exc:
         raise AgentCandidateError(f"Bounded retrieval failed: {exc}") from exc
 
     llm_result = assess_requirements(retrieval, narrative_requirements)

@@ -772,3 +772,24 @@ important as the schema above — a correct schema with an unbounded retrieval p
   relevance-ranking step over the structurally-narrowed candidate set is sufficient. `pgvector` is
   a possible future optimization only if measured retrieval quality shows the structured approach
   isn't precise enough — not a default to build toward now.
+- **A bounded requirement-normalization stage (`AC_NORMALIZE`, D-021, 2026-09-04) runs before the
+  structured lexical candidate generation above, not as a substitute for it.** It exists to bridge
+  genuine vocabulary mismatch (a paraphrase sharing no words with the requirement text, or a
+  non-English job posting) that a purely lexical scorer cannot close on its own. It receives only a
+  `JobRequirement`'s id/text and the job posting's language — never a `MemoryClaim`, a
+  `CareerEngagement`, or any candidate/employment field, the same boundary Agent Candidate itself
+  observes above — and returns a small, schema-bounded canonical-English restatement plus a
+  handful of diagnostic terms/equivalents/preserved technical terms, which the lexical
+  candidate-generation step scores *alongside* (never instead of) the requirement's own original
+  text. Its output is a retrieval hint only: it is recorded on the retrieval manifest for operator
+  inspection, but has no field that could carry a claim id and is never treated as evidence by any
+  validator.
+- **Bounded retrieval's guarantee is requirement-level evidence coverage, not exhaustive duplicate
+  inclusion** (D-021): every `JobRequirement`'s important concepts must have truthful,
+  source-supported evidence *somewhere* in the bounded candidate pool — not that every claim a
+  human reviewer might independently point to survives the per-requirement cap. A real
+  CandidateMemory routinely contains several claims restating the same underlying fact across
+  different engagements or phrasings; the cap is designed to keep the strongest representative
+  evidence for each concept, not all of it. See D-021's acceptance review for a worked example
+  comparing three excluded claims against the pool content that made their underlying capability,
+  scope, and engagement redundant rather than lost.

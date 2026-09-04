@@ -139,6 +139,26 @@ milestone scope):
   requirement (tenure/dates/location/employment relationship) is assessed via
   `candidate_memory.services.static_profile_boundary`'s local assessors and cited by
   `supporting_engagement_ids` alone, with zero LLM calls made for that disposition.
+  **(D-021, 2026-09-04, committed)** the deterministic BM25/phrase/acronym scoring layer
+  (`lexical_relevance.py`/`candidate_generation.py`) is tested purely as a lexical-scoring
+  mechanism against small synthetic fixtures (no live corpus, no cassette) — rare-vs-common-term
+  direct score comparison, exact-phrase/acronym matching, determinism across repeated calls,
+  empty/punctuation-only input; the new `AC_NORMALIZE` requirement-normalization stage
+  (`normalize.py`) is tested the same way every other stage in this codebase is (`test_rank.py`'s
+  pattern): a `FakeAdapter`/`StageModelAssignment(AC_NORMALIZE)` scripted with a fixed response,
+  proving requirement-id preservation, schema/count/length-bound enforcement (an over-large or
+  malformed response fails closed, never silently truncates), and that only
+  requirement_id/text/language ever reach the stage's prompt — never a MemoryClaim,
+  CareerEngagement, or candidate/employment field. `test_normalize.py` also has synthetic
+  paraphrase/German-to-English/acronym-matching fixtures proving the *mechanism* bridges a genuine
+  vocabulary gap. Retrieval quality itself is verified against **requirement-level evidence
+  coverage**, not exact-claim-ID recall: a live, real-corpus five-profile gold-set measurement (not
+  a committed automated test, since it depends on the real ACTIVE CandidateMemory's actual content)
+  found 16/19 predeclared claim IDs reaching the pool, and an acceptance review — comparing actual
+  capability/scope/engagement/evidence strength, not wording — confirmed the three unreached claims
+  are each redundant with claims that did reach the pool for the same requirement (see D-021's
+  Finding 3). No unit test asserts a specific real claim ID must appear in the pool, since that
+  would overfit the scorer to one gold set rather than testing the scoring mechanism itself.
 - **M6 (`resume_builder`), implemented 2026-09-03**: the no-fabrication validator running against the **structured**
   representation before any markdown is rendered (a fixture `ResumeElement` with no evidence, or
   with an ID that doesn't resolve to an existing/confirmed/eligible `MemoryClaim`, is rejected

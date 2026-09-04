@@ -5,6 +5,7 @@ from django.test import TestCase
 from candidate_memory.models import CandidateMemory, ClaimEngagementMapping
 
 from ..services.bounded_retrieval import RankingFailedError, build_bounded_context
+from ..services.normalize import NormalizationFailedError
 from ..services.retrieval_limits import (
     MAX_ESTIMATED_REQUEST_TOKENS,
     MAX_RANKING_CANDIDATES,
@@ -15,6 +16,7 @@ from .factories import (
     make_engagement,
     make_narrative_claim,
     make_revision,
+    scripted_normalization,
     scripted_ranking,
     scripted_ranking_selecting_all,
 )
@@ -122,6 +124,65 @@ class BuildBoundedContextTests(TestCase):
             )
 
         self.assertEqual(context.claims[0].approved_engagement_ids, (engagement.engagement_id,))
+
+    def test_normalization_failure_fails_closed_never_falls_back_to_unexpanded_retrieval(self):
+        rev = make_revision(status=CandidateMemory.Status.BUILDING)
+        make_narrative_claim(rev, canonical_text_en="Something about Kubernetes.")
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+
+        # A response missing the required `items` key fails schema validation -> is_error.
+        with scripted_normalization({}):
+            with self.assertRaises(NormalizationFailedError):
+                build_bounded_context(rev, [{"requirement_id": "JR-001", "text": "Kubernetes"}])
+
+    def test_manifest_records_the_normalization_used_for_each_requirement(self):
+        rev = make_revision(status=CandidateMemory.Status.BUILDING)
+        make_narrative_claim(rev, canonical_text_en="Operated Kubernetes clusters.")
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+
+        normalization_response = {
+            "items": [
+                {
+                    "requirement_id": "JR-001",
+                    "canonical_english_text": "Kubernetes orchestration experience.",
+                    "diagnostic_terms": ["Kubernetes"],
+                    "equivalents": [],
+                    "preserved_technical_terms": ["Kubernetes"],
+                    "source_language": "en",
+                }
+            ]
+        }
+
+        from unittest import mock
+
+        from llm_provider.types import NormalizedLLMResult
+
+        from ..schemas import RelevanceRankingOutput
+
+        def _select_all(candidate_pool, requirements):
+            return NormalizedLLMResult(
+                content=RelevanceRankingOutput(
+                    rankings=[
+                        {
+                            "requirement_id": requirement["requirement_id"],
+                            "relevant_claim_ids": [claim.claim_id for claim in candidate_pool],
+                        }
+                        for requirement in requirements
+                    ]
+                )
+            )
+
+        with scripted_normalization(normalization_response):
+            with mock.patch("candidate_matching.services.bounded_retrieval.rank_relevance", _select_all):
+                _context, manifest = build_bounded_context(
+                    rev, [{"requirement_id": "JR-001", "text": "Kubernetes experience"}]
+                )
+
+        entry = manifest.requirement_normalization["JR-001"]
+        self.assertEqual(entry["original_text"], "Kubernetes experience")
+        self.assertEqual(entry["canonical_english_text"], "Kubernetes orchestration experience.")
+        self.assertEqual(entry["diagnostic_terms"], ["Kubernetes"])
+        self.assertEqual(entry["source_language"], "en")
 
 
 class BoundedRetrievalAtScaleTests(TestCase):

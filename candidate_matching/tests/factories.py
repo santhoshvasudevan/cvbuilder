@@ -30,6 +30,8 @@ __all__ = [
     "scripted_ranking",
     "scripted_ranking_selecting_all",
     "scripted_agent_candidate",
+    "scripted_normalization",
+    "stub_identity_normalization",
     "valid_assessment_response",
 ]
 
@@ -125,6 +127,51 @@ def scripted_assessment(fixed_response: dict):
 
 
 @contextlib.contextmanager
+def stub_identity_normalization():
+    """Patch `candidate_matching.services.bounded_retrieval.expand_requirements_for_search` so
+    every requirement's search text expands to just itself (canonical_english_text=text, every
+    bounded term list empty) -- the shared default for every existing ranking-focused fixture/test
+    that isn't specifically exercising the AC_NORMALIZE stage itself, so those tests don't also
+    need a real `StageModelAssignment(AC_NORMALIZE)`. Tests that care about normalization behavior
+    use `scripted_normalization` instead, which routes through the real adapter/schema."""
+    from candidate_matching.schemas import RequirementNormalizationItem
+
+    def _identity(requirements, *, posting_language):
+        return {
+            requirement["requirement_id"]: RequirementNormalizationItem(
+                requirement_id=requirement["requirement_id"],
+                canonical_english_text=requirement["text"],
+                diagnostic_terms=[],
+                equivalents=[],
+                preserved_technical_terms=[],
+                source_language=posting_language,
+            )
+            for requirement in requirements
+        }
+
+    with mock.patch(
+        "candidate_matching.services.bounded_retrieval.expand_requirements_for_search", _identity
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def scripted_normalization(fixed_response: dict):
+    """Patch `candidate_matching.services.normalize.get_adapter_for_stage` so the AC_NORMALIZE
+    call in the wrapped block returns `fixed_response`, via the real `FakeAdapter` and the real
+    `RequirementNormalizationOutput` schema validation -- use this to test the normalization
+    stage's actual wiring (including its schema/id-matching failure modes), as opposed to
+    `stub_identity_normalization`'s bypass."""
+    model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_NORMALIZE)
+
+    def _get_adapter_for_stage(stage):
+        return FakeAdapter(model, fixed_response=fixed_response)
+
+    with mock.patch("candidate_matching.services.normalize.get_adapter_for_stage", _get_adapter_for_stage):
+        yield
+
+
+@contextlib.contextmanager
 def scripted_ranking(fixed_response: dict):
     """Patch `candidate_matching.services.rank.get_adapter_for_stage` so the D-015 relevance-
     ranking call in the wrapped block returns `fixed_response`, via the real `FakeAdapter`. Use
@@ -135,8 +182,11 @@ def scripted_ranking(fixed_response: dict):
     def _get_adapter_for_stage(stage):
         return FakeAdapter(model, fixed_response=fixed_response)
 
-    with mock.patch("candidate_matching.services.rank.get_adapter_for_stage", _get_adapter_for_stage):
-        yield
+    with stub_identity_normalization():
+        with mock.patch(
+            "candidate_matching.services.rank.get_adapter_for_stage", _get_adapter_for_stage
+        ):
+            yield
 
 
 @contextlib.contextmanager
@@ -166,10 +216,11 @@ def scripted_ranking_selecting_all():
         request = build_request(candidate_pool, requirements)
         return adapter.generate(request)
 
-    with mock.patch(
-        "candidate_matching.services.bounded_retrieval.rank_relevance", _fake_rank_relevance
-    ):
-        yield
+    with stub_identity_normalization():
+        with mock.patch(
+            "candidate_matching.services.bounded_retrieval.rank_relevance", _fake_rank_relevance
+        ):
+            yield
 
 
 @contextlib.contextmanager

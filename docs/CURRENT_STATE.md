@@ -1,18 +1,23 @@
 # Current State
 
-Last updated: 2026-09-03 (M5 and M6 implemented, tested, committed, independently audited, and
-hardened based on that audit -- see "M5/M6 audit hardening (2026-09-03, D-020)" below for the two
-release-blocking corrections. M5 -- Agent Candidate, matching, and Human Review Gate 1 -- and M6 --
-Agent Builder and Human Review Gate 2 -- are both complete: bounded, relevance-ranked retrieval and
-static-requirement assessment against the real ACTIVE CandidateMemory and real APPROVED
-CareerEngagements; LLM-backed narrative assessment/generation routed only through the FakeAdapter
-(no live provider calls were authorized or made this round); disposition-coverage and
-no-fabrication (including engagement-placement-correct) validators; deterministic markdown
-rendering; both human review gates wired end to end, hardened against concurrent approval and
-provider failure. A full end-to-end manual walkthrough (intake -> Agent Candidate -> Gate 1
-feedback+approval -> Agent Builder -> Gate 2 feedback+approval) was run live against the real
-ACTIVE CandidateMemory (v2/id=7) and a real APPROVED CareerEngagement (CE-0003), inside a
-transaction rolled back at the end -- zero residue in the persistent development database
+Last updated: 2026-09-04 (recall-repair work on top of M5/M6, committed -- see "Bounded retrieval
+recall repair (2026-09-04, D-021)" below. An initial verification pass measured exact-claim-ID
+recall against a five-profile gold set (16/19); the product owner then replaced that acceptance
+bar with requirement-level evidence coverage, and an acceptance review confirmed the three
+unreached claims are each genuinely redundant with claims that did reach the pool -- see D-021 for
+the full, claim-by-claim comparison.). Previously, as of 2026-09-03: M5 and M6 implemented, tested, committed,
+independently audited, and hardened based on that audit -- see "M5/M6 audit hardening (2026-09-03,
+D-020)" below for the two release-blocking corrections. M5 -- Agent Candidate, matching, and Human
+Review Gate 1 -- and M6 -- Agent Builder and Human Review Gate 2 -- are both complete: bounded,
+relevance-ranked retrieval and static-requirement assessment against the real ACTIVE
+CandidateMemory and real APPROVED CareerEngagements; LLM-backed narrative assessment/generation
+routed only through the FakeAdapter (no live provider calls were authorized or made this round);
+disposition-coverage and no-fabrication (including engagement-placement-correct) validators;
+deterministic markdown rendering; both human review gates wired end to end, hardened against
+concurrent approval and provider failure. A full end-to-end manual walkthrough (intake -> Agent
+Candidate -> Gate 1 feedback+approval -> Agent Builder -> Gate 2 feedback+approval) was run live
+against the real ACTIVE CandidateMemory (v2/id=7) and a real APPROVED CareerEngagement (CE-0003),
+inside a transaction rolled back at the end -- zero residue in the persistent development database
 (`JobApplication`/`FitAssessment`/`ResumeDraft` counts confirmed unchanged before and after).)
 
 ## Summary
@@ -744,6 +749,64 @@ test-runner database) had every migration applied cleanly from zero. No live pro
 made or authorized. `docs/REQUIREMENT_TRACEABILITY.md`'s MEM-015/MEM-016 rows were corrected to
 describe the real bounded pipeline rather than the unbounded one they originally cited.
 
+## Bounded retrieval recall repair (2026-09-04, D-021) -- COMMITTED
+
+Following the M5/M6 audit hardening above, a separately-scheduled independent re-audit of the
+corrected pipeline found a real recall gap in `candidate_generation.py`'s deterministic lexical
+scoring: raw shared-token-count scoring let corpus-common words ("vehicle", "connected", "cloud")
+outweigh rare, diagnostic terms ("Kubernetes") that should have dominated, and a German-language
+requirement retrieved less evidence than its English equivalent. The product owner directed a
+two-part fix, implemented and measured live against the real ACTIVE CandidateMemory in this same
+session:
+
+1. **Rarity-aware scoring** (`lexical_relevance.py` rewritten): BM25 (IDF + term-frequency
+   saturation) replaces raw overlap counting, with a corpus-relative common-term dampening rule, a
+   rarity-weighted exact-phrase bonus (weighted by its own words' average IDF, not the phrase's own
+   document frequency), a rarity-weighted acronym/technical-proper-noun bonus, and a corpus-driven
+   singular/plural token merge. Two tokenization correctness bugs were found and fixed in the same
+   pass (a sentence-final period gluing onto a word's token; a stopword being misread as
+   "maximally rare" when it was actually just filtered from measurement) -- see D-021 for detail.
+2. **A new bounded requirement-normalization stage (`AC_NORMALIZE`)**, inserted before candidate
+   generation: `JobRequirement -> canonical English search representation -> BM25 candidate
+   generation -> AC_RANK -> AC_MATCH`. Receives only a requirement's id/text and the job posting's
+   language -- never a MemoryClaim, CareerEngagement, or candidate/employment data -- and returns a
+   small, schema-bounded (`extra="forbid"`, hard count/length limits) canonical English
+   restatement plus diagnostic terms/equivalents/preserved technical terms, scored *alongside*
+   (never in place of) the requirement's own original text. Fails closed on any provider error,
+   malformed/oversized response, or a requirement-id mismatch (`NormalizationFailedError`), exactly
+   like D-020's `AC_RANK` ranking step.
+
+**Verified, live, against the real ACTIVE CandidateMemory (1,122 eligible claims)**: the same five
+gold profiles the independent re-audit used (Automotive Cloud/Solutions Architect;
+Connected-Vehicle Product Owner; Data/Cloud Data Engineer; ADAS/Validation Engineer; a
+German-language profile), with hand-authored deterministic normalization content standing in for a
+real provider call. An initial pass measured exact-claim-ID recall: **16 of 19 predeclared critical
+claims** reached the pre-`AC_RANK` candidate pool (up from an 11/19 raw-overlap baseline measured
+the same way) -- the specific Kubernetes-vs-common-word regression the audit named is fixed and
+reproduced (Profile 1 and the German profile both reach a full 4/4, matching each other exactly).
+The product owner then replaced exact-claim-ID recall with a **requirement-level evidence-coverage**
+acceptance standard: bounded retrieval must ensure every requirement's important concepts have
+truthful, source-supported evidence *somewhere* in the pool, not that every claim ID a prior audit
+happened to point at survives the cap. An acceptance review inspected the three unreached claims
+against what *did* reach the pool for the same requirement (comparing actual capability, scope,
+engagement, and evidence strength, not wording) and classified all three
+`REDUNDANT — COVERAGE PRESERVED`:
+- MC-7-0146 (solution-architecture/integration leadership for connected-vehicle services) is
+  covered by MC-7-1002, MC-7-1052 (same engagement), MC-7-0980 and MC-7-0556 (same engagement).
+- MC-7-0175 (Ford-VW alliance connectivity integration, unmapped) is covered by MC-7-0556 and
+  MC-7-0980 -- both engagement-mapped, i.e. *stronger*, more source-attributable evidence than the
+  excluded unmapped claim.
+- MC-7-0033 (dbt-based data-quality achievement, unmapped, not itself naming SQL/Airflow/BigQuery)
+  is covered by MC-7-0376, MC-7-0121 (data-quality/validation) and MC-7-1026/MC-7-1027/MC-7-0564
+  (monitoring).
+No requirement's evidence coverage is weakened and none would incorrectly surface as a `GAP`
+because of these exclusions. All candidate/token caps stay within their existing D-020 limits
+throughout (40 candidates/requirement, ~1,300-1,400 estimated tokens per requirement's candidate
+set) -- no limit was raised to reach this result. This work is committed: `lexical_relevance.py`,
+`candidate_generation.py`, `normalize.py`, `normalization_limits.py`, the new `AC_NORMALIZE` stage
+value/migration, and `bounded_retrieval.py`'s wiring, fully tested (769/769 project tests passing,
+including a dedicated `test_normalize.py`), `ruff`/`check`/`makemigrations --check` all clean.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -768,8 +831,13 @@ hardening -- bounded relevance retrieval, engagement-correct evidence, gate/fail
 implemented within the boundaries of the already-approved decisions in force at the time
 (principally D-006, D-010, D-014, D-019); D-020 was added when an independent audit found that
 implementation had not actually satisfied D-015's bounded-retrieval clause and D-019's engagement-
-placement guarantee, and records the correction. Neither D-016 nor anything else is blocking for M7
-as currently scoped.
+placement guarantee, and records the correction. D-021 (rarity-aware BM25 scoring + `AC_NORMALIZE`
+requirement normalization, see "Bounded retrieval recall repair" above) is **APPROVED AND
+IMPLEMENTED** -- verified against a requirement-level evidence-coverage standard (the product
+owner's explicit replacement for exact-claim-ID recall) rather than exact-claim-ID recall against
+the five gold profiles; an acceptance review confirmed the three claims short of exact-ID recall
+are all genuinely redundant with claims that did reach the pool. Neither D-016 nor anything else is
+blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
