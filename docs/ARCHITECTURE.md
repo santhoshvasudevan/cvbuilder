@@ -515,6 +515,14 @@ semantics and invariants come first.
   exist, so every version remains traceable to the same source posting. `JobRequirement` IDs are
   stable and immutable within a version — a re-run creates a new JRA version with its own
   (possibly renumbered) `JobRequirement` set, not a mutation of the old one's IDs.
+- **Deterministic integrity gate (D-022/D-023)**: `job_intake/validators/integrity.py` sits between
+  AJ's structured-output call and persistence, checking only objective properties — at least one
+  requirement exists, no exact-duplicate requirement, and every requirement/screening-risk claiming
+  posting support has a verifiable exact-substring quotation. It never judges wording or meaning
+  (no phrase blocklist, no posting-length "substantive" heuristic) — per the product-owner boundary
+  recorded in D-023, semantic interpretation belongs to the AJ LLM and, at Human Review Gate 1, the
+  operator; deterministic code protects only truth (provenance), structural boundaries (schema/ID
+  integrity), and lifecycle (atomic persistence, pipeline advancement gating).
 
 ### `FitAssessment`
 - **Responsibility**: Agent Candidate's structured output — the fit/gap picture for one

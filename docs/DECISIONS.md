@@ -999,3 +999,106 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   the raw string via `{{ risk.text|default:risk }}`). No live provider call was made or authorized
   by this decision; JobApplication id=9's real, legacy JRA (v1) was inspected read-only and left
   completely unedited throughout.
+
+## D-023: Course-correcting D-022 -- deterministic code protects integrity, never semantics
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) — directed by the product owner
+  immediately after reviewing D-022's implementation, stated as a durable boundary: *"LLMs decide
+  meaning and wording. Deterministic code protects truth, boundaries and lifecycle. The operator
+  approves semantic quality."* This decision does not reverse D-022's diagnosis (JobApplication
+  id=9's zero-requirement analysis was a real, correctly-identified failure) or its lifecycle/
+  provenance/atomicity machinery (all retained, see below) — it corrects *how far* the deterministic
+  layer D-022 introduced was allowed to reach into judging meaning.
+- **What D-022 got wrong**: `job_intake/validators/sanity.py` (as originally committed) went
+  beyond objective integrity into three kinds of semantic judgment that belong to the AJ LLM and
+  the operator, not to deterministic code:
+  1. `GAP_LANGUAGE_MARKERS` — a ~26-phrase substring blocklist ("lack of", "no experience", "no
+     proven", ...) that rejected requirement/screening-risk text containing those words, regardless
+     of whether the wording was a legitimate quotation from the posting itself (a real posting can
+     say "No experience necessary" — rejecting that for containing "no experience" is exactly the
+     failure mode this decision exists to prevent) or a reasonable recruiter framing the LLM/
+     operator should be free to choose and review, not have vetoed by a fixed word list.
+  2. `SUBSTANTIVE_TEXT_MIN_CHARS` (300) — a posting-length threshold deciding whether zero
+     requirements was suspicious. Length is not meaning, and the threshold was itself an arbitrary
+     number standing in for a judgment ("is this posting real") that only reading the posting can
+     make.
+  3. The "screening risks present, requirements absent" heuristic — an attempt to infer *why* an
+     analysis was empty (misclassification) rather than simply that it was empty. Inferring intent
+     from a correlation between two counts is exactly the kind of interpretive leap reserved for
+     the LLM/operator.
+- **Corrected responsibility boundary**: Agent Jobber's LLM remains fully responsible for
+  recruiter-style interpretation — responsibilities/qualifications, MANDATORY vs. PREFERRED,
+  ATS signals, screening constraints, implied expectations, working in the posting's own language.
+  Deterministic code (`job_intake/validators/integrity.py`, renamed from `sanity.py` to make the
+  narrower scope legible in the module name itself) checks three objective properties only, none of
+  which requires reading for meaning:
+  1. **At least one requirement exists** — unconditional, no length threshold. A response with zero
+     `requirements` is classified incomplete and never becomes the current usable JRA, regardless
+     of how short or long the posting was (a short posting with one explicit requirement must
+     reject a zero-requirement response exactly as readily as a long one).
+  2. **No exact duplicate requirement** — same category and same normalized (whitespace/case-
+     folded) text extracted twice. This is string equality, not interpretation.
+  3. **Verifiable provenance** — a MANDATORY/PREFERRED/RESPONSIBILITY requirement's or a screening
+     risk's `source_context` must be an exact substring of the posting actually analyzed (mirroring
+     `MemoryClaimSupport.verify_against_source`'s established convention). This proves the quoted
+     text exists; it never judges what that text *means* or whether building a requirement/risk
+     from it was the right call.
+  `ATS_SIGNAL`/`IMPLIED_EXPECTATION` remain exempt from the provenance rule, unchanged from D-022 —
+  the former is routinely a bare keyword, and the latter is by definition not stated outright
+  (its `source_context` is grounding context, never a literal quote, per `schemas.py`'s own
+  docstring); holding either to an exact-quote bar would be a category error, not a safety gap.
+- **What stayed exactly as D-022 built it** (all objective integrity/lifecycle machinery, none of
+  it a semantic judgment): the strengthened AJ prompt's statement that Agent Jobber has no
+  Candidate Memory/candidate context (guidance *to the LLM*, which is the correct place for
+  semantic guidance to live — see below); Pydantic structured-output validation (`extra="forbid"`,
+  enum-bound categories); `ScreeningRisk`'s mandatory `source_context` field; exact-substring
+  provenance verification; stable, application-assigned, DB-unique `JobRequirement` IDs; exact
+  normalized-duplicate rejection; atomic failure before any artifact persists (`run_intake`/
+  `rerun_analysis` raise before `transaction.atomic()` opens — no partial `JobRequirement`, no
+  pointer/phase advancement); append-only `JobRequirementAnalysis` versions; the sanitized
+  `LLMCallLog` row retained on every failure (token/latency/error metadata only, never raw
+  content); the M5 precondition (`build_fit_assessment` refuses a current JRA with zero
+  `JobRequirement`s — a fresh runtime check, so it still covers JobApplication id=9's real, legacy,
+  untouched JRA); and the read-only "incomplete analysis, not eligible for Gate 1" banner plus its
+  server-side enforcement.
+- **AJ prompt**: only lightly adjusted (`services/analyze.py::SYSTEM_PROMPT`) — the zero-
+  requirements framing was reworded to be unconditional (no "if the posting has real content"
+  hedge, matching the code exactly), and a short header note now states explicitly that this
+  prompt is the *only* place AJ's semantic judgment is guided, precisely because the deterministic
+  layer next to it must never also try to guide it. The candidate-context prohibition and example
+  phrasing to avoid remain — they are instructions *to the LLM* about how to write, not rules
+  *enforced in code* against what it wrote; D-023 removed the latter, never the former.
+- **Human-review UX**: no new gate, no source-unit coverage subsystem (explicitly out of scope, per
+  the product owner). The existing `job_intake` analysis-detail page already surfaces every
+  requirement with its category and source excerpt, every screening risk with its excerpt, implied
+  expectations visibly marked as inferred, and a link to Gate 1 — whose existing AJ-feedback form
+  ("Agent Jobber (re-analyze the posting)") is the obvious rerun action. Gate 1 remains the one
+  formal, combined AJ/AC operator approval point (HITL-001/002).
+- **Alternative considered**: keep the phrase list but make it advisory (a warning shown to the
+  operator, not a rejection). Rejected — a hardcoded phrase list is still an attempt to encode
+  semantic judgment in deterministic code, just softened; it would still misfire on legitimate
+  quoted posting language and would still need updating indefinitely as new phrasing patterns
+  appeared. The correct fix is to not attempt this judgment in code at all, not to lower its
+  severity.
+- **Testing posture (see also `docs/TEST_STRATEGY.md`)**: `test_integrity_validator.py`/
+  `test_integrity_validation_intake.py` test only the three objective properties above, including a
+  dedicated case proving legitimate posting wording (e.g. "No experience necessary") is never
+  rejected merely for its words. No test in this codebase may assert that deterministic code
+  correctly judged a semantic classification — that would itself be evidence of the D-022 overreach
+  recurring. Recorded/golden ("cassette") LLM-output testing remains explicitly deferred (TEST-002,
+  unchanged) until several real AJ/AC/AB outputs have stabilized; this decision does not change that
+  timeline or bring it closer.
+- **Model-quality posture**: this decision does not assume the `MEMORY_BUILD` model
+  (`nvidia/nemotron-3-super-120b-a12b`) is the right model for AJ/AC/AB — it was reused for
+  `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AJ_ANALYZE` (Gate-1 preparation session) only because it was
+  already registered, credentialed, and structured-output-capable, as an operational convenience,
+  not a quality judgment. Whether it is well-suited to each stage's actual task is something to
+  evaluate from real run outcomes (once live runs happen) and the operator's Gate-1 review — never
+  assumed from its role in Candidate Memory bootstrap.
+- **Consequence**: no model/schema migration (`AgentJobberAnalysis`/`ScreeningRisk` are unchanged
+  from D-022 — only the deterministic validator built on top of them was narrowed).
+  `job_intake/validators/sanity.py` → `job_intake/validators/integrity.py`;
+  `find_sanity_violations` → `find_integrity_violations`; `SemanticValidationError` →
+  `AnalysisIntegrityError` (still a subclass of `AnalysisFailedError`, so existing callers are
+  unaffected). No live provider call was made or authorized by this decision; JobApplication id=9's
+  real, legacy JRA (v1) remains inspected read-only only, never rerun or edited.

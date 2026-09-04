@@ -807,7 +807,13 @@ set) -- no limit was raised to reach this result. This work is committed: `lexic
 value/migration, and `bounded_retrieval.py`'s wiring, fully tested (769/769 project tests passing,
 including a dedicated `test_normalize.py`), `ruff`/`check`/`makemigrations --check` all clean.
 
-## Agent Jobber semantic sanity gate (2026-09-04, D-022) -- COMMITTED
+## Agent Jobber semantic sanity gate (2026-09-04, D-022) -- COMMITTED, then course-corrected (D-023, below)
+
+**This section is historical** — kept for the record of what the failure was and how the first fix
+overreached; the validator it describes (`job_intake/validators/sanity.py`,
+`SemanticValidationError`) was renamed and narrowed by D-023 immediately afterward. See the
+"Agent Jobber course correction" section below for the corrected, current state — read that one
+first if you're orienting to what's actually running today.
 
 A controlled live Gate-1 preparation run (primary checkout, real NVIDIA NIM credential, one real
 posting) surfaced a live M4 failure: JobApplication id=9's `AgentJobberAnalysis` was schema-valid
@@ -862,6 +868,63 @@ Fully tested (809/809 project tests passing, including new `test_sanity_validato
 `test_semantic_validation_intake.py`, and an M5-precondition test in
 `candidate_matching/tests/test_fit_assessment.py`), `ruff`/`check`/`makemigrations --check` and a
 genuinely fresh migration on an isolated database all clean.
+
+## Agent Jobber course correction (2026-09-04, D-023) -- COMMITTED, current state
+
+Immediately after reviewing D-022's implementation above, the product owner stated a durable
+boundary: *"LLMs decide meaning and wording. Deterministic code protects truth, boundaries and
+lifecycle. The operator approves semantic quality."* D-022's diagnosis was correct and its
+lifecycle/provenance/atomicity machinery was sound, but its validator had overreached into judging
+*meaning* — a ~26-phrase candidate-gap word blocklist that would reject a posting's own legitimate
+"No experience necessary" wording, a 300-character posting-length threshold standing in for "is
+this posting real," and a heuristic inferring *why* zero requirements happened (misclassification)
+rather than just that it happened. D-023 removed all three and kept everything else. The corrected,
+now-current state:
+
+- `job_intake/validators/sanity.py` → **renamed** `job_intake/validators/integrity.py`
+  (`find_sanity_violations` → `find_integrity_violations`); `SemanticValidationError` →
+  `AnalysisIntegrityError` (still an `AnalysisFailedError` subclass) — the rename makes the
+  narrower, corrected scope legible in the module's own name.
+- The validator now checks exactly three objective properties, none requiring reading for meaning:
+  (1) at least one requirement exists, unconditionally, no length threshold; (2) no exact duplicate
+  requirement (same category + normalized text); (3) a MANDATORY/PREFERRED/RESPONSIBILITY
+  requirement's or any screening risk's `source_context` is a real, exact substring of the posting
+  (`ATS_SIGNAL`/`IMPLIED_EXPECTATION` remain exempt, unchanged from D-022, since neither is
+  expected to carry a literal quote by design). `GAP_LANGUAGE_MARKERS`,
+  `SUBSTANTIVE_TEXT_MIN_CHARS`, and the risks-without-requirements heuristic are gone entirely —
+  not replaced with a larger or more elaborate version of any of them.
+- Retained exactly as D-022 built them (all objective, none a semantic judgment): the AJ prompt's
+  no-candidate-context statement (guidance *to the LLM*, correctly placed there rather than
+  enforced in code); strict Pydantic schema validation; `ScreeningRisk`'s mandatory provenance
+  field; exact-substring provenance verification; stable/unique `JobRequirement` IDs; atomic
+  failure before any artifact persists; append-only JRA versions; the sanitized `LLMCallLog`
+  retained on every failure; the M5 precondition rejecting a zero-requirement current JRA
+  (including JobApplication id=9's real, legacy, still-untouched JRA); and the read-only
+  "incomplete, not eligible for Gate 1" banner with its server-side enforcement.
+- `services/analyze.py::SYSTEM_PROMPT`: lightly reworded (the zero-requirements framing is now
+  unconditional, matching the code exactly) plus a new header note stating this prompt is the only
+  place AJ's semantic judgment is guided — the example candidate-gap phrasing to avoid remains *in
+  the prompt* (instructions to the LLM), just no longer *also* enforced as a code-level rejection
+  rule.
+- No new human-review gate or source-unit coverage subsystem was added — out of scope per the
+  product owner. The existing `job_intake` detail page (every requirement + category + source
+  excerpt, every screening risk + excerpt, implied expectations marked inferred) and Gate 1's
+  existing "Agent Jobber (re-analyze the posting)" feedback action remain the intended inspect/
+  rerun path; Gate 1 remains the one formal combined AJ/AC approval point.
+- Testing posture: `test_integrity_validator.py`/`test_integrity_validation_intake.py` assert only
+  the three objective properties, including a dedicated case proving legitimate quoted posting
+  wording (e.g. "No experience necessary") is never rejected merely for its words. Recorded/golden
+  ("cassette") LLM-output testing remains deferred (TEST-002) until several real outputs stabilize
+  — unchanged by this decision. This decision also does not assume the `MEMORY_BUILD` model is
+  necessarily right for `AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` — it was reused there only
+  as an operational convenience (already registered/credentialed/structured-output-capable);
+  per-stage model suitability is something to evaluate from real run outcomes and Gate-1 review,
+  not assumed from Candidate Memory bootstrap.
+
+No live provider call was made or authorized by this work; JobApplication id=9's real, legacy JRA
+remains inspected read-only only, never rerun or edited. Fully tested (812/812 project tests
+passing), `ruff`/`check`/`makemigrations --check` and a genuinely fresh migration on an isolated
+database all clean.
 
 ## What does not exist
 

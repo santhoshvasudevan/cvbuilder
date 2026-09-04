@@ -344,6 +344,13 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   live call was authorized); this remains an honest gap, not silently claimed. D-004's extraction
   library (`readability-lxml`) is selected and recorded. See `docs/CURRENT_STATE.md`'s M4 section
   for full detail.
+- **Update (2026-09-04, D-022/D-023)**: a real controlled Gate-1 preparation run surfaced a live
+  M4 failure a `FakeAdapter`-only test suite could not have caught — a schema-valid AJ analysis
+  with zero requirements (JobApplication id=9). D-022 added a deterministic gate between schema
+  validation and persistence; D-023 immediately corrected its scope to objective integrity only
+  (at least one requirement, no exact duplicates, verifiable provenance), after the first version
+  over-reached into judging wording/meaning. See `docs/CURRENT_STATE.md`'s "Agent Jobber course
+  correction" section for the current, corrected state.
 - **Risks**: real-world fetch reliability is inherently variable (requirements.md calls this an
   "ongoing maintenance concern," not a one-time build) — acceptance criteria test the fallback
   path, not a guarantee that fetching succeeds against arbitrary job boards.

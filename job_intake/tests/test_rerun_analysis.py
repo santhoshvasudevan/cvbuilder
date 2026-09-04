@@ -65,11 +65,23 @@ class RerunAnalysisTests(TestCase):
     def test_rerun_with_new_pasted_text_uses_it(self):
         application = self._make_application()
 
-        # requirements/screening_risks cleared: this short, non-substantive new posting text
-        # shares no vocabulary with the default fixture's source_context quotations, and the
-        # test only cares about original_input/employer routing, not extraction quality.
+        # A single requirement with provenance matching this new, unrelated posting text -- the
+        # default fixture's own source_context quotations don't appear in it, and (D-023) zero
+        # requirements is always rejected regardless of posting length, so a minimal-but-valid
+        # requirement is required here even though this test only cares about original_input/
+        # employer routing, not extraction quality.
         with scripted_analysis(
-            valid_analysis_response(employer="New Employer Inc", requirements=[], screening_risks=[])
+            valid_analysis_response(
+                employer="New Employer Inc",
+                requirements=[
+                    {
+                        "category": "RESPONSIBILITY",
+                        "text": "Do the role",
+                        "source_context": "A completely different posting text.",
+                    }
+                ],
+                screening_risks=[],
+            )
         ):
             jra = rerun_analysis(application, pasted_text="A completely different posting text.")
 

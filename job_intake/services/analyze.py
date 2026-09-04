@@ -6,6 +6,15 @@ Prompt hardening: the posting is explicitly delimited and framed as data, never 
 the same defense-in-depth pattern candidate_memory.services.extraction uses, for the same reason
 (a job posting is untrusted third-party text, and a "successfully injected" response is still only
 ever schema-validated data, never a command).
+
+Responsibility boundary (2026-09-04, D-023): this prompt is where AJ's *semantic* judgment --
+recruiter interpretation, MANDATORY/PREFERRED classification, what counts as a screening risk,
+implied expectations -- is guided. It is deliberately the only place that judgment is guided:
+`../validators/integrity.py` (the deterministic layer between this call and persistence) checks
+only objective integrity, never wording or meaning, and the operator judges semantic correctness
+at Human Review Gate 1. A prompt instruction here (e.g. avoiding candidate-gap phrasing) is
+guidance for the LLM to follow, not a rule enforced in code -- see D-023 for why that split
+matters.
 """
 
 from __future__ import annotations
@@ -58,10 +67,9 @@ bundled into one. Use this categorization:
 - IMPLIED_EXPECTATION: seniority signals, team context, unstated tooling assumptions, and similar
   things the posting does not state outright but a recruiter would reasonably infer from context --
   never presented as if the posting said it literally.
-A posting with real content (a role description, responsibilities, or qualifications) that yields
-zero `requirements` items is treated as a failed analysis downstream -- if the posting describes a
-real job, you must extract its requirements, not summarize them away into `screening_risks` or
-`employer`/`role_title` alone.
+A response with zero `requirements` items is always treated as a failed analysis downstream,
+regardless of how short the posting is -- extract its requirements, never summarize them away
+into `screening_risks` or `employer`/`role_title` alone.
 
 Screening risks -- a narrow, separate category:
 `screening_risks` holds ONLY explicit hiring constraints or conditions the posting itself states

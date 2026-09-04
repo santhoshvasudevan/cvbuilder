@@ -13,7 +13,7 @@ from django.db.models import Max
 from job_applications.models import JobApplication
 
 from ..models import JobRequirement, JobRequirementAnalysis
-from ..validators.sanity import find_sanity_violations
+from ..validators.integrity import find_integrity_violations
 from .analyze import analyze_posting
 from .fetch import fetch_job_posting
 
@@ -29,18 +29,20 @@ class AnalysisFailedError(Exception):
     pass
 
 
-class SemanticValidationError(AnalysisFailedError):
-    """The AJ response is schema-valid but fails a deterministic sanity check (2026-09-04 AJ
-    hardening, D-022) -- e.g. zero requirements for a substantive posting, or candidate-judgment
-    language with no candidate context. A subclass of `AnalysisFailedError` so every existing
-    caller that already handles that (the intake view, Gate-1 feedback re-run) handles this too,
-    without needing its own branch. Raised strictly before the persistence transaction begins:
-    nothing -- no JobApplication, no JobRequirementAnalysis, no JobRequirement, no pointer/phase
-    advancement -- is ever created for a semantically-rejected analysis. The LLMCallLog row from
-    the underlying (successful, schema-valid) call still exists, per LLM-010's "every call is
-    logged regardless of what happens next" -- it stores only token counts/latency/error metadata,
-    never the raw posting or response content, so nothing sensitive is retained by this failure
-    path either."""
+class AnalysisIntegrityError(AnalysisFailedError):
+    """The AJ response is schema-valid but fails a deterministic *integrity* check (2026-09-04 AJ
+    hardening, D-022; course-corrected D-023): zero requirements, a duplicate requirement, or a
+    requirement/screening-risk whose claimed source_context is not actually in the posting. Never
+    a judgment about whether a classification is semantically correct -- that boundary belongs to
+    the AJ LLM and the operator (D-023), not to this exception's callers. A subclass of
+    `AnalysisFailedError` so every existing caller that already handles that (the intake view,
+    Gate-1 feedback re-run) handles this too, without needing its own branch. Raised strictly
+    before the persistence transaction begins: nothing -- no JobApplication, no
+    JobRequirementAnalysis, no JobRequirement, no pointer/phase advancement -- is ever created for
+    a rejected analysis. The LLMCallLog row from the underlying (successful, schema-valid) call
+    still exists, per LLM-010's "every call is logged regardless of what happens next" -- it
+    stores only token counts/latency/error metadata, never the raw posting or response content, so
+    nothing sensitive is retained by this failure path either."""
 
 
 class ConcurrentModificationError(Exception):
@@ -120,10 +122,11 @@ def run_intake(resolved: ResolvedSource) -> JobApplication:
         raise AnalysisFailedError(result.error.message)
     analysis = result.content
 
-    violations = find_sanity_violations(analysis, resolved.extracted_text)
+    violations = find_integrity_violations(analysis, resolved.extracted_text)
     if violations:
-        raise SemanticValidationError(
-            "Agent Jobber's analysis failed a sanity check and was not saved: " + " | ".join(violations)
+        raise AnalysisIntegrityError(
+            "Agent Jobber's analysis failed an integrity check and was not saved: "
+            + " | ".join(violations)
         )
 
     with transaction.atomic():
@@ -194,10 +197,11 @@ def rerun_analysis(
         raise AnalysisFailedError(result.error.message)
     analysis = result.content
 
-    violations = find_sanity_violations(analysis, resolved.extracted_text)
+    violations = find_integrity_violations(analysis, resolved.extracted_text)
     if violations:
-        raise SemanticValidationError(
-            "Agent Jobber's re-analysis failed a sanity check and was not saved: " + " | ".join(violations)
+        raise AnalysisIntegrityError(
+            "Agent Jobber's re-analysis failed an integrity check and was not saved: "
+            + " | ".join(violations)
         )
 
     try:
