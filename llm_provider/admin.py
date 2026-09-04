@@ -24,7 +24,7 @@ class LLMModelAdmin(admin.ModelAdmin):
 
 @admin.register(StageModelAssignment)
 class StageModelAssignmentAdmin(admin.ModelAdmin):
-    list_display = ("stage", "model", "updated_at")
+    list_display = ("stage", "model", "max_output_tokens", "updated_at")
 
 
 @admin.register(LLMCallLog)

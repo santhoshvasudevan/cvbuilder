@@ -1102,3 +1102,67 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   `AnalysisIntegrityError` (still a subclass of `AnalysisFailedError`, so existing callers are
   unaffected). No live provider call was made or authorized by this decision; JobApplication id=9's
   real, legacy JRA (v1) remains inspected read-only only, never rerun or edited.
+
+## D-024: Stage-specific LLM output-token budgets -- separating model capability from request budget
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) — directed by the product owner after a
+  live, authorized AJ_ANALYZE rerun of JobApplication 9 (post D-022/D-023 integration) truncated at
+  exactly 4,096 output tokens (`finish_reason=length`) and produced no valid `JobRequirementAnalysis`.
+  Root cause: `LLMModel.max_output_tokens` was being read by every one of the five stage-caller
+  services (`AJ_ANALYZE`, `AC_NORMALIZE`, `AC_RANK`, `AC_MATCH`, `AB_BUILD`) as *both* the model's
+  own provider capability ceiling *and* every stage's actual per-request budget — one field serving
+  two distinct concerns, with no way to raise AJ_ANALYZE's budget (whose prompt and posting text
+  are larger than the other four stages') without also raising every other stage's budget on the
+  same model, or vice versa.
+- **Requirement**: separate the two concerns without duplicating the resolution logic in each
+  service, and without ever changing AJ's semantic prompt, output schema, integrity validator, or
+  the human-review boundary (D-023) — this is a token-budget plumbing fix only.
+- **Schema**: `StageModelAssignment.max_output_tokens` (new, nullable `PositiveIntegerField`,
+  `MinValueValidator(1)`) — an optional per-stage request-budget override. `LLMModel.
+  max_output_tokens` is unchanged in meaning (a capability ceiling) but gained the same
+  `MinValueValidator(1)` for symmetry. `StageModelAssignment.clean()` rejects (via `ValidationError`,
+  raised by `full_clean()` — the same path the admin's `ModelForm` already calls) a configured stage
+  budget that exceeds its assigned model's own capability whenever that capability is set; a `None`
+  model capability means no declared ceiling to check against (matching this field's existing,
+  pre-D-024 optionality).
+- **Resolution (the shared provider/registry layer, never duplicated in a pipeline app)**:
+  `BaseLLMAdapter.__init__` computes `self.effective_max_output_tokens = llm_model.max_output_tokens
+  or DEFAULT_MAX_OUTPUT_TOKENS` (4,096, the one canonical fallback, now defined once in
+  `llm_provider.adapters.base` rather than as five duplicated per-service module constants) --
+  this is what every adapter has even when constructed directly (e.g. `FakeAdapter(model, ...)` in
+  tests, bypassing the registry entirely), so no existing test needed to change. `get_adapter_for_
+  stage` (the sole production construction point) then *overrides* `effective_max_output_tokens`
+  with the stage's own `StageModelAssignment.max_output_tokens` when one is configured -- after
+  re-validating it against the model's capability and raising `InvalidStageBudgetError` (defense in
+  depth for a row that reached the database without `full_clean()`, e.g. a fixture or script) if it
+  doesn't fit, *before* returning the adapter, i.e. before any provider call could happen. Each of
+  the five stage-caller services was changed from manually recomputing `adapter.llm_model.
+  max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS` to simply reading `adapter.effective_max_output_
+  tokens` -- `job_intake/services/analyze.py` (AJ_ANALYZE) no longer has any hard-coded token
+  literal of its own driving its request budget, satisfying the product owner's explicit "not
+  hard-code 8192 inside Agent Jobber" instruction.
+- **Retry/classification preserved**: `finish_reason=length` truncation is still classified
+  `CONFIGURATION` (excluded from `TRANSIENT_ERROR_CATEGORIES`) and therefore still never retried
+  identically -- this decision changes *what budget is requested*, never how a truncation response
+  is classified. Reasoning-disabled settings and temperature/top-p behavior are untouched (no
+  adapter's `_call_once` or request-building logic beyond the `max_output_tokens` value itself was
+  modified).
+- **Audit metadata**: no `LLMCallLog` field was added to record the per-call requested budget. The
+  effective budget for any given historical call is already fully and deterministically derivable
+  from the `StageModelAssignment`/`LLMModel` state as of that call (`LLMCallLog.stage` plus
+  `created_at` against `StageModelAssignment.updated_at`, in the rare case the assignment changed
+  between calls) -- adding a redundant per-row snapshot field was judged unnecessary schema churn
+  for a value the registry already reconstructs exactly.
+- **Intended configuration (not applied live by this decision -- a separate, explicit follow-up
+  action)**: model capability `16,384`; `AJ_ANALYZE` stage budget `8,192`; `AC_NORMALIZE`/`AC_RANK`/
+  `AC_MATCH` remain `4,096` (unconfigured stage override, model capability providing the effective
+  value); `MEMORY_BUILD` untouched (its own `services/bootstrap.py` per-chunk `max_output_tokens_
+  override` mechanism is a separate, pre-existing concern this decision does not alter); `AB_BUILD`
+  remains unconfigured (no stage override; falls through to the model capability). Verified valid
+  (via `full_clean()`) as a test fixture, but the real development database's `LLMModel`/
+  `StageModelAssignment` rows were left exactly as they were (`max_output_tokens=4096` on the model,
+  no stage overrides) -- only the schema migration was applied, not this configuration.
+- **Consequence**: `llm_provider.0004_stagemodelassignment_max_output_tokens_and_more` (additive:
+  a new nullable field plus validator metadata on the existing field -- no data migration, no
+  existing row's resolved behavior changes). JobApplication 9's JRA (v1) remains untouched and
+  unrerun; no live provider call was made under this decision.

@@ -18,11 +18,24 @@ from ..models import LLMCallLog, LLMModel
 from ..retry import RetryPolicy, execute_with_retry
 from ..types import NormalizedLLMRequest, NormalizedLLMResult, TokenUsage
 
+# The one canonical fallback used when neither a stage-specific budget
+# (`StageModelAssignment.max_output_tokens`) nor a model capability (`LLMModel.max_output_tokens`)
+# is configured (2026-09-04, stage-specific token budgets). Every pipeline service must obtain its
+# effective request budget from `adapter.effective_max_output_tokens` (set here, and possibly
+# overridden by `get_adapter_for_stage` -- see `llm_provider/adapters/__init__.py`) rather than
+# hard-coding its own fallback constant.
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
 
 class BaseLLMAdapter(ABC):
     def __init__(self, llm_model: LLMModel, retry_policy: RetryPolicy | None = None):
         self.llm_model = llm_model
         self.retry_policy = retry_policy or RetryPolicy()
+        # Sensible per-model default, available even when an adapter is constructed directly
+        # (e.g. `FakeAdapter(model, ...)` in tests) rather than through `get_adapter_for_stage` --
+        # `get_adapter_for_stage` overrides this afterward only when the stage's own
+        # `StageModelAssignment.max_output_tokens` is explicitly configured.
+        self.effective_max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
 
     @abstractmethod
     def _call_once(self, request: NormalizedLLMRequest) -> NormalizedLLMResult:

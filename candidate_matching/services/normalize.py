@@ -108,10 +108,10 @@ def expand_requirements_for_search(
     input_ids = [requirement["requirement_id"] for requirement in requirements]
 
     adapter = get_adapter_for_stage(StageModelAssignment.Stage.AC_NORMALIZE)
-    llm_model = adapter.llm_model
-    max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
     request = build_request(
-        requirements, posting_language=posting_language, max_output_tokens=max_output_tokens
+        requirements,
+        posting_language=posting_language,
+        max_output_tokens=adapter.effective_max_output_tokens,
     )
     result: NormalizedLLMResult = adapter.generate(request)
 

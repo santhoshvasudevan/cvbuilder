@@ -6,6 +6,8 @@ state: which providers/models exist, which model handles which stage, and the au
 every call made (docs/ARCHITECTURE.md Sec 3/Sec 4).
 """
 
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 
 
@@ -51,7 +53,17 @@ class LLMModel(models.Model):
     supports_structured_output = models.BooleanField(default=False)
     supports_streaming = models.BooleanField(default=False)
     supports_reasoning = models.BooleanField(default=False)
-    max_output_tokens = models.PositiveIntegerField(null=True, blank=True)
+    max_output_tokens = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text=(
+            "Provider/model capability ceiling -- the most output tokens this model can ever "
+            "return, regardless of which stage is calling it. Never a per-stage request budget "
+            "(see StageModelAssignment.max_output_tokens for that); a stage assignment's own "
+            "budget may never exceed this value."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -81,7 +93,38 @@ class StageModelAssignment(models.Model):
 
     stage = models.CharField(max_length=20, choices=Stage.choices, unique=True)
     model = models.ForeignKey(LLMModel, on_delete=models.PROTECT, related_name="stage_assignments")
+    max_output_tokens = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1)],
+        help_text=(
+            "Optional per-stage request budget (2026-09-04, stage-specific token budgets). When "
+            "set, this stage's requests use this value instead of the assigned model's own "
+            "max_output_tokens; it must never exceed that model capability. Leave blank to use "
+            "the model's capability (or a conservative built-in default if the model doesn't "
+            "declare one) -- the previous, single-budget-per-model behavior."
+        ),
+    )
     updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        super().clean()
+        if self.max_output_tokens is None:
+            return
+        try:
+            model_capability = self.model.max_output_tokens
+        except LLMModel.DoesNotExist:
+            return
+        if model_capability is not None and self.max_output_tokens > model_capability:
+            raise ValidationError(
+                {
+                    "max_output_tokens": (
+                        f"Stage budget ({self.max_output_tokens}) exceeds the assigned model "
+                        f"{self.model}'s capability ({model_capability}) -- lower the stage "
+                        "budget or raise the model's own max_output_tokens first."
+                    )
+                }
+            )
 
     def __str__(self) -> str:
         return f"{self.stage} -> {self.model}"

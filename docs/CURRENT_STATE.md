@@ -1,11 +1,15 @@
 # Current State
 
-Last updated: 2026-09-04 (recall-repair work on top of M5/M6, committed -- see "Bounded retrieval
-recall repair (2026-09-04, D-021)" below. An initial verification pass measured exact-claim-ID
-recall against a five-profile gold set (16/19); the product owner then replaced that acceptance
-bar with requirement-level evidence coverage, and an acceptance review confirmed the three
-unreached claims are each genuinely redundant with claims that did reach the pool -- see D-021 for
-the full, claim-by-claim comparison.). Previously, as of 2026-09-03: M5 and M6 implemented, tested, committed,
+Last updated: 2026-09-04 (stage-specific LLM output-token budgets, committed -- see "Stage-specific
+LLM output-token budgets (2026-09-04, D-024)" below, motivated by a real AJ_ANALYZE rerun of
+JobApplication 9 truncating at the model's shared 4,096-token capability. Not applied live: the
+intended 16,384/8,192 configuration is a separate follow-up action.). Previously, also 2026-09-04:
+recall-repair work on top of M5/M6, committed -- see "Bounded retrieval recall repair (2026-09-04,
+D-021)" below. An initial verification pass measured exact-claim-ID recall against a five-profile
+gold set (16/19); the product owner then replaced that acceptance bar with requirement-level
+evidence coverage, and an acceptance review confirmed the three unreached claims are each
+genuinely redundant with claims that did reach the pool -- see D-021 for the full, claim-by-claim
+comparison. Previously, as of 2026-09-03: M5 and M6 implemented, tested, committed,
 independently audited, and hardened based on that audit -- see "M5/M6 audit hardening (2026-09-03,
 D-020)" below for the two release-blocking corrections. M5 -- Agent Candidate, matching, and Human
 Review Gate 1 -- and M6 -- Agent Builder and Human Review Gate 2 -- are both complete: bounded,
@@ -926,6 +930,43 @@ remains inspected read-only only, never rerun or edited. Fully tested (812/812 p
 passing), `ruff`/`check`/`makemigrations --check` and a genuinely fresh migration on an isolated
 database all clean.
 
+## Stage-specific LLM output-token budgets (2026-09-04, D-024) -- COMMITTED
+
+A separately-authorized, real AJ_ANALYZE rerun of JobApplication 9 (against the merged D-022/D-023
+code) truncated at exactly 4,096 output tokens (`finish_reason=length`) and produced no valid
+`JobRequirementAnalysis` -- `LLMModel.max_output_tokens` was being read as both the model's own
+provider capability ceiling *and* every stage's per-request budget, with no way to give AJ_ANALYZE
+(a larger prompt/posting than the other four stages) a bigger budget without also raising or
+lowering every other stage sharing the same model. See D-024 in `docs/DECISIONS.md` for full
+detail; summarized here:
+
+- New, optional `StageModelAssignment.max_output_tokens` field (nullable, `MinValueValidator(1)`,
+  cross-validated in `clean()` against the assigned model's own capability whenever that capability
+  is set -- enforced both by the admin form and, as defense in depth, by `get_adapter_for_stage`
+  itself before any provider call, raising `InvalidStageBudgetError` for a row that reached the
+  database without validation).
+- `BaseLLMAdapter.effective_max_output_tokens` is the one value every pipeline service now reads
+  (`adapter.effective_max_output_tokens`) instead of separately recomputing `adapter.llm_model.
+  max_output_tokens or <a locally hard-coded 4096>` -- computed from the model's own capability (or
+  one canonical shared default, `llm_provider.adapters.base.DEFAULT_MAX_OUTPUT_TOKENS`) by
+  `BaseLLMAdapter.__init__`, then overridden by `get_adapter_for_stage` only when the stage's own
+  budget is configured. `job_intake/services/analyze.py` (AJ_ANALYZE) no longer has any
+  hard-coded token literal driving its own request budget.
+- Retry classification is unchanged: `finish_reason=length` truncation is still `CONFIGURATION`
+  (never retried identically) -- this fix changes what budget is *requested*, never how a
+  truncation response is classified.
+- **Not applied live**: the real development database's `LLMModel`/`StageModelAssignment` rows are
+  unchanged (`max_output_tokens=4096` on the shared model, no stage overrides) -- only the
+  additive schema migration (`llm_provider.0004_stagemodelassignment_max_output_tokens_and_more`)
+  was applied. Raising the model capability to 16,384 and setting `AJ_ANALYZE`'s stage budget to
+  8,192 is a separate, explicit follow-up configuration action, not performed by this change.
+
+Fully tested (829/829 project tests passing, 17 new dedicated tests), `ruff`/`check`/
+`makemigrations --check` all clean, plus a genuinely fresh, isolated PostgreSQL database (created
+and dropped via `docker exec` against the running `cvbuilder-db-1` container, not Django's own
+test-runner database) had every migration -- including the new one -- applied cleanly from zero.
+No live provider call was made under this decision; JobApplication 9's JRA remains untouched.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -955,8 +996,10 @@ requirement normalization, see "Bounded retrieval recall repair" above) is **APP
 IMPLEMENTED** -- verified against a requirement-level evidence-coverage standard (the product
 owner's explicit replacement for exact-claim-ID recall) rather than exact-claim-ID recall against
 the five gold profiles; an acceptance review confirmed the three claims short of exact-ID recall
-are all genuinely redundant with claims that did reach the pool. Neither D-016 nor anything else is
-blocking for M7 as currently scoped.
+are all genuinely redundant with claims that did reach the pool. D-022/D-023 (Agent Jobber
+integrity hardening and its course correction, see the sections above) and D-024 (stage-specific
+LLM output-token budgets, see "Stage-specific LLM output-token budgets" above) are all **APPROVED
+AND IMPLEMENTED**. Neither D-016 nor anything else is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

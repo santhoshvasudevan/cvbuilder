@@ -98,7 +98,10 @@ def generate_resume_content(
     jra, requirement_assessments: list, retrieval: RetrievalContext
 ) -> NormalizedLLMResult:
     adapter = get_adapter_for_stage(StageModelAssignment.Stage.AB_BUILD)
-    llm_model = adapter.llm_model
-    max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
-    request = build_request(jra, requirement_assessments, retrieval, max_output_tokens=max_output_tokens)
+    request = build_request(
+        jra,
+        requirement_assessments,
+        retrieval,
+        max_output_tokens=adapter.effective_max_output_tokens,
+    )
     return adapter.generate(request)

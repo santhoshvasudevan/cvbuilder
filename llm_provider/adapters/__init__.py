@@ -9,7 +9,7 @@ from __future__ import annotations
 from django.conf import settings
 
 from ..models import LLMProvider, StageModelAssignment
-from .base import BaseLLMAdapter
+from .base import DEFAULT_MAX_OUTPUT_TOKENS, BaseLLMAdapter
 from .fake import FakeAdapter
 from .gemini import GeminiAdapter
 from .nvidia import NvidiaNimAdapter
@@ -33,11 +33,28 @@ class FakeProviderNotAllowedError(Exception):
     relying on the registry at all, so this guard never fires for the existing test suite."""
 
 
+class InvalidStageBudgetError(Exception):
+    """Raised by `get_adapter_for_stage` when a stage's own `StageModelAssignment.
+    max_output_tokens` exceeds its assigned model's `max_output_tokens` capability (2026-09-04,
+    stage-specific token budgets). `StageModelAssignment.clean()` already rejects this at
+    admin-save time -- this is defense in depth against a row that reached the database without
+    going through `full_clean()` (e.g. a fixture, a script, `objects.create()`), so a
+    misconfigured budget is caught here, before any provider call, rather than silently sent to
+    the provider or silently clamped."""
+
+
 def get_adapter_for_stage(stage: str) -> BaseLLMAdapter:
     """Look up which LLMModel is currently assigned to `stage` and return an adapter instance
     for it. This is the *only* place pipeline code needs to call to route a stage to whichever
     provider/model the registry currently assigns -- changing the assignment in the admin UI
     changes the routing with zero code change.
+
+    The returned adapter's `effective_max_output_tokens` (2026-09-04) is the one value every
+    pipeline service must use as its request budget: the stage's own `StageModelAssignment.
+    max_output_tokens` when configured, otherwise the model's own capability (or a conservative
+    built-in default if neither is set) -- `BaseLLMAdapter.__init__` already computes that
+    fallback, so this function only ever needs to *override* it when a stage-specific budget is
+    configured, never to duplicate the fallback logic.
     """
     assignment = StageModelAssignment.objects.select_related("model__provider").get(stage=stage)
     llm_model = assignment.model
@@ -49,15 +66,27 @@ def get_adapter_for_stage(stage: str) -> BaseLLMAdapter:
             "Reassign this stage to a real provider/model via the registry admin before using it."
         )
     adapter_cls = ADAPTER_CLASSES[provider_type]
-    return adapter_cls(llm_model)
+    adapter = adapter_cls(llm_model)
+    if assignment.max_output_tokens is not None:
+        model_capability = llm_model.max_output_tokens
+        if model_capability is not None and assignment.max_output_tokens > model_capability:
+            raise InvalidStageBudgetError(
+                f"Stage {stage!r}'s configured max_output_tokens ({assignment.max_output_tokens}) "
+                f"exceeds {llm_model}'s capability ({llm_model.max_output_tokens}) -- fix the "
+                "StageModelAssignment before this stage can be used."
+            )
+        adapter.effective_max_output_tokens = assignment.max_output_tokens
+    return adapter
 
 
 __all__ = [
     "ADAPTER_CLASSES",
     "BaseLLMAdapter",
+    "DEFAULT_MAX_OUTPUT_TOKENS",
     "FakeAdapter",
     "FakeProviderNotAllowedError",
     "GeminiAdapter",
+    "InvalidStageBudgetError",
     "NvidiaNimAdapter",
     "OpenAIAdapter",
     "get_adapter_for_stage",
