@@ -63,6 +63,14 @@ milestone scope):
   no live credential or network involved in the automated suite; the manual opt-in smoke
   verification item above remains the only place a real OpenRouter call is ever made, and only by
   explicit operator action.
+
+  **Same-day amendment**: the first pass at this fix had one incorrect rule — a `finish_reason=
+  "length"` response with content that happened to still parse as valid JSON was accepted as a
+  success rather than always classified `CONFIGURATION`. `test_null_content_handling.py` was
+  corrected accordingly (the wrong-category test was replaced, not silently deleted — see the
+  file's own docstring amendment and D-026 in `docs/DECISIONS.md`), and gained explicit coverage
+  for exactly that case (valid JSON + `finish_reason=length` → `CONFIGURATION`, never success) at
+  both the shared-parser and representative-adapter levels.
 - **M3 (`candidate_memory`, D-015)**: `confirmation_status` state transitions (`unconfirmed` →
   `confirmed`/`retired`/`BLOCKED_CONFLICT`, and that retrieval excludes anything not
   `confirmed`+`resume_eligible`); versioning invariants (a new `CandidateMemory` revision leaves

@@ -96,30 +96,36 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
     # reasoning content (D-026).
     content_str = message.get("content") if isinstance(message, dict) else None
 
-    if not isinstance(content_str, str) or not content_str.strip():
-        if finish_reason == "length":
-            # The provider truncated the response at max_output_tokens before any (or enough)
-            # visible content was emitted -- observed with reasoning models that can spend the
-            # entire budget "thinking" before writing a final answer. This is a configuration
-            # problem (the token limit for this model/prompt), not a malformed request and not a
-            # transient failure -- CONFIGURATION is deliberately excluded from
-            # TRANSIENT_ERROR_CATEGORIES, so callers must never retry it blindly.
-            return NormalizedLLMResult(
-                error=NormalizedLLMError(
-                    category=LLMErrorCategory.CONFIGURATION,
-                    message=(
-                        "Provider truncated output at the configured token limit before "
-                        "producing usable final content (finish_reason=length). Raise "
-                        "max_output_tokens or reduce reasoning for this model -- not a transient "
-                        "failure, do not retry with identical settings."
-                    ),
+    if finish_reason == "length":
+        # A `length` finish reason unconditionally means the provider stopped generating because
+        # it hit the configured output-token limit -- reported the same way regardless of what
+        # `message.content` happens to contain (missing/None/empty/non-string/malformed JSON, or
+        # even a string that happens to parse as valid JSON): truncated output may be an
+        # incomplete answer, so it must never be accepted as a genuine final answer merely because
+        # its partial text parses (D-026 correction, 2026-09-04 -- a first pass at this fix let a
+        # `length` response with parseable JSON content through as a success, which is exactly the
+        # "accept truncated content because it happens to parse" bug this invariant forbids).
+        # Always a configuration problem (the token limit for this model/prompt), never a
+        # malformed request and never transient -- CONFIGURATION is deliberately excluded from
+        # TRANSIENT_ERROR_CATEGORIES, so callers must never retry it blindly.
+        return NormalizedLLMResult(
+            error=NormalizedLLMError(
+                category=LLMErrorCategory.CONFIGURATION,
+                message=(
+                    "Provider truncated output at the configured token limit (finish_reason="
+                    "length) -- any content present may be incomplete and is never accepted as a "
+                    "final answer. Raise max_output_tokens or reduce reasoning for this model -- "
+                    "not a transient failure, do not retry with identical settings."
                 ),
-                usage=usage,
-            )
-        # Absent/None/non-string/empty/whitespace-only content with any other (or missing)
-        # finish_reason is a malformed/invalid provider response, not a token-budget problem --
-        # the same non-transient category already used for unparseable content below, never
-        # retried (SCHEMA_VALIDATION is not in TRANSIENT_ERROR_CATEGORIES).
+            ),
+            usage=usage,
+        )
+
+    if not isinstance(content_str, str) or not content_str.strip():
+        # Absent/None/non-string/empty/whitespace-only content with a non-`length` finish reason
+        # is a malformed/invalid provider response, not a token-budget problem -- the same
+        # non-transient category used for unparseable content below, never retried
+        # (SCHEMA_VALIDATION is not in TRANSIENT_ERROR_CATEGORIES).
         return NormalizedLLMResult(
             error=NormalizedLLMError(
                 category=LLMErrorCategory.SCHEMA_VALIDATION,

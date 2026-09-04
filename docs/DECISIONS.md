@@ -1393,6 +1393,26 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   shape that previously vanished. No raw response body, prompt, or reasoning content is ever
   included in a returned error message or logged field, matching every other classification branch
   already in this function.
+- **Amendment (2026-09-04, same-day correction, commit on top of `002ff833`)**: the paragraph above
+  describes this decision's *first* implementation pass, which got one case wrong and is preserved
+  here rather than rewritten, per this project's standing rule against silently rewriting decision
+  history. That first pass let a `finish_reason == "length"` response through to the ordinary
+  `json.loads` success path whenever its content was a present, non-empty string -- including when
+  that string happened to still parse as valid JSON. That is exactly the "accept truncated content
+  because it happens to parse" bug this decision's own required invariant forbids: `length` means
+  the provider stopped because it hit the output-token limit, not because it finished, so content
+  present under a `length` finish reason may be an incomplete answer and must never be accepted as
+  a genuine one merely because it parses. The corrected rule, now in effect: `finish_reason ==
+  "length"` is checked **first**, before any content extraction or JSON parsing is attempted, and
+  classifies as `CONFIGURATION` unconditionally -- regardless of whether `message.content` is
+  missing, `None`, non-string, empty, whitespace-only, malformed JSON, or valid JSON. Every other
+  finish reason keeps the behavior described above (missing/invalid content -> `SCHEMA_VALIDATION`;
+  malformed JSON -> `SCHEMA_VALIDATION`; valid JSON -> success, unchanged). `llm_provider/tests/
+  test_null_content_handling.py` was updated to match: the now-incorrect test asserting
+  `SCHEMA_VALIDATION` for malformed-content-with-`length` was replaced by tests asserting
+  `CONFIGURATION` for both malformed-and-length and (critically, the case that was actually wrong)
+  valid-JSON-and-length, at both the shared-parser and representative-adapter levels, with an
+  explicit amendment note in that file's own docstring.
 - **Smoke-budget fix** (`llm_provider/smoke/common.py`): a new `resolve_smoke_max_output_tokens`
   resolves the smoke request's output-token budget -- 64 by default (unchanged for a plain
   request), 4,096 when `--reasoning` is set (`DEFAULT_REASONING_SMOKE_MAX_OUTPUT_TOKENS`), an
@@ -1423,12 +1443,17 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   `requests.post`, and that no `LLMModel`/`StageModelAssignment` row is mutated). One new test
   (`test_openrouter_adapter_generate_never_reaches_the_network`) was added to the existing
   `test_network_guard.py`, closing a gap where OpenAI/NVIDIA/Gemini were already covered but
-  OpenRouter was not. Full suite: 927/927 passing (up from 875), `manage.py check`/
-  `makemigrations --check --dry-run` (no changes detected)/`ruff check .`/`git diff --check` all
-  clean. All migrations (unchanged in count/content by this decision) were additionally re-verified
-  applying cleanly from zero on a fresh, isolated, throwaway `postgres:16-alpine` Docker container
-  on a non-default port, removed immediately after verification. This work was isolated in
-  worktree `openrouter-null-content-fix` / branch `worktree-openrouter-null-content-fix`.
+  OpenRouter was not. Full suite after the initial pass: 927/927 passing (up from 875); after the
+  same-day amendment above (which added the valid-JSON-and-`length` coverage at both the
+  shared-parser and adapter levels and corrected the now-invalid malformed-and-`length`
+  assertion): **935/935 passing**. `manage.py check`/`makemigrations --check --dry-run` (no
+  changes detected)/`ruff check .`/`git diff --check` all clean at every step. All migrations
+  (unchanged in count/content by this decision, both before and after the amendment) were
+  additionally re-verified applying cleanly from zero on a fresh, isolated, throwaway
+  `postgres:16-alpine` Docker container on a non-default port, removed immediately after
+  verification. This work was isolated in worktree `openrouter-null-content-fix` / branch
+  `worktree-openrouter-null-content-fix`; the amendment is a separate commit on top of the
+  initial `002ff833`, never an amended/rewritten commit.
 - **Not done in this session (out of scope, per explicit instruction)**: no live provider call was
   made; no `StageModelAssignment` was created, changed, or pointed at OpenRouter; no M5/M6 process
   ran; no Gate was approved; JobApplication 9 and its JRA (id 10, v2) were untouched. A separately

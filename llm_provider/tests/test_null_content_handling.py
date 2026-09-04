@@ -15,6 +15,18 @@ malformed-content variants) directly against the shared parser, then re-prove th
 end-to-end through representative NVIDIA NIM, OpenAI, and OpenRouter adapter paths -- all three
 share `parse_openai_style_chat_completion` -- including that exactly one sanitized `LLMCallLog`
 row is written per logical call and that no prompt/reasoning/credential content ever reaches it.
+
+**Amendment (2026-09-04, same-day correction)**: the first pass at this fix let a `finish_reason=
+"length"` response through as a *success* whenever its (possibly truncated) content still happened
+to parse as valid JSON -- e.g. `test_malformed_json_string_with_finish_reason_length_stays_schema_
+validation` (removed below) asserted `SCHEMA_VALIDATION` for that combination instead of the
+correct `CONFIGURATION`. That was wrong: a `length` finish reason unconditionally means the
+provider stopped because it hit the output-token limit, not because it finished, so truncated
+content must never be accepted as a genuine final answer merely because it happens to parse. The
+parser and the tests below (`test_valid_json_string_with_finish_reason_length_is_configuration_
+not_success` and its adapter-level counterpart) now enforce `finish_reason == "length"` ->
+`CONFIGURATION` unconditionally, checked before any content parsing is attempted, regardless of
+what shape or validity `message.content` has.
 """
 
 from __future__ import annotations
@@ -109,24 +121,40 @@ class SharedParserNullContentTests(SimpleTestCase):
         result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
         self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
 
-    def test_malformed_json_string_stays_schema_validation(self):
+    def test_malformed_json_string_with_finish_reason_stop_stays_schema_validation(self):
         payload = {"choices": [{"finish_reason": "stop", "message": {"content": "not json"}}]}
         result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
         self.assertEqual(result.error.category, LLMErrorCategory.SCHEMA_VALIDATION)
 
-    def test_malformed_json_string_with_finish_reason_length_stays_schema_validation(self):
-        """Point 6/spec: a *present*, non-empty-but-unparseable content string always routes
-        through the malformed-content failure -- `finish_reason=length` only reclassifies the
-        missing/empty/non-string-content bucket, never a genuinely malformed JSON string."""
+    def test_malformed_json_string_with_finish_reason_length_is_configuration(self):
+        """D-026 correction (2026-09-04): `finish_reason=length` reports output-budget exhaustion
+        unconditionally -- it must never fall through to the malformed-content bucket just because
+        the (possibly truncated) content also happens to be unparseable JSON."""
         payload = {"choices": [{"finish_reason": "length", "message": {"content": "not json"}}]}
         result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
-        self.assertEqual(result.error.category, LLMErrorCategory.SCHEMA_VALIDATION)
+        self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
 
-    def test_valid_json_string_still_succeeds(self):
+    def test_numeric_content_with_finish_reason_length_is_configuration(self):
+        payload = {"choices": [{"finish_reason": "length", "message": {"content": 42}}]}
+        result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
+        self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
+
+    def test_valid_json_string_with_finish_reason_stop_succeeds(self):
         payload = {"choices": [{"finish_reason": "stop", "message": {"content": '{"ok": true}'}}]}
         result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
         self.assertFalse(result.is_error)
         self.assertEqual(result.content, {"ok": True})
+
+    def test_valid_json_string_with_finish_reason_length_is_configuration_not_success(self):
+        """The critical case a first pass at this fix got wrong: truncated output whose partial
+        text happens to still parse as valid JSON must never be accepted as a genuine final
+        answer -- `finish_reason=length` means the provider stopped because it hit the token
+        limit, not because it finished; content must never be trusted merely because it parses."""
+        payload = {"choices": [{"finish_reason": "length", "message": {"content": '{"ok": true}'}}]}
+        result = parse_openai_style_chat_completion(_FakeResponse(payload=payload))
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
+        self.assertIn("finish_reason=length", result.error.message)
 
     def test_reasoning_fields_never_substitute_for_missing_content(self):
         payload = {
@@ -259,6 +287,43 @@ class _AdapterNullContentAuditMixin:
         self.assertEqual(result.error.category, LLMErrorCategory.SCHEMA_VALIDATION)
         self.assertEqual(post_mock.call_count, 1)  # never retried
         self.assertEqual(LLMCallLog.objects.count(), 1)
+
+    def test_valid_json_content_with_finish_reason_length_is_never_accepted_as_success(self):
+        """D-026 correction: truncated output whose partial text happens to still parse as valid
+        JSON must never be accepted as a genuine final answer -- proven end-to-end through the
+        real adapter/logging path, not just at the parser level."""
+        payload = {
+            "choices": [{"finish_reason": "length", "message": {"content": '{"ok": true}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 64, "total_tokens": 69},
+        }
+        with mock.patch.dict("os.environ", {self.env_var: _PLANTED_API_KEY}):
+            with mock.patch(
+                "requests.post", return_value=_FakeResponse(payload=payload)
+            ) as post_mock:
+                result = self.adapter_cls(self.model).generate(_request())
+
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
+        self.assertEqual(post_mock.call_count, 1)  # never retried
+        self.assertEqual(LLMCallLog.objects.count(), 1)
+        log = LLMCallLog.objects.get()
+        self.assertEqual(log.error_category, LLMErrorCategory.CONFIGURATION.value)
+        self.assertIn("finish_reason=length", log.error_message)
+
+    def test_valid_non_truncated_response_still_succeeds(self):
+        """Sanity check that this correction changes nothing about the ordinary success path."""
+        payload = {
+            "choices": [{"finish_reason": "stop", "message": {"content": '{"ok": true}'}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }
+        with mock.patch.dict("os.environ", {self.env_var: _PLANTED_API_KEY}):
+            with mock.patch("requests.post", return_value=_FakeResponse(payload=payload)):
+                result = self.adapter_cls(self.model).generate(_request())
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content.ok, True)
+        self.assertEqual(LLMCallLog.objects.count(), 1)
+        self.assertEqual(LLMCallLog.objects.get().error_category, "")
 
 
 class NvidiaNullContentAuditTests(_AdapterNullContentAuditMixin, TestCase):

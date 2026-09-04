@@ -1044,30 +1044,43 @@ smoke budget on reasoning and returned no final answer, `finish_reason=length`),
 including the precise root cause and every classification rule, is in D-026 in
 `docs/DECISIONS.md`; summarized here:
 
-- **Fix**: the parser now extracts `finish_reason` and `message.content` defensively and accepts a
-  final answer only when it is a non-empty, non-whitespace string -- never `reasoning`/
-  `reasoning_content`/`reasoning_details`. Absent/`None`/non-string/empty/whitespace-only content
-  classifies as `CONFIGURATION` when `finish_reason == "length"` (a token-budget problem, never
-  retried) or `SCHEMA_VALIDATION` otherwise (a malformed response, never retried); a present but
-  unparseable JSON string always stays `SCHEMA_VALIDATION` regardless of `finish_reason`. Every
-  path now returns a normal `NormalizedLLMResult`, so `_write_call_log()` always runs -- the
+- **Fix (current, corrected rule)**: the parser now checks `finish_reason` first, before any
+  content extraction or JSON parsing is attempted. `finish_reason == "length"` classifies as
+  `CONFIGURATION` (a token-budget problem, never retried) **unconditionally** -- regardless of
+  whether `message.content` is missing, `None`, non-string, empty, whitespace-only, malformed
+  JSON, or even valid JSON, since truncated output may be an incomplete answer and must never be
+  accepted as genuine merely because it happens to parse. Every other finish reason: absent/`None`/
+  non-string/empty/whitespace-only content classifies `SCHEMA_VALIDATION`; a present-but-unparseable
+  JSON string also stays `SCHEMA_VALIDATION`; valid JSON succeeds normally. Reasoning fields
+  (`reasoning`/`reasoning_content`/`reasoning_details`) are never read as a content substitute.
+  Every path now returns a normal `NormalizedLLMResult`, so `_write_call_log()` always runs -- the
   missing-audit-row gap is closed. Applies uniformly to OpenAI, NVIDIA NIM, and OpenRouter (the
   three adapters sharing this parser); Gemini/Fake were not touched.
+- **Amendment (same day)**: the first implementation pass got one case wrong -- it accepted a
+  `finish_reason="length"` response as a *success* whenever its content was present and happened to
+  parse as valid JSON, instead of always classifying `length` as `CONFIGURATION`. This was corrected
+  in a follow-up commit (never by rewriting the first one) after an explicit invariant check caught
+  it; see D-026 in `docs/DECISIONS.md` for the full before/after and the specific test that asserted
+  the wrong category and was replaced.
 - **Smoke budget**: `llm_provider/smoke/common.py` gained `resolve_smoke_max_output_tokens` (64
   default, 4,096 when `--reasoning` is set, an 8,192 smoke-only safety ceiling, never exceeding the
   selected model's own capability, validated before any provider call) and
   `smoke_test_openrouter` gained `--max-output-tokens`. Does not touch `LLMModel.max_output_
-  tokens`, any `StageModelAssignment`, or any application-stage budget.
-- **No migration**: nothing schema-shaped changed; `makemigrations --check --dry-run` confirmed it.
+  tokens`, any `StageModelAssignment`, or any application-stage budget. Unchanged by the amendment.
+- **No migration**: nothing schema-shaped changed; `makemigrations --check --dry-run` confirmed it,
+  both before and after the amendment.
 - **Tests**: two new modules (`test_null_content_handling.py`, `test_smoke_output_budget.py`) plus
   one addition to `test_network_guard.py` (OpenRouter was missing from its adapter coverage).
-  Full suite: 927/927 passing (up from 875); `check`/`makemigrations --check --dry-run`/
-  `ruff check .`/`git diff --check` all clean; all migrations re-verified from zero on a fresh,
-  isolated, throwaway PostgreSQL container.
+  Full suite: 927/927 passing after the initial pass (up from 875); **935/935 passing** after the
+  amendment (added valid-JSON-and-`length` coverage at both the parser and adapter levels; replaced
+  the one test that had asserted the wrong category). `check`/`makemigrations --check --dry-run`/
+  `ruff check .`/`git diff --check` all clean at every step; all migrations re-verified from zero on
+  a fresh, isolated, throwaway PostgreSQL container both before and after the amendment.
 - **Not done in this session**: no live provider call; no `StageModelAssignment` created or
-  changed; JobApplication 9 / JRA id 10 (v2) untouched; no Gate approved. This was implemented and
-  verified in isolated worktree `openrouter-null-content-fix` / branch
-  `worktree-openrouter-null-content-fix`.
+  changed; JobApplication 9 / JRA id 10 (v2) untouched; no Gate approved. This was implemented,
+  corrected, and verified in isolated worktree `openrouter-null-content-fix` / branch
+  `worktree-openrouter-null-content-fix`, as two separate commits (the initial fix, then the
+  amendment) on top of `main` HEAD `a541a0a` -- neither merged into `main`.
 - **Next action**: a separately authorized re-run of `python manage.py smoke_test_openrouter
   --reasoning --max-output-tokens 4096` against the real `LLMProvider` id 9 / `LLMModel` id 10 rows
   to confirm the fix against a genuine reasoning-enabled response, before any `StageModelAssignment`
