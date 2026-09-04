@@ -15,6 +15,7 @@ from ..adapters.fake import FakeAdapter
 from ..adapters.gemini import GeminiAdapter
 from ..adapters.nvidia import NvidiaNimAdapter
 from ..adapters.openai import OpenAIAdapter
+from ..adapters.openrouter import OpenRouterAdapter
 from ..models import LLMProvider
 from ..testing import BlockedNetworkCallError
 from ..types import NormalizedLLMRequest
@@ -83,6 +84,12 @@ class RealAdapterCallPathIsBlockedTests(TestCase):
         with mock.patch.dict("os.environ", {"DUMMY_TEST_CREDENTIAL": "not-a-real-key"}):
             with self.assertRaises(BlockedNetworkCallError):
                 GeminiAdapter(model).generate(_request())
+
+    def test_openrouter_adapter_generate_never_reaches_the_network(self):
+        model = self._model_with_dummy_credential(LLMProvider.ProviderType.OPENROUTER)
+        with mock.patch.dict("os.environ", {"DUMMY_TEST_CREDENTIAL": "not-a-real-key"}):
+            with self.assertRaises(BlockedNetworkCallError):
+                OpenRouterAdapter(model).generate(_request())
 
 
 class FakeAdapterIsUnaffectedByTheGuardTests(TestCase):

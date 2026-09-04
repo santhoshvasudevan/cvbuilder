@@ -79,15 +79,24 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
         output_tokens=usage_raw.get("completion_tokens"),
         total_tokens=usage_raw.get("total_tokens"),
     )
+
     try:
-        content_str = payload["choices"][0]["message"]["content"]
-        content_dict = json.loads(content_str)
-    except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        finish_reason = None
-        try:
-            finish_reason = payload["choices"][0].get("finish_reason")
-        except (KeyError, IndexError, TypeError):
-            pass
+        choice = payload["choices"][0]
+    except (KeyError, IndexError, TypeError) as exc:
+        return NormalizedLLMResult(
+            error=NormalizedLLMError.from_exception(LLMErrorCategory.SCHEMA_VALIDATION, exc),
+            usage=usage,
+        )
+
+    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    message = choice.get("message") if isinstance(choice, dict) else None
+    # The final answer is read only from `message.content` -- `reasoning`/`reasoning_content`/
+    # `reasoning_details` (whatever shape a given provider uses for its chain-of-thought) are
+    # never read as a substitute, transport behavior never infers a missing final answer from
+    # reasoning content (D-026).
+    content_str = message.get("content") if isinstance(message, dict) else None
+
+    if not isinstance(content_str, str) or not content_str.strip():
         if finish_reason == "length":
             # The provider truncated the response at max_output_tokens before any (or enough)
             # visible content was emitted -- observed with reasoning models that can spend the
@@ -100,13 +109,28 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
                     category=LLMErrorCategory.CONFIGURATION,
                     message=(
                         "Provider truncated output at the configured token limit before "
-                        "producing valid content (finish_reason=length). Raise max_output_tokens "
-                        "or reduce reasoning for this model -- not a transient failure, do not "
-                        "retry with identical settings."
+                        "producing usable final content (finish_reason=length). Raise "
+                        "max_output_tokens or reduce reasoning for this model -- not a transient "
+                        "failure, do not retry with identical settings."
                     ),
                 ),
                 usage=usage,
             )
+        # Absent/None/non-string/empty/whitespace-only content with any other (or missing)
+        # finish_reason is a malformed/invalid provider response, not a token-budget problem --
+        # the same non-transient category already used for unparseable content below, never
+        # retried (SCHEMA_VALIDATION is not in TRANSIENT_ERROR_CATEGORIES).
+        return NormalizedLLMResult(
+            error=NormalizedLLMError(
+                category=LLMErrorCategory.SCHEMA_VALIDATION,
+                message=f"Provider response has no usable final content (finish_reason={finish_reason!r}).",
+            ),
+            usage=usage,
+        )
+
+    try:
+        content_dict = json.loads(content_str)
+    except json.JSONDecodeError as exc:
         return NormalizedLLMResult(
             error=NormalizedLLMError.from_exception(LLMErrorCategory.SCHEMA_VALIDATION, exc),
             usage=usage,

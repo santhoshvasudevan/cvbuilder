@@ -46,6 +46,23 @@ milestone scope):
   required. Per this file's standing rule (and CLAUDE.md), none of these tests assert resume
   quality or recruiter-judgment semantics — that stays out of scope for a provider-transport
   test file, same as for the other three adapters.
+
+  **(2026-09-04 addition, D-026) Null/invalid final-content handling + smoke-budget tests**: a
+  live OpenRouter smoke test (run after D-025 was merged to `main` and real registry rows were
+  created) surfaced a genuine uncaught-exception bug in the shared `parse_openai_style_chat_
+  completion` parser when a reasoning-enabled model returned `message.content=None`. Fixed and
+  covered by `llm_provider/tests/test_null_content_handling.py` (the exact real response shape
+  plus its content-type/emptiness/finish_reason variants, exercised directly against the shared
+  parser and end-to-end through representative NVIDIA NIM/OpenAI/OpenRouter adapter calls —
+  proving exactly one sanitized `LLMCallLog` row is written per logical call, zero retries, usage/
+  finish-reason preserved, and that no prompt/reasoning/credential content ever reaches a logged
+  field) and `llm_provider/tests/test_smoke_output_budget.py` (the separated reasoning/
+  non-reasoning smoke output-token budgets and their validation, including that an invalid value
+  never reaches `requests.post` and that no `LLMModel`/`StageModelAssignment` row is ever mutated
+  by a smoke run). This is still a Phase 1, fully deterministic, mocked-`requests.post` addition —
+  no live credential or network involved in the automated suite; the manual opt-in smoke
+  verification item above remains the only place a real OpenRouter call is ever made, and only by
+  explicit operator action.
 - **M3 (`candidate_memory`, D-015)**: `confirmation_status` state transitions (`unconfirmed` →
   `confirmed`/`retired`/`BLOCKED_CONFLICT`, and that retrieval excludes anything not
   `confirmed`+`resume_eligible`); versioning invariants (a new `CandidateMemory` revision leaves

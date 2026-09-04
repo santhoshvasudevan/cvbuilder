@@ -1334,3 +1334,111 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   assignments and any concurrently in-progress M5 work in the primary checkout were untouched
   (this work was isolated in worktree `openrouter-provider` / branch
   `worktree-openrouter-provider`).
+
+## D-026: Shared parser must never infer a missing final answer from reasoning content -- fix the real OpenRouter null-content incident and separate smoke budgets
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) -- directed by the product owner
+  immediately after D-025 was merged to `main` (HEAD `a541a0a`) and its one authorized OpenRouter
+  reasoning-enabled smoke test was run for real against the newly created `LLMProvider` (id 9,
+  `OpenRouter`) / `LLMModel` (id 10, `z-ai/glm-5.2:free`) registry rows. That call reached
+  OpenRouter, got a real HTTP 200 response shaped like `{"choices": [{"finish_reason": "length",
+  "message": {"content": null, "reasoning_details": []}}], "usage": {...}}` -- the model spent its
+  entire 64-token smoke budget on internal reasoning and returned no final answer -- and crashed
+  with an uncaught `TypeError: the JSON object must be str, bytes or bytearray, not NoneType` from
+  `json.loads(None)` inside `parse_openai_style_chat_completion`
+  (`llm_provider/adapters/openai.py`, shared by OpenAI/NVIDIA NIM/OpenRouter). The exception
+  propagated out of `BaseLLMAdapter.generate()` before reaching `_write_call_log()`, so the call
+  left **no `LLMCallLog` row at all** despite genuinely spending real tokens -- a real audit-trail
+  gap, not merely an unhandled edge case. The existing code already anticipated a reasoning model
+  exhausting its budget (see the `finish_reason == "length"` -> `CONFIGURATION` branch and its
+  comment), but the `except (KeyError, IndexError, json.JSONDecodeError)` clause it lived in never
+  caught the `TypeError` that a literal `None` (as opposed to a missing key or an empty/malformed
+  string) produces.
+- **Root cause, precisely**: two independent gaps, both provider-boundary/transport concerns, never
+  semantic ones. (1) The parser's content-extraction path assumed `message.content`, when present
+  at all, would always be either a valid JSON string or absent/malformed in a way that raised
+  `KeyError`/`IndexError`/`json.JSONDecodeError` -- it never considered `None`, a non-string type,
+  or a present-but-empty/whitespace-only string, all of which a real provider can return. (2) The
+  smoke harness's fixed 64-token output budget (fine for a minimal non-reasoning acknowledgement)
+  was reused unchanged for a `--reasoning`-enabled request, even though reasoning tokens consume
+  the same completion-token allowance as the final answer -- so a reasoning model has no room left
+  to write one.
+- **Boundary preserved, not weakened**: "Provider adapters normalize transport behavior. They do
+  not infer missing final answers from reasoning content." Fixing this bug never means falling
+  back to `reasoning`/`reasoning_content`/`reasoning_details` as a substitute final answer when
+  `message.content` is unusable -- that would be exactly the kind of semantic inference this
+  project's provider-adapter layer must never perform (adapters normalize *transport* shape; they
+  never decide what a response *means*). The fix is a strictly wider, more precise *classification*
+  of "no usable final content", not a new source of content.
+- **Parser fix** (`llm_provider/adapters/openai.py::parse_openai_style_chat_completion`, shared by
+  `OpenAIAdapter`/`NvidiaNimAdapter`/`OpenRouterAdapter`): `finish_reason` and `message.content` are
+  now extracted defensively (`isinstance` checks throughout, never assumed to be a particular
+  shape) before any JSON parsing is attempted. Final content is accepted only when it is a
+  non-empty, non-whitespace-only `str` -- never `reasoning`/`reasoning_content`/`reasoning_details`
+  or any other field. When content is absent, `None`, non-string, empty, or whitespace-only:
+  `finish_reason == "length"` classifies as `CONFIGURATION` (a token-budget problem, not
+  transient, never retried -- unchanged from the behavior D-024's comment already documented for
+  the empty-string case); any other (or missing) `finish_reason` classifies as `SCHEMA_VALIDATION`
+  (the same non-transient, never-retried bucket already used for a malformed response, since a
+  present-but-empty/null/wrong-typed `content` field with a normal `finish_reason` is itself a
+  malformed response). A content string that *is* present and non-empty but fails `json.loads`
+  always stays `SCHEMA_VALIDATION`, regardless of `finish_reason` -- this narrows one pre-existing
+  behavior (previously, any `JSONDecodeError` combined with `finish_reason == "length"` was also
+  reclassified as `CONFIGURATION`, even for non-empty garbage content); no existing test asserted
+  on that category, so this is a deliberate precision improvement, not a break. Usage and
+  `finish_reason` (folded into the sanitized `error.message` text, the same mechanism already used
+  for the length-truncation case -- no new `LLMCallLog` column) are preserved on every failure path
+  exactly as on success. Because every path now returns a `NormalizedLLMResult` instead of raising,
+  `_write_call_log()` is reached unconditionally -- restoring the audit trail for exactly the call
+  shape that previously vanished. No raw response body, prompt, or reasoning content is ever
+  included in a returned error message or logged field, matching every other classification branch
+  already in this function.
+- **Smoke-budget fix** (`llm_provider/smoke/common.py`): a new `resolve_smoke_max_output_tokens`
+  resolves the smoke request's output-token budget -- 64 by default (unchanged for a plain
+  request), 4,096 when `--reasoning` is set (`DEFAULT_REASONING_SMOKE_MAX_OUTPUT_TOKENS`), an
+  explicit `--max-output-tokens` value always overriding either default -- and validates the
+  resolved value (positive integer; must not exceed a fixed smoke-only safety ceiling of 8,192,
+  `SMOKE_MAX_OUTPUT_TOKENS_CEILING`; must not exceed the selected model's own `max_output_tokens`
+  capability when known) *before* any adapter is constructed or HTTP call made, raising
+  `InvalidSmokeOutputBudgetError` (caught locally, printed, no provider call) rather than sending
+  an invalid value and hoping. `smoke_test_openrouter` gained `--max-output-tokens`
+  (`smoke_test_openai`/`smoke_test_nvidia`/`smoke_test_gemini` were left unchanged -- none of them
+  support `--reasoning` in the first place, so this budget concern doesn't yet apply to them).
+  This never touches `LLMModel.max_output_tokens`, `StageModelAssignment.max_output_tokens`, any
+  existing stage's effective budget, or application-stage request construction -- it is a
+  smoke-harness-only concern, exactly like the pre-existing `--model`/`--reasoning` flags.
+- **Schema**: none. No field was added anywhere (finish_reason continues to flow through the
+  existing sanitized `error.message` text, matching the pre-existing pattern for the
+  `finish_reason=length` case; the smoke budget is a request-construction value, never a stored
+  registry field) -- `manage.py makemigrations --check --dry-run` confirmed no migration is
+  required, and none was created.
+- **Tests**: `llm_provider/tests/test_null_content_handling.py` (new -- reproduces the exact real
+  incident payload and its content-shape variants directly against the shared parser, then proves
+  the same behavior end-to-end through representative `NvidiaNimAdapter`/`OpenAIAdapter`/
+  `OpenRouterAdapter` calls: exactly one sanitized `LLMCallLog` row per logical call, zero retries,
+  usage/finish-reason preserved, and planted prompt/reasoning/credential marker strings proven
+  absent from every logged field) and `llm_provider/tests/test_smoke_output_budget.py` (new --
+  `resolve_smoke_max_output_tokens`'s validation rules directly, plus `run_smoke_test` integration
+  proving the resolved value reaches the real request body and an invalid value never reaches
+  `requests.post`, and that no `LLMModel`/`StageModelAssignment` row is mutated). One new test
+  (`test_openrouter_adapter_generate_never_reaches_the_network`) was added to the existing
+  `test_network_guard.py`, closing a gap where OpenAI/NVIDIA/Gemini were already covered but
+  OpenRouter was not. Full suite: 927/927 passing (up from 875), `manage.py check`/
+  `makemigrations --check --dry-run` (no changes detected)/`ruff check .`/`git diff --check` all
+  clean. All migrations (unchanged in count/content by this decision) were additionally re-verified
+  applying cleanly from zero on a fresh, isolated, throwaway `postgres:16-alpine` Docker container
+  on a non-default port, removed immediately after verification. This work was isolated in
+  worktree `openrouter-null-content-fix` / branch `worktree-openrouter-null-content-fix`.
+- **Not done in this session (out of scope, per explicit instruction)**: no live provider call was
+  made; no `StageModelAssignment` was created, changed, or pointed at OpenRouter; no M5/M6 process
+  ran; no Gate was approved; JobApplication 9 and its JRA (id 10, v2) were untouched. A separately
+  authorized re-run of `python manage.py smoke_test_openrouter --reasoning --max-output-tokens
+  4096` against the real id-9/id-10 registry rows is the intended next step to confirm the fix
+  against a genuine reasoning-enabled response, but was not performed here.
+- **Consequence**: no migration. `llm_provider/adapters/openai.py`, `llm_provider/smoke/common.py`,
+  `llm_provider/smoke/run_openrouter.py`, and `llm_provider/management/commands/
+  smoke_test_openrouter.py` changed; two new test modules and one addition to an existing one.
+  Every OpenAI-compatible adapter (OpenAI, NVIDIA NIM, OpenRouter) now classifies a missing/
+  invalid final answer the same way and always produces an audit log row for it; a future
+  reasoning-enabled OpenRouter smoke qualification has a budget mechanism that won't reproduce the
+  same starved-budget failure mode.

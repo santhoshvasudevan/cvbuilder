@@ -31,6 +31,69 @@ class SmokeTestOutput(BaseModel):
     acknowledged: bool
 
 
+# Reasoning-enabled smoke-test output budgets (2026-09-04, D-026): reasoning tokens consume the
+# same completion-token allowance as the final answer, so the plain non-reasoning smoke budget
+# (suitable only for a minimal, non-reasoning acknowledgement) is not a valid qualification budget
+# for a reasoning-enabled request -- a reasoning model can spend the whole allowance "thinking"
+# and never emit a final answer, which is exactly the shape of the real OpenRouter incident this
+# addresses (see D-026). None of these change `LLMModel.max_output_tokens`,
+# `StageModelAssignment.max_output_tokens`, or any application-stage request budget -- this is a
+# smoke-harness-only concern.
+DEFAULT_SMOKE_MAX_OUTPUT_TOKENS = 64
+DEFAULT_REASONING_SMOKE_MAX_OUTPUT_TOKENS = 4096
+# A hard ceiling on what any smoke test -- reasoning or not, explicit or default -- may ever
+# request, independent of how large the underlying model's own capability is; a smoke test is a
+# minimal connectivity/configuration check, never a real workload.
+SMOKE_MAX_OUTPUT_TOKENS_CEILING = 8192
+
+
+class InvalidSmokeOutputBudgetError(Exception):
+    """Raised (and caught locally, before any adapter is constructed or HTTP call is made) when
+    the resolved smoke-test output-token budget is invalid -- not a positive integer, above the
+    smoke-specific safety ceiling, or above the selected model's own capability."""
+
+
+def resolve_smoke_max_output_tokens(
+    explicit: int | None,
+    *,
+    reasoning_enabled: bool | None,
+    model_capability: int | None,
+) -> int:
+    """Resolve the exact output-token budget a smoke-test request body will carry.
+
+    An explicit `--max-output-tokens` value always overrides the reasoning/non-reasoning
+    default. Every resolved value (explicit or default) must be a positive integer, must not
+    exceed `SMOKE_MAX_OUTPUT_TOKENS_CEILING`, and must not exceed the selected model's own
+    `max_output_tokens` capability when that capability is known -- raising
+    `InvalidSmokeOutputBudgetError` rather than silently clamping, so a misconfigured value is
+    caught here, before any provider call, never sent and hoped for.
+    """
+    if explicit is not None:
+        if isinstance(explicit, bool) or not isinstance(explicit, int) or explicit <= 0:
+            raise InvalidSmokeOutputBudgetError(
+                f"--max-output-tokens must be a positive integer, got {explicit!r}."
+            )
+        resolved = explicit
+    else:
+        resolved = (
+            DEFAULT_REASONING_SMOKE_MAX_OUTPUT_TOKENS
+            if reasoning_enabled
+            else DEFAULT_SMOKE_MAX_OUTPUT_TOKENS
+        )
+
+    if resolved > SMOKE_MAX_OUTPUT_TOKENS_CEILING:
+        raise InvalidSmokeOutputBudgetError(
+            f"Resolved smoke-test output-token budget ({resolved}) exceeds the smoke-test safety "
+            f"ceiling ({SMOKE_MAX_OUTPUT_TOKENS_CEILING})."
+        )
+    if model_capability is not None and resolved > model_capability:
+        raise InvalidSmokeOutputBudgetError(
+            f"Resolved smoke-test output-token budget ({resolved}) exceeds the selected model's "
+            f"own max_output_tokens capability ({model_capability})."
+        )
+    return resolved
+
+
 CREDENTIAL_ENV_VARS = {
     LLMProvider.ProviderType.OPENAI: "OPENAI_API_KEY",
     LLMProvider.ProviderType.NVIDIA_NIM: "NVIDIA_NIM_API_KEY",
@@ -113,6 +176,7 @@ def run_smoke_test(
     *,
     temperature: float = 0.0,
     reasoning_enabled: bool | None = None,
+    max_output_tokens: int | None = None,
 ) -> None:
     env_var = CREDENTIAL_ENV_VARS[provider_type]
     if not os.environ.get(env_var):
@@ -142,7 +206,20 @@ def run_smoke_test(
             )
             return
 
-    print(f"{provider_type}: using provider={llm_model.provider.name!r} model={llm_model.model_id!r}")
+    try:
+        resolved_max_output_tokens = resolve_smoke_max_output_tokens(
+            max_output_tokens,
+            reasoning_enabled=reasoning_enabled,
+            model_capability=llm_model.max_output_tokens,
+        )
+    except InvalidSmokeOutputBudgetError as exc:
+        print(f"{provider_type}: NOT RUN -- {exc} No provider call was made.")
+        return
+
+    print(
+        f"{provider_type}: using provider={llm_model.provider.name!r} model={llm_model.model_id!r} "
+        f"max_output_tokens={resolved_max_output_tokens}"
+    )
 
     adapter = ADAPTER_CLASSES[provider_type](llm_model)
     request = NormalizedLLMRequest(
@@ -151,7 +228,7 @@ def run_smoke_test(
             {"role": "user", "content": "Reply with a JSON object acknowledging this smoke test."}
         ],
         output_schema=SmokeTestOutput,
-        max_output_tokens=64,
+        max_output_tokens=resolved_max_output_tokens,
         temperature=temperature,
         reasoning_enabled=reasoning_enabled,
     )

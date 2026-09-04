@@ -967,15 +967,15 @@ and dropped via `docker exec` against the running `cvbuilder-db-1` container, no
 test-runner database) had every migration -- including the new one -- applied cleanly from zero.
 No live provider call was made under this decision; JobApplication 9's JRA remains untouched.
 
-## OpenRouter provider integration (2026-09-04, D-025) -- COMMITTED, implementation-only
+## OpenRouter provider integration (2026-09-04, D-025) -- MERGED TO MAIN, registry rows created, smoke bug found and fixed (D-026)
 
 Added `OPENROUTER` as a fourth real `llm_provider` adapter (alongside OpenAI/NVIDIA NIM/Gemini),
 with initial support for `z-ai/glm-5.2:free`, structured JSON-schema output, and OpenRouter's
 unified reasoning parameter. This work was done in an isolated worktree/branch
 (`openrouter-provider` / `worktree-openrouter-provider`) while the primary checkout continued a
-separate, controlled M5 task, and is implementation-only: **no `StageModelAssignment` was pointed
-at OpenRouter, no existing NVIDIA assignment changed, and no live inference call was made.** See
-D-025 in `docs/DECISIONS.md` for full detail; summarized here:
+separate, controlled M5 task, and was implementation-only at commit time: no `StageModelAssignment`
+was pointed at OpenRouter, no existing NVIDIA assignment changed, and no live inference call was
+made. See D-025 in `docs/DECISIONS.md` for full detail; summarized here:
 
 - **Schema** (`llm_provider.0005_llmprovider_data_collection_policy_and_more`, additive):
   `LLMProvider.ProviderType.OPENROUTER` and a new `LLMProvider.data_collection_policy` field
@@ -1013,13 +1013,65 @@ D-025 in `docs/DECISIONS.md` for full detail; summarized here:
   cleanly from zero on a genuinely fresh, isolated, throwaway `postgres:16-alpine` Docker
   container (a different port, separate from the real `cvbuilder-db-1` dev database), removed
   immediately after verification.
-- **Not done in this session (separate, later, explicitly-authorized operator action)**: verifying
-  `z-ai/glm-5.2:free`'s real context-length/max-completion-tokens/capability metadata against
-  OpenRouter's own model listing (no in-repo model-discovery command exists to automate this, and
-  none was built here, since the architecture has never had one for any provider); creating the
-  real `LLMProvider`/`LLMModel` rows; populating `OPENROUTER_API_KEY` in `.env`; running
-  `smoke_test_openrouter`; and, only after that smoke test is reviewed and approved, assigning
-  OpenRouter to any `StageModelAssignment`.
+- **Not done in the original D-025 session (separate, later, explicitly-authorized operator
+  action)**: verifying `z-ai/glm-5.2:free`'s real context-length/max-completion-tokens/capability
+  metadata against OpenRouter's own model listing; creating the real `LLMProvider`/`LLMModel`
+  rows; populating `OPENROUTER_API_KEY` in `.env`; running `smoke_test_openrouter`; and, only after
+  that smoke test is reviewed and approved, assigning OpenRouter to any `StageModelAssignment`.
+
+**Subsequent continuation (2026-09-04, same day)**: `worktree-openrouter-provider` was fast-forward
+merged into `main` (`main` HEAD is now `a541a0a`), `z-ai/glm-5.2:free`'s capability metadata was
+independently verified against OpenRouter's own model listing (256,000 context length, 230,400 max
+completion tokens, structured output and reasoning both supported, free pricing), and the real
+registry rows were created in the development database: `LLMProvider` id **9** (`OpenRouter`,
+`data_collection_policy=DENY`) and `LLMModel` id **10** (`z-ai/glm-5.2:free`,
+`max_output_tokens=230400`, `supports_structured_output=True`, `supports_reasoning=True`) -- both
+still **unassigned** to any `StageModelAssignment`. The one authorized live smoke test
+(`smoke_test_openrouter --reasoning`, deliberately run *without* `--model` so it resolved to these
+real rows via `select_default_model` rather than creating a separate "OPENROUTER (smoke test)"
+duplicate) reached OpenRouter, got a real response, and **crashed with an uncaught `TypeError`**
+in the shared response parser -- see "Null-content response parsing fix" below (D-026) for the
+root cause, the fix, and what remains before a qualifying smoke run.
+
+## Null-content response parsing fix (2026-09-04, D-026) -- IMPLEMENTED, no live call
+
+The real OpenRouter reasoning smoke test above surfaced a genuine bug: `parse_openai_style_chat_
+completion` (`llm_provider/adapters/openai.py`, shared by OpenAI/NVIDIA NIM/OpenRouter) raised an
+uncaught `TypeError` when `message.content` came back `None` (the model spent its whole 64-token
+smoke budget on reasoning and returned no final answer, `finish_reason=length`), because
+`json.loads(None)` isn't a `KeyError`/`IndexError`/`json.JSONDecodeError`. The exception bypassed
+`_write_call_log()` entirely -- a real, token-spending call left no audit trail. Full detail,
+including the precise root cause and every classification rule, is in D-026 in
+`docs/DECISIONS.md`; summarized here:
+
+- **Fix**: the parser now extracts `finish_reason` and `message.content` defensively and accepts a
+  final answer only when it is a non-empty, non-whitespace string -- never `reasoning`/
+  `reasoning_content`/`reasoning_details`. Absent/`None`/non-string/empty/whitespace-only content
+  classifies as `CONFIGURATION` when `finish_reason == "length"` (a token-budget problem, never
+  retried) or `SCHEMA_VALIDATION` otherwise (a malformed response, never retried); a present but
+  unparseable JSON string always stays `SCHEMA_VALIDATION` regardless of `finish_reason`. Every
+  path now returns a normal `NormalizedLLMResult`, so `_write_call_log()` always runs -- the
+  missing-audit-row gap is closed. Applies uniformly to OpenAI, NVIDIA NIM, and OpenRouter (the
+  three adapters sharing this parser); Gemini/Fake were not touched.
+- **Smoke budget**: `llm_provider/smoke/common.py` gained `resolve_smoke_max_output_tokens` (64
+  default, 4,096 when `--reasoning` is set, an 8,192 smoke-only safety ceiling, never exceeding the
+  selected model's own capability, validated before any provider call) and
+  `smoke_test_openrouter` gained `--max-output-tokens`. Does not touch `LLMModel.max_output_
+  tokens`, any `StageModelAssignment`, or any application-stage budget.
+- **No migration**: nothing schema-shaped changed; `makemigrations --check --dry-run` confirmed it.
+- **Tests**: two new modules (`test_null_content_handling.py`, `test_smoke_output_budget.py`) plus
+  one addition to `test_network_guard.py` (OpenRouter was missing from its adapter coverage).
+  Full suite: 927/927 passing (up from 875); `check`/`makemigrations --check --dry-run`/
+  `ruff check .`/`git diff --check` all clean; all migrations re-verified from zero on a fresh,
+  isolated, throwaway PostgreSQL container.
+- **Not done in this session**: no live provider call; no `StageModelAssignment` created or
+  changed; JobApplication 9 / JRA id 10 (v2) untouched; no Gate approved. This was implemented and
+  verified in isolated worktree `openrouter-null-content-fix` / branch
+  `worktree-openrouter-null-content-fix`.
+- **Next action**: a separately authorized re-run of `python manage.py smoke_test_openrouter
+  --reasoning --max-output-tokens 4096` against the real `LLMProvider` id 9 / `LLMModel` id 10 rows
+  to confirm the fix against a genuine reasoning-enabled response, before any `StageModelAssignment`
+  is ever pointed at OpenRouter.
 
 ## What does not exist
 
@@ -1033,10 +1085,11 @@ D-025 in `docs/DECISIONS.md` for full detail; summarized here:
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
   not performed in this environment -- no credentials configured).
 - Any remote/CI configuration (not required; local quality commands remain the standard).
-- Any real `LLMProvider`/`LLMModel` row for OpenRouter, any `StageModelAssignment` pointing at it,
-  a populated `OPENROUTER_API_KEY`, or any live-provider verification of the OpenRouter adapter
-  (opt-in, operator-run, not performed in this environment -- see "OpenRouter provider
-  integration" above for the exact follow-up steps).
+- Any `StageModelAssignment` pointing at OpenRouter, or any successful (non-crashing)
+  live-provider verification of the OpenRouter adapter -- the real `LLMProvider` (id 9)/`LLMModel`
+  (id 10) rows and a populated `OPENROUTER_API_KEY` do now exist (see "OpenRouter provider
+  integration" and "Null-content response parsing fix" above), but the one smoke test run against
+  them crashed before D-026's fix; a fresh, separately authorized smoke re-run is still needed.
 
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
@@ -1058,8 +1111,11 @@ are all genuinely redundant with claims that did reach the pool. D-022/D-023 (Ag
 integrity hardening and its course correction, see the sections above) and D-024 (stage-specific
 LLM output-token budgets, see "Stage-specific LLM output-token budgets" above) are all **APPROVED
 AND IMPLEMENTED**. D-025 (OpenRouter provider integration, see "OpenRouter provider integration"
-above) is **APPROVED AND IMPLEMENTED** as an implementation-only change -- no stage assignment,
-no live call. Neither D-016 nor anything else is blocking for M7 as currently scoped.
+above) is **APPROVED AND IMPLEMENTED**, now merged to `main` with real (unassigned) registry rows.
+D-026 (null-content response parsing fix + separated smoke budgets, see "Null-content response
+parsing fix" above) is **APPROVED AND IMPLEMENTED** -- a provider-boundary correction found by
+D-025's own smoke test, still no stage assignment and no live call performed under D-026 itself.
+Neither D-016 nor anything else is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
@@ -1101,11 +1157,13 @@ must: configure a real credential in `.env` for whichever provider/model will se
 exist yet for either stage), and confirm CE-0001/CE-0002/CE-0003's mapped narrative claims are the
 intended evidence set for a real job application before approving either gate for real.
 
-**OpenRouter addendum (2026-09-04, D-025, done in an isolated worktree in parallel with the above)**:
-OpenRouter is now available as an additional provider option (see "OpenRouter provider integration"
-above) -- this does not change which provider currently serves `AC_MATCH`/`AB_BUILD`, does not
-create any registry row, and does not alter the operator steps above in any way. It only widens
-the set of providers available *when* the operator chooses one for a stage assignment.
+**OpenRouter addendum (2026-09-04, D-025/D-026)**: OpenRouter is now available as an additional
+provider option, merged to `main`, with real (unassigned) `LLMProvider`/`LLMModel` registry rows
+(see "OpenRouter provider integration" and "Null-content response parsing fix" above) -- this does
+not change which provider currently serves `AC_MATCH`/`AB_BUILD` and does not alter the operator
+steps above in any way. A known parser bug the first live smoke test surfaced (D-026) has been
+fixed; a fresh, separately authorized smoke re-run against the real registry rows is the remaining
+step before OpenRouter could be considered for any stage assignment.
 
 ## Maintenance rule for this file
 
