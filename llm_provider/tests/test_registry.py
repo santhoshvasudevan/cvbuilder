@@ -83,6 +83,7 @@ class AdminRegistryReachabilityTests(TestCase):
                 "provider_type": LLMProvider.ProviderType.OPENAI,
                 "base_url": "",
                 "credential_env_var": "OPENAI_API_KEY",
+                "data_collection_policy": LLMProvider.DataCollectionPolicy.DENY,
             },
         )
         self.assertEqual(response.status_code, 302)

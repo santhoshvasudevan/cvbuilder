@@ -194,6 +194,19 @@ provider-specific:
   reasoning-effort parameters are passed defensively — e.g. never assume a literal zero value is
   accepted for "disabled reasoning" — since these parameters are still evolving across Gemini
   model generations.
+- **OpenRouter adapter** (2026-09-04, D-025): an OpenAI-compatible `/chat/completions` endpoint
+  that routes to many different underlying models with uneven feature support, so — like NVIDIA
+  NIM — it checks `LLMModel.supports_structured_output`/`supports_reasoning` before assuming
+  either, rather than trusting the request alone. Reuses the shared OpenAI-compatible request
+  body/response parsing wherever the semantics genuinely match; adds only what is genuinely
+  OpenRouter-specific: an explicit `stream: false`, the unified `reasoning: {"enabled": true}`
+  parameter (sent only when explicitly enabled, never a default), the `provider:
+  {"require_parameters": true, "data_collection": "deny"|"allow"}` routing object (the privacy
+  policy is a constrained `LLMProvider.data_collection_policy` field, never arbitrary JSON, and
+  the adapter fails closed — no HTTP call — if that field is ever an invalid stored value), and
+  the two optional attribution headers (`OPENROUTER_HTTP_REFERER`/`OPENROUTER_APP_TITLE`). The
+  model id sent is always exactly `LLMModel.model_id` — no fallback to a paid or different model
+  exists anywhere in the adapter.
 
 New providers added later implement the same adapter interface and get their own isolated
 translation class; no shared pipeline code changes (NFR-005).

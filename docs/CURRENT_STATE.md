@@ -967,6 +967,60 @@ and dropped via `docker exec` against the running `cvbuilder-db-1` container, no
 test-runner database) had every migration -- including the new one -- applied cleanly from zero.
 No live provider call was made under this decision; JobApplication 9's JRA remains untouched.
 
+## OpenRouter provider integration (2026-09-04, D-025) -- COMMITTED, implementation-only
+
+Added `OPENROUTER` as a fourth real `llm_provider` adapter (alongside OpenAI/NVIDIA NIM/Gemini),
+with initial support for `z-ai/glm-5.2:free`, structured JSON-schema output, and OpenRouter's
+unified reasoning parameter. This work was done in an isolated worktree/branch
+(`openrouter-provider` / `worktree-openrouter-provider`) while the primary checkout continued a
+separate, controlled M5 task, and is implementation-only: **no `StageModelAssignment` was pointed
+at OpenRouter, no existing NVIDIA assignment changed, and no live inference call was made.** See
+D-025 in `docs/DECISIONS.md` for full detail; summarized here:
+
+- **Schema** (`llm_provider.0005_llmprovider_data_collection_policy_and_more`, additive):
+  `LLMProvider.ProviderType.OPENROUTER` and a new `LLMProvider.data_collection_policy` field
+  (constrained `DENY`/`ALLOW` choices, default `DENY`) that only `OpenRouterAdapter` reads.
+- **Adapter** (`llm_provider/adapters/openrouter.py`): reuses `openai.py`'s
+  `build_chat_completion_body`/`parse_openai_style_chat_completion` for the OpenAI-compatible
+  parts (messages, temperature, `max_tokens`, `response_format`, response envelope, usage, status
+  classification), adding only what's OpenRouter-specific: `stream: false`, optional `top_p`, the
+  `reasoning: {"enabled": true}` parameter (sent only when explicitly enabled, never a default,
+  rejected before any HTTP call if the target `LLMModel.supports_reasoning` is `False`), the
+  `provider: {"require_parameters": true, "data_collection": "deny"|"allow"}` routing object
+  (fails closed with `CONFIGURATION` -- no HTTP call -- if `data_collection_policy` is ever an
+  invalid stored value), and the two optional attribution headers
+  (`OPENROUTER_HTTP_REFERER`/`OPENROUTER_APP_TITLE`, included only when set). A model not marked
+  `supports_structured_output` is rejected the same way NIM already does. The final answer is
+  parsed only from `choices[0].message.content` -- `reasoning`/`reasoning_content`/
+  `reasoning_details` are never read as a substitute and never persisted to `LLMCallLog` (which
+  has no content field for any provider). The model id sent is always exactly
+  `LLMModel.model_id` -- no fallback to a paid model or a different slug exists in the code.
+  `parse_openai_style_chat_completion` (shared with OpenAI/NIM) gained `402`->`CONFIGURATION` and
+  `408`->`TIMEOUT` branches; every other status code OpenRouter needs (`404`/`410`/`429`/`5xx`
+  incl. `524`/`529`) already classified correctly via the existing generic branches.
+- **Smoke test**: `manage.py smoke_test_openrouter` (`--model`, `--reasoning`) added following the
+  existing opt-in, never-automatic pattern; `smoke/common.py`'s `CREDENTIAL_ENV_VARS` gained
+  `OPENROUTER: "OPENROUTER_API_KEY"` and `run_smoke_test` gained an optional `reasoning_enabled`
+  parameter (default `None` -- no behavior change for the three existing smoke commands). **Not
+  run live** -- no credential configured in this environment.
+- **Admin**: `LLMProviderAdmin.list_display` gained `data_collection_policy`; `LLMModel`/
+  `StageModelAssignment`'s existing fields and `full_clean()`-validated admin forms already cover
+  OpenRouter with zero additional code.
+- **Tests**: 46 new deterministic tests in `llm_provider/tests/test_openrouter_adapter.py` (all
+  `requests.post` mocked -- see D-025 for the full list of what's covered). Full suite: 875/875
+  passing (up from 829), `manage.py check`/`makemigrations --check --dry-run` (no changes
+  detected)/`ruff check .` all clean. The new migration was additionally verified applying
+  cleanly from zero on a genuinely fresh, isolated, throwaway `postgres:16-alpine` Docker
+  container (a different port, separate from the real `cvbuilder-db-1` dev database), removed
+  immediately after verification.
+- **Not done in this session (separate, later, explicitly-authorized operator action)**: verifying
+  `z-ai/glm-5.2:free`'s real context-length/max-completion-tokens/capability metadata against
+  OpenRouter's own model listing (no in-repo model-discovery command exists to automate this, and
+  none was built here, since the architecture has never had one for any provider); creating the
+  real `LLMProvider`/`LLMModel` rows; populating `OPENROUTER_API_KEY` in `.env`; running
+  `smoke_test_openrouter`; and, only after that smoke test is reviewed and approved, assigning
+  OpenRouter to any `StageModelAssignment`.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -979,6 +1033,10 @@ No live provider call was made under this decision; JobApplication 9's JRA remai
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
   not performed in this environment -- no credentials configured).
 - Any remote/CI configuration (not required; local quality commands remain the standard).
+- Any real `LLMProvider`/`LLMModel` row for OpenRouter, any `StageModelAssignment` pointing at it,
+  a populated `OPENROUTER_API_KEY`, or any live-provider verification of the OpenRouter adapter
+  (opt-in, operator-run, not performed in this environment -- see "OpenRouter provider
+  integration" above for the exact follow-up steps).
 
 ## Decisions (see `docs/DECISIONS.md` for full detail)
 
@@ -999,7 +1057,9 @@ the five gold profiles; an acceptance review confirmed the three claims short of
 are all genuinely redundant with claims that did reach the pool. D-022/D-023 (Agent Jobber
 integrity hardening and its course correction, see the sections above) and D-024 (stage-specific
 LLM output-token budgets, see "Stage-specific LLM output-token budgets" above) are all **APPROVED
-AND IMPLEMENTED**. Neither D-016 nor anything else is blocking for M7 as currently scoped.
+AND IMPLEMENTED**. D-025 (OpenRouter provider integration, see "OpenRouter provider integration"
+above) is **APPROVED AND IMPLEMENTED** as an implementation-only change -- no stage assignment,
+no live call. Neither D-016 nor anything else is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
@@ -1040,6 +1100,12 @@ must: configure a real credential in `.env` for whichever provider/model will se
 `AB_BUILD`, create the corresponding `LLMProvider`/`LLMModel`/`StageModelAssignment` rows (none
 exist yet for either stage), and confirm CE-0001/CE-0002/CE-0003's mapped narrative claims are the
 intended evidence set for a real job application before approving either gate for real.
+
+**OpenRouter addendum (2026-09-04, D-025, done in an isolated worktree in parallel with the above)**:
+OpenRouter is now available as an additional provider option (see "OpenRouter provider integration"
+above) -- this does not change which provider currently serves `AC_MATCH`/`AB_BUILD`, does not
+create any registry row, and does not alter the operator steps above in any way. It only widens
+the set of providers available *when* the operator chooses one for a stage assignment.
 
 ## Maintenance rule for this file
 

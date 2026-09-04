@@ -24,9 +24,24 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
         return NormalizedLLMResult(
             error=NormalizedLLMError(category=LLMErrorCategory.AUTH, message="Authentication failed.")
         )
+    if response.status_code == 402:
+        # Quota/billing/account restriction -- non-transient (an operator action is required,
+        # e.g. adding credit or fixing the account), so this must never be retried.
+        return NormalizedLLMResult(
+            error=NormalizedLLMError(
+                category=LLMErrorCategory.CONFIGURATION,
+                message="Provider reports a quota/billing/account restriction (402).",
+            )
+        )
     if response.status_code == 429:
         return NormalizedLLMResult(
             error=NormalizedLLMError(category=LLMErrorCategory.RATE_LIMIT, message="Rate limited.")
+        )
+    if response.status_code == 408:
+        # Request timeout -- transient, eligible for the existing bounded retry policy (same
+        # category the client-side `requests.Timeout` exception already uses below).
+        return NormalizedLLMResult(
+            error=NormalizedLLMError(category=LLMErrorCategory.TIMEOUT, message="Request timed out (408).")
         )
     if response.status_code >= 500:
         return NormalizedLLMResult(

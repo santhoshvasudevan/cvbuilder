@@ -14,11 +14,13 @@ from .fake import FakeAdapter
 from .gemini import GeminiAdapter
 from .nvidia import NvidiaNimAdapter
 from .openai import OpenAIAdapter
+from .openrouter import OpenRouterAdapter
 
 ADAPTER_CLASSES: dict[str, type[BaseLLMAdapter]] = {
     LLMProvider.ProviderType.OPENAI: OpenAIAdapter,
     LLMProvider.ProviderType.NVIDIA_NIM: NvidiaNimAdapter,
     LLMProvider.ProviderType.GEMINI: GeminiAdapter,
+    LLMProvider.ProviderType.OPENROUTER: OpenRouterAdapter,
     LLMProvider.ProviderType.FAKE: FakeAdapter,
 }
 
@@ -89,5 +91,6 @@ __all__ = [
     "InvalidStageBudgetError",
     "NvidiaNimAdapter",
     "OpenAIAdapter",
+    "OpenRouterAdapter",
     "get_adapter_for_stage",
 ]

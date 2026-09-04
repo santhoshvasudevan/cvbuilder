@@ -5,7 +5,13 @@ from .models import LLMCallLog, LLMModel, LLMProvider, StageModelAssignment
 
 @admin.register(LLMProvider)
 class LLMProviderAdmin(admin.ModelAdmin):
-    list_display = ("name", "provider_type", "credential_env_var", "created_at")
+    list_display = (
+        "name",
+        "provider_type",
+        "credential_env_var",
+        "data_collection_policy",
+        "created_at",
+    )
     list_filter = ("provider_type",)
 
 

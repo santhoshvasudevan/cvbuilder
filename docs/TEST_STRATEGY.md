@@ -27,12 +27,25 @@ milestone scope):
 
   **(v1.1 addition) Manual opt-in provider smoke verification** — separate from the automated
   suite above, not a Phase 1/Phase 2 test-suite item: for each configured provider (OpenAI, NVIDIA
-  NIM, Gemini), a minimal structured-output request through the actual adapter, run only when the
-  operator explicitly initiates it, using credentials from `.env`. This never runs automatically in
-  CI or as part of `manage.py test`, never persists raw sensitive provider request/response
-  bodies, and records safe `LLMCallLog` metadata where appropriate. A provider with no configured
-  credential is reported as **not live-verified**, never as a failure of the deterministic suite —
-  passing mocked tests must never be reported as "this provider is operationally verified."
+  NIM, Gemini, OpenRouter), a minimal structured-output request through the actual adapter, run
+  only when the operator explicitly initiates it, using credentials from `.env`. This never runs
+  automatically in CI or as part of `manage.py test`, never persists raw sensitive provider
+  request/response bodies (nor, for OpenRouter, any reasoning/chain-of-thought content), and
+  records safe `LLMCallLog` metadata where appropriate. A provider with no configured credential is
+  reported as **not live-verified**, never as a failure of the deterministic suite — passing mocked
+  tests must never be reported as "this provider is operationally verified."
+
+  **(2026-09-04 addition, D-025) OpenRouter provider transport tests**: `llm_provider/tests/
+  test_openrouter_adapter.py` covers OpenRouter-specific transport/configuration correctness the
+  same way the three existing adapters are covered — endpoint/auth, missing-credential
+  short-circuit, optional attribution headers, exact free-model-slug/no-fallback, request-body
+  construction (including the `provider` routing object and its fail-closed invalid-policy case),
+  reasoning enable/omit/reject and its never-substitutes-for-content guarantee, no raw reasoning in
+  `LLMCallLog`, response normalization, status-code classification (including `402`/`408`/`524`/
+  `529`), and bounded retry — all against a mocked `requests.post`, no live credential or network
+  required. Per this file's standing rule (and CLAUDE.md), none of these tests assert resume
+  quality or recruiter-judgment semantics — that stays out of scope for a provider-transport
+  test file, same as for the other three adapters.
 - **M3 (`candidate_memory`, D-015)**: `confirmation_status` state transitions (`unconfirmed` →
   `confirmed`/`retired`/`BLOCKED_CONFLICT`, and that retrieval excludes anything not
   `confirmed`+`resume_eligible`); versioning invariants (a new `CandidateMemory` revision leaves

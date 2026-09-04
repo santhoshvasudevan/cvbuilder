@@ -145,6 +145,12 @@ graph is not an instruction to parallelize coding, only an accurate statement of
   manual smoke tests are actually run against live providers — flag and revisit D-005 if so,
   recording any correction in DECISIONS.md rather than silently changing behavior.
 
+**Addendum (2026-09-04, D-025)**: a fourth real provider, OpenRouter, was added to this app after
+M2's original completion, following the same adapter-interface/registry pattern with zero pipeline
+changes — see D-025 in `docs/DECISIONS.md` and the "OpenRouter provider integration" section of
+`docs/CURRENT_STATE.md`. Implementation-only: no `StageModelAssignment` was pointed at it and no
+live call was made.
+
 ## M3 — Candidate Memory build and confirmation workflow
 
 - **Objective**: the `candidate_memory` app fully implemented — explicit bootstrap from the three

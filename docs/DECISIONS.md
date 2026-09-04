@@ -1166,3 +1166,171 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   a new nullable field plus validator metadata on the existing field -- no data migration, no
   existing row's resolved behavior changes). JobApplication 9's JRA (v1) remains untouched and
   unrerun; no live provider call was made under this decision.
+
+## D-025: Add OpenRouter as a first-class LLM provider
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-04) — implementation-only work package: add
+  OpenRouter as an interchangeable `llm_provider` adapter behind the existing normalized request/
+  response interface, with initial support for `z-ai/glm-5.2:free`. Explicitly out of scope for
+  this decision: assigning OpenRouter to any pipeline stage, changing NVIDIA's existing stage
+  assignments, running M5/M6, approving a gate, or making a live inference call — all deferred to
+  a separate, later, explicitly-authorized operator action (see "Operator follow-up" below).
+- **Requirement**: LLM-001/LLM-007 — a new provider must be addable with zero pipeline-app
+  changes, and its structured-output/reasoning quirks must be isolated entirely inside its own
+  adapter, matching how `nvidia.py`/`gemini.py` were added under M2.
+- **Schema** (`llm_provider.0005_llmprovider_data_collection_policy_and_more`, additive only):
+  `LLMProvider.ProviderType` gained `OPENROUTER`; `LLMProvider` gained `data_collection_policy`
+  (a constrained `TextChoices` field, `DENY`/`ALLOW`, default `DENY` — never arbitrary JSON) that
+  the OpenRouter adapter alone reads to build its request-level privacy routing directive. No
+  other model changed; no data migration; every pre-existing `LLMProvider` row keeps its previous
+  behavior (`data_collection_policy` defaults to `DENY`, which no other adapter ever reads).
+- **Adapter** (`llm_provider/adapters/openrouter.py`, registered in `ADAPTER_CLASSES`): reuses
+  `openai.py`'s `build_chat_completion_body` (messages/temperature/`max_tokens`/`response_format`)
+  and `parse_openai_style_chat_completion` (response envelope, usage extraction, status-code
+  classification) wherever their OpenAI-compatible semantics genuinely match, adding only what is
+  genuinely OpenRouter-specific: `stream: false`, optional `top_p`, the unified `reasoning`
+  parameter, the `provider` routing object, and the two optional attribution headers. No second
+  hand-maintained schema translator was written — `to_openai_strict_schema` (already used by NIM)
+  is reused as-is.
+  - **Credential**: resolved only from `LLMProvider.credential_env_var` (same mechanism every
+    other adapter uses); never displayed, persisted, hashed, or logged. A missing credential
+    returns a `CONFIGURATION` error before any HTTP call, proven by a dedicated test with
+    `requests.post` mocked and asserted never called.
+  - **Endpoint/headers**: `POST {base_url or https://openrouter.ai/api/v1}/chat/completions` with
+    `Authorization: Bearer <key>` and `Content-Type: application/json`. `HTTP-Referer`/
+    `X-OpenRouter-Title` are added only when `OPENROUTER_HTTP_REFERER`/`OPENROUTER_APP_TITLE` are
+    non-empty in the environment — fixed, documented header/env-var names (not
+    operator-configurable per provider row, since OpenRouter defines exactly these two), never a
+    placeholder value invented when absent.
+  - **Capability guards** (mirroring NIM's existing `supports_structured_output` pattern, since
+    OpenRouter also routes to many underlying endpoints with uneven feature support): a model not
+    marked `supports_structured_output` is rejected before any HTTP call; a request with
+    `reasoning_enabled=True` against a model not marked `supports_reasoning` is rejected the same
+    way — the first use of that capability flag as an enforced precondition rather than metadata
+    only.
+  - **Privacy routing**: every OpenRouter request carries
+    `provider: {require_parameters: true, data_collection: "<deny|allow>"}` — `require_parameters`
+    so OpenRouter only routes to an endpoint that actually supports the structured-output/
+    reasoning parameters requested (never a silent downgrade), `data_collection` read from
+    `LLMProvider.data_collection_policy` and lower-cased for the wire format. If that field ever
+    holds a value outside `{DENY, ALLOW}` (only possible for a row that bypassed `full_clean()` —
+    the same defense-in-depth posture `get_adapter_for_stage`'s stage-budget check already
+    established for D-024), the adapter fails closed with `CONFIGURATION` and makes no HTTP call,
+    rather than ever sending an unvalidated value or silently weakening the policy. ZDR
+    (zero-data-retention) is deliberately **not** added as a default or a field in this decision —
+    current OpenRouter endpoint metadata for the free tier was not verified to require or support
+    it; it remains an explicit, optional, future configuration if a later operator verification
+    step confirms it applies.
+  - **Reasoning**: OpenRouter's unified `{"reasoning": {"enabled": true}}` is sent only when
+    `request.reasoning_enabled` is explicitly `True` — never for `False`/`None`, and never as a
+    blanket per-adapter default (the same opt-in, request-driven pattern `nvidia.py` established
+    for `chat_template_kwargs.enable_thinking`, translated to OpenRouter's own parameter shape).
+    Reasoning tokens are accepted as ordinary completion/output usage, exactly as OpenRouter
+    reports them — no separate reasoning-token field was added. The final answer is parsed only
+    from `choices[0].message.content`; `reasoning`/`reasoning_content`/`reasoning_details` are
+    never read as a substitute, proven by a dedicated test asserting an error (not a fabricated
+    result) when `content` is missing even though a reasoning field is present alongside it. No
+    reasoning/chain-of-thought text is ever persisted to `LLMCallLog` or exposed in admin —
+    structurally guaranteed, since `LLMCallLog` has no content field of any kind for any provider,
+    proven here by a test that greps every `LLMCallLog` field for reasoning text after a call whose
+    mocked response included some.
+  - **Multi-turn `reasoning_details` continuation**: intentionally out of scope. Every pipeline
+    stage this codebase has (`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/
+    `AB_BUILD`) is single-shot — one request, one response, no follow-up call in the same
+    conversation — so there is nothing to carry `reasoning_details` between. If a future
+    multi-turn or tool-calling workflow is ever built, it must preserve `reasoning_details`
+    unmodified in memory and pass it back verbatim on the next call (OpenRouter's own documented
+    contract) — noted here for that future workflow's benefit, not implemented now, and no
+    conversation-state subsystem was built to anticipate it.
+  - **Error classification**: `parse_openai_style_chat_completion` (shared by OpenAI/NIM/
+    OpenRouter) gained two status branches applicable to all three, since HTTP semantics here are
+    provider-neutral, not OpenRouter-specific: `402` → `CONFIGURATION` (quota/billing/account
+    restriction, non-transient) and `408` → `TIMEOUT` (transient, eligible for the existing
+    bounded retry policy). `400`/`413`/`422` already fell through to the existing generic
+    `SCHEMA_VALIDATION` branch, which was already non-transient — satisfying "invalid request/
+    schema/configuration; non-transient" without a new branch. `404`/`410` already classified
+    `CONFIGURATION`; `429` already `RATE_LIMIT`; `500`/`502`/`503`/`524`/`529` already fall through
+    to the existing `>= 500` → `PROVIDER_INTERNAL` branch, all already transient/retryable. No
+    provider-specific JSON body parsing/repair was added inside the adapter; sanitization (never
+    logging a raw request/response body) was already structural in `sanitize_error_message`/the
+    existing status-branch messages, which never echo response content.
+  - **Retry**: the existing shared `BaseLLMAdapter.generate()`/`execute_with_retry` path is reused
+    unmodified — bounded attempts (`RetryPolicy.max_attempts`, default 3), retried only for
+    `RATE_LIMIT`/`TIMEOUT`/`PROVIDER_INTERNAL`, never for `AUTH`/`CONFIGURATION`/
+    `SCHEMA_VALIDATION`. `Retry-After` header honoring was **not** added — the existing retry
+    abstraction has no mechanism to read response headers at all (linear backoff only), so there
+    was nothing to wire this into without a broader retry-policy change out of scope here; flagged
+    as a possible future enhancement, not implemented. Free-model unavailability/rate-limiting
+    never triggers model switching or a paid fallback — the adapter always sends
+    `self.llm_model.model_id` verbatim, proven by a test asserting the sent model slug is
+    identical across a failed-then-retried request pair.
+  - **Model exactness**: the adapter never hardcodes or substitutes a model id — whatever
+    `LLMModel.model_id` the registry resolves to is sent verbatim, so there is no code path that
+    could silently fall back from `z-ai/glm-5.2:free` to a paid model or `openrouter/free`.
+- **Capability discovery**: no live OpenRouter model-metadata lookup was implemented — the
+  architecture has no existing provider model-discovery mechanism to extend (`career-intelligence`
+  is explicitly not a dependency, and no prior provider added one), so building a new one for this
+  implementation-only task would be scope creep. The exact operator verification step is
+  documented instead (see "Operator follow-up" below and `docs/CURRENT_STATE.md`).
+- **Admin**: `LLMProviderAdmin.list_display` gained `data_collection_policy`; no other admin
+  change was needed — `LLMModel`'s existing `supports_structured_output`/`supports_reasoning`/
+  `max_output_tokens` fields and `StageModelAssignment`'s existing `full_clean()`-validated
+  admin form already cover OpenRouter with zero additional code, exactly as they do for every
+  other provider type.
+- **Smoke test**: `llm_provider/smoke/run_openrouter.py` + `manage.py smoke_test_openrouter`
+  (`--model`, `--reasoning`) follow the existing opt-in, never-automatic pattern exactly
+  (`CREDENTIAL_ENV_VARS[OPENROUTER] = "OPENROUTER_API_KEY"` added to the shared selection harness);
+  `run_smoke_test`/`select_default_model` needed no OpenRouter-specific branch since both were
+  already generic over `provider_type`. `run_smoke_test` gained an optional `reasoning_enabled`
+  parameter (defaults to `None`, i.e. no behavior change for OpenAI/NVIDIA/Gemini's existing smoke
+  commands) so a later operator can smoke-verify a reasoning-enabled request without hand-editing
+  the harness. **Not run in this session** — no credential was available or used, and none of
+  `smoke_test_openai`/`smoke_test_nvidia`/`smoke_test_gemini`'s existing behavior changed.
+- **Tests**: `llm_provider/tests/test_openrouter_adapter.py` (46 new deterministic tests, all
+  `requests.post` mocked, covering registry selection, endpoint/auth, missing-credential
+  short-circuit, attribution headers, exact-model-slug/no-fallback, request-body construction
+  (messages/temperature/`max_tokens`/`stream`/`top_p`), structured-output request/capability
+  guard, the `provider` routing object (`require_parameters`, default-`deny` and explicit-`allow`
+  `data_collection`, fail-closed on an invalid stored value), reasoning enable/omit/reject,
+  reasoning-fields-never-substitute-for-content, no-raw-reasoning-in-`LLMCallLog`, successful
+  response normalization/usage extraction, empty/missing/malformed content, status-code
+  classification (`402`/`408`/`429`/`524`/`529`/`400`/`413`/`422`/`404`/`410`), truncation
+  non-retryability, bounded-retry success/exhaustion, no-retry-on-non-transient-categories,
+  no-model-fallback-across-retries, stage-specific effective-budget propagation into the actual
+  request body, and the network guard blocking a real call). One pre-existing test
+  (`test_registry.py::AdminRegistryReachabilityTests::test_provider_and_model_creatable_through_
+  admin`) needed its POST payload updated to include the new required `data_collection_policy`
+  field — the same kind of explicit-field update that test already does for `base_url`, not a
+  weakened assertion. Full suite: 875/875 passing (up from 829 before this change), zero live
+  credentials, `NetworkGuardedTestRunner` active throughout. `manage.py check`,
+  `makemigrations --check --dry-run` (no changes detected), and `ruff check .` all pass. The new
+  migration was additionally verified applying cleanly from zero on a genuinely fresh, isolated
+  PostgreSQL container (a throwaway `postgres:16-alpine` instance on a non-default port, separate
+  from the real local dev database, removed immediately after verification).
+- **Operator follow-up (not performed in this session — a separate, later, explicitly-authorized
+  action)**:
+  1. Verify `z-ai/glm-5.2:free`'s current context length, max-completion-tokens, structured-output
+     support, and reasoning support directly against OpenRouter's model listing/docs (there is no
+     in-repo discovery command to do this automatically — see above) before trusting any capability
+     flag beyond what this decision registers provisionally in code comments/tests.
+  2. Create the real `LLMProvider` row (`provider_type=OPENROUTER`,
+     `credential_env_var=OPENROUTER_API_KEY`) and `LLMModel` row (`model_id=z-ai/glm-5.2:free`,
+     `supports_structured_output=True`, `supports_reasoning=True`, `max_output_tokens` set only
+     after step 1 confirms a real value) through the admin — never created live by this decision.
+  3. Populate `OPENROUTER_API_KEY` (and optionally `OPENROUTER_HTTP_REFERER`/
+     `OPENROUTER_APP_TITLE`) in `.env` — never committed.
+  4. Run `python manage.py smoke_test_openrouter` (add `--reasoning` once step 1 confirms
+     reasoning support) as a separate, explicitly-authorized action; review its output, including
+     whether the free endpoint actually satisfies `require_parameters=true` for the features
+     requested (a `require_parameters` rejection is expected, visible, non-transient behavior if
+     no compliant free endpoint exists for a given request shape — never a signal to silently
+     relax `data_collection` or fall back to a different/paid model).
+  5. Only after that smoke test is reviewed and approved, assign OpenRouter to any
+     `StageModelAssignment` — never implied or performed by this decision.
+- **Consequence**: `llm_provider.0005_llmprovider_data_collection_policy_and_more` (additive: one
+  new provider-type choice, one new field with a safe default — no existing row's resolved
+  behavior changes). No `LLMProvider`/`LLMModel`/`StageModelAssignment` row was created or changed
+  in the real development database; no live provider call was made; existing NVIDIA stage
+  assignments and any concurrently in-progress M5 work in the primary checkout were untouched
+  (this work was isolated in worktree `openrouter-provider` / branch
+  `worktree-openrouter-provider`).

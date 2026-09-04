@@ -19,7 +19,18 @@ class LLMProvider(models.Model):
         OPENAI = "OPENAI", "OpenAI"
         NVIDIA_NIM = "NVIDIA_NIM", "NVIDIA NIM"
         GEMINI = "GEMINI", "Gemini"
+        OPENROUTER = "OPENROUTER", "OpenRouter"
         FAKE = "FAKE", "Fake (test-only)"
+
+    class DataCollectionPolicy(models.TextChoices):
+        """Constrained values for OpenRouter's `provider.data_collection` routing directive
+        (2026-09-04, OpenRouter provider integration) -- never arbitrary JSON. Read only by
+        `OpenRouterAdapter`; harmless/unused for every other provider type. Defaults to `DENY`
+        so personal resume/Candidate Memory content is never routed to an endpoint that logs or
+        trains on request data unless an operator deliberately opts a provider row in."""
+
+        DENY = "DENY", "Deny (no endpoint that collects/trains on request data)"
+        ALLOW = "ALLOW", "Allow"
 
     name = models.CharField(max_length=100, unique=True)
     provider_type = models.CharField(max_length=20, choices=ProviderType.choices)
@@ -34,6 +45,15 @@ class LLMProvider(models.Model):
         help_text=(
             "Name of the environment variable holding this provider's API credential. "
             "The credential value itself is never stored in the database (NFR-003)."
+        ),
+    )
+    data_collection_policy = models.CharField(
+        max_length=10,
+        choices=DataCollectionPolicy.choices,
+        default=DataCollectionPolicy.DENY,
+        help_text=(
+            "OpenRouter-specific: the privacy value sent as this provider's request-level "
+            "`provider.data_collection` routing directive. Ignored by every other provider type."
         ),
     )
     created_at = models.DateTimeField(auto_now_add=True)

@@ -35,6 +35,7 @@ CREDENTIAL_ENV_VARS = {
     LLMProvider.ProviderType.OPENAI: "OPENAI_API_KEY",
     LLMProvider.ProviderType.NVIDIA_NIM: "NVIDIA_NIM_API_KEY",
     LLMProvider.ProviderType.GEMINI: "GEMINI_API_KEY",
+    LLMProvider.ProviderType.OPENROUTER: "OPENROUTER_API_KEY",
 }
 
 
@@ -106,7 +107,13 @@ def _resolve_explicit_model(provider_type: str, env_var: str, model_id: str) -> 
     return llm_model
 
 
-def run_smoke_test(provider_type: str, model_id: str | None = None, *, temperature: float = 0.0) -> None:
+def run_smoke_test(
+    provider_type: str,
+    model_id: str | None = None,
+    *,
+    temperature: float = 0.0,
+    reasoning_enabled: bool | None = None,
+) -> None:
     env_var = CREDENTIAL_ENV_VARS[provider_type]
     if not os.environ.get(env_var):
         print(f"{provider_type}: NOT LIVE-VERIFIED (no credential in ${env_var})")
@@ -146,6 +153,7 @@ def run_smoke_test(provider_type: str, model_id: str | None = None, *, temperatu
         output_schema=SmokeTestOutput,
         max_output_tokens=64,
         temperature=temperature,
+        reasoning_enabled=reasoning_enabled,
     )
     result = adapter.generate(request)
     if result.is_error:
