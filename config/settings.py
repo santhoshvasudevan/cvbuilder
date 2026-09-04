@@ -103,6 +103,12 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
+# Gate-1 preparation (2026-09-04): every `manage.py test` run patches out `requests.get`/
+# `requests.post` for its duration (see `llm_provider/testing.py`), so no test -- current or
+# future -- can ever reach a live LLM provider or external host, even if it forgets to substitute
+# FakeAdapter or a real credential happens to be present in the environment.
+TEST_RUNNER = "llm_provider.testing.NetworkGuardedTestRunner"
+
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases

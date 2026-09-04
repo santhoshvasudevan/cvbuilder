@@ -4,10 +4,18 @@ against the registry -- no network, no credentials required beyond an env var mo
 reach the point where selection logic runs (the adapter call itself is never made in these
 tests, since the ambiguous/missing-model paths return before constructing an adapter, and the
 resolved-model path is covered without a live call by asserting on the printed selection line
-before the (mocked) provider call)."""
+before the (mocked) provider call).
+
+`run_smoke_test`/`select_default_model` print operator-facing status lines by design (this is a
+terminal tool, not a library) -- `_run_smoke_test_quietly` below redirects that output into a
+throwaway buffer for the duration of each call so it never leaks into `manage.py test`'s console
+output (Gate-1 preparation, 2026-09-04: this is exactly the deterministic, harmless-but-noisy
+text an earlier audit traced back to this file)."""
 
 from __future__ import annotations
 
+import contextlib
+import io
 from unittest import mock
 
 from django.test import TestCase
@@ -21,6 +29,16 @@ from ..smoke.common import (
     select_default_model,
 )
 from .factories import make_model, make_provider, make_stage_assignment
+
+
+def _run_smoke_test_quietly(*args, **kwargs) -> str:
+    """Calls `run_smoke_test` exactly as before, but captures its printed status line instead of
+    letting it reach the real console -- returns the captured text for tests that want to assert
+    on it."""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        run_smoke_test(*args, **kwargs)
+    return buffer.getvalue()
 
 
 class SelectDefaultModelTests(TestCase):
@@ -86,14 +104,14 @@ class RunSmokeTestSelectionFailuresMakeNoProviderCallTests(TestCase):
         # environment may have a real credential configured (deliberately never a value this
         # test reads or asserts on, since it overrides it before `run_smoke_test` ever sees it).
         with mock.patch.dict("os.environ", {"NVIDIA_NIM_API_KEY": ""}):
-            run_smoke_test(LLMProvider.ProviderType.NVIDIA_NIM)
+            _run_smoke_test_quietly(LLMProvider.ProviderType.NVIDIA_NIM)
         self.assertEqual(LLMProvider.objects.count(), 0)
         self.assertEqual(StageModelAssignment.objects.count(), 0)
 
     def test_no_registered_model_and_no_explicit_model_makes_no_call(self):
         with mock.patch.dict("os.environ", {"NVIDIA_NIM_API_KEY": "dummy-nonempty-value"}):
             with mock.patch("llm_provider.smoke.common.ADAPTER_CLASSES") as adapter_classes:
-                run_smoke_test(LLMProvider.ProviderType.NVIDIA_NIM)
+                _run_smoke_test_quietly(LLMProvider.ProviderType.NVIDIA_NIM)
                 adapter_classes.__getitem__.assert_not_called()
 
     def test_ambiguous_registered_models_and_no_explicit_model_makes_no_call(self):
@@ -103,7 +121,7 @@ class RunSmokeTestSelectionFailuresMakeNoProviderCallTests(TestCase):
 
         with mock.patch.dict("os.environ", {"NVIDIA_NIM_API_KEY": "dummy-nonempty-value"}):
             with mock.patch("llm_provider.smoke.common.ADAPTER_CLASSES") as adapter_classes:
-                run_smoke_test(LLMProvider.ProviderType.NVIDIA_NIM)
+                _run_smoke_test_quietly(LLMProvider.ProviderType.NVIDIA_NIM)
                 adapter_classes.__getitem__.assert_not_called()
 
     def test_explicit_model_bypasses_ambiguity_and_reaches_the_adapter_call(self):
@@ -123,7 +141,7 @@ class RunSmokeTestSelectionFailuresMakeNoProviderCallTests(TestCase):
                 {LLMProvider.ProviderType.NVIDIA_NIM: FakeAdapter},
             ):
                 with self.assertRaises(SystemExit):
-                    run_smoke_test(LLMProvider.ProviderType.NVIDIA_NIM, model_id="candidate-a")
+                    _run_smoke_test_quietly(LLMProvider.ProviderType.NVIDIA_NIM, model_id="candidate-a")
 
         from ..models import LLMModel
 
@@ -133,7 +151,7 @@ class RunSmokeTestSelectionFailuresMakeNoProviderCallTests(TestCase):
         """No candidate registered, no --model given -- must not fall back to creating some
         other hardcoded model id behind the operator's back."""
         with mock.patch.dict("os.environ", {"NVIDIA_NIM_API_KEY": "dummy-nonempty-value"}):
-            run_smoke_test(LLMProvider.ProviderType.NVIDIA_NIM)
+            _run_smoke_test_quietly(LLMProvider.ProviderType.NVIDIA_NIM)
         from ..models import LLMModel
 
         self.assertEqual(LLMModel.objects.count(), 0)
