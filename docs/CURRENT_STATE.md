@@ -1,10 +1,14 @@
 # Current State
 
-Last updated: 2026-09-05 (runtime agent/stage architecture documentation, configurable per-stage
+Last updated: 2026-09-05 (OpenAI Structured Outputs strict-schema `required`-completion fix -- see
+"OpenAI strict-schema `required`-completion fix (2026-09-05, D-032)" below. No M5/M6/Gate action,
+no live provider call, and no `StageModelAssignment`/registry change were made in this session --
+committed on branch `worktree-openai-strict-schema-fix`, not merged to `main`.). Previously, also
+2026-09-05: runtime agent/stage architecture documentation, configurable per-stage
 LLM read timeout, OpenRouter key-status service + sanitized 429 diagnostics + operator UI, and a
 read-only `gpt-5` Chat Completions compatibility fix -- see "Runtime timeout/OpenRouter-diagnostics/
 GPT-5-readiness work (2026-09-05, D-029/D-030/D-031)" below. No M5/M6/Gate action, no live provider
-call, no `StageModelAssignment` change, and no operational timeout value change were made in this
+call, no `StageModelAssignment` change, and no operational timeout value change were made in that
 session -- everything above is additive mechanism/UI/documentation, committed on branch
 `worktree-timeout-openrouter-diagnostics`, not merged to `main`.). Previously, as of 2026-09-04:
 stage-specific LLM output-token budgets, committed -- see "Stage-specific
@@ -419,10 +423,18 @@ validation with zero blockers and was activated on 2026-09-03** via
   categories (`RATE_LIMIT`/`TIMEOUT`/`PROVIDER_INTERNAL`), never retries once
   `partial_output_received` is set (regardless of category), and caps attempts with linear
   backoff. Sleep is injectable so tests never actually wait.
-- **Schema translation** (`llm_provider/schema_translation.py`): `to_openai_strict_schema()`
-  (keeps `$ref`/`$defs`/`enum`, adds `additionalProperties: false` recursively -- OpenAI and NIM
-  both use this) and `to_gemini_schema()` (inlines `$ref`/`$defs`, strips `enum`, converts type
-  names to Gemini's uppercase OpenAPI-subset dialect).
+- **Schema translation** (`llm_provider/schema_translation.py`, D-032 as of 2026-09-05):
+  `to_openai_strict_schema()` (OpenAI's own dialect) and `to_openai_compatible_strict_schema()`
+  (NVIDIA NIM/OpenRouter's dialect) both keep `$ref`/`$defs`/`enum` and recursively complete every
+  object node's contract -- `additionalProperties: false` plus `required = list(properties.keys())`,
+  in `properties`' own order, for the root object, `$defs`, nested objects, array item objects,
+  and anything reached through `$ref` -- raising `OpenAIStrictSchemaContractError` (caught by each
+  adapter as a pre-HTTP `CONFIGURATION` failure) if the result is ever incomplete. Only
+  `to_openai_strict_schema()` additionally strips `minLength`/`maxLength` (confirmed unsupported
+  by OpenAI's own Structured Outputs documentation); `to_openai_compatible_strict_schema()` keeps
+  them, since NVIDIA/OpenRouter are not confirmed to reject either keyword. `to_gemini_schema()`
+  (inlines `$ref`/`$defs`, strips `enum`, converts type names to Gemini's uppercase OpenAPI-subset
+  dialect) is unchanged.
 - **Adapters** (`llm_provider/adapters/`): `BaseLLMAdapter` (abstract -- owns the shared call
   path: retry, re-validation of the provider's raw dict against the canonical Pydantic
   `output_schema` via `model_validate()`, latency measurement, and the single `LLMCallLog` write);
@@ -1198,6 +1210,51 @@ detail in `docs/DECISIONS.md` D-029/D-030/D-031:
   `FitAssessment`/`ResumeDraft` are all unchanged. No M5, M6, Gate action, provider smoke test, or
   live LLM inference of any kind occurred in this session.
 
+## OpenAI strict-schema `required`-completion fix (2026-09-05, D-032)
+
+A schema-correction-plus-test work package, committed on its own branch
+(`worktree-openai-strict-schema-fix`, not merged to `main` in this session). Full detail in
+`docs/DECISIONS.md` D-032; summarized here:
+
+- **Confirmed incident**: a synthetic OpenAI `gpt-5` diagnostic request 400'd --
+  `type=invalid_request_error`, `param=response_format`, "'required' is required to be supplied
+  and to be an array including every key in properties. Missing 'diagnostic_terms'." Root cause:
+  Pydantic omits a defaulted field (`diagnostic_terms`/`equivalents`/`preserved_technical_terms`,
+  all `default_factory=list`) from JSON Schema `required`, but OpenAI's own documented rule is
+  "all fields must be required".
+- **Fix**: `llm_provider/schema_translation.py`'s `_complete_object_contract()` now recursively
+  completes `required`/`additionalProperties` for every object node (root, `$defs`, nested,
+  array-item, `$ref`-reached) in both `to_openai_strict_schema()` (OpenAI) and a new
+  `to_openai_compatible_strict_schema()` (NVIDIA NIM/OpenRouter); `_assert_object_contract_
+  complete()` re-checks the result and raises `OpenAIStrictSchemaContractError` if it is ever
+  incomplete -- caught by all three real adapters (`_call_once`) as a pre-HTTP `CONFIGURATION`
+  failure, never sent, never retried.
+- **Provider-specific keyword projection**: only `to_openai_strict_schema()` strips
+  `minLength`/`maxLength` (confirmed absent from OpenAI's documented Structured Outputs supported-
+  keyword subset, `developers.openai.com/api/docs/guides/structured-outputs`) --
+  `to_openai_compatible_strict_schema()` keeps them for NVIDIA/OpenRouter, which are not confirmed
+  to reject either keyword and which this project already relies on to enforce `MAX_TERM_CHARS=60`
+  server-side.
+- **Canonical validation unchanged**: `BaseLLMAdapter.generate()`'s post-response
+  `model_validate()` (D-005) was not touched -- verified directly that a mocked OpenAI response
+  exceeding the (now OpenAI-schema-absent) 60-char term bound, 500-char text bound, or 100-item
+  array bound still fails `SCHEMA_VALIDATION`.
+- **Prompt**: `candidate_matching/services/normalize.py`'s `SYSTEM_PROMPT` gained one sentence
+  stating the three bounded term lists are always present and must be `[]`, never omitted or
+  fabricated, when empty.
+- **HTTP-400 classification boundary**: deferred, not fixed in this decision (see D-032's own
+  entry for the full gating rationale) -- this fix eliminates the schema-shape cause of the
+  confirmed incident before any HTTP call, so no residual classification gap remains for this
+  specific failure mode.
+- **Tests**: 26 new deterministic tests (`llm_provider/tests/test_strict_schema_required_
+  completion.py`) plus 5 new/updated tests in `candidate_matching/tests/test_normalize.py`. Full
+  suite (`llm_provider`, `candidate_matching`, `candidate_memory`, `job_intake`, `resume_builder`,
+  `job_applications`, `reviews`): 1042/1042 passing; `manage.py check`/`makemigrations --check
+  --dry-run`/`ruff check .`/`git diff --check` all clean; zero live provider calls.
+- **Not done in this session**: no live provider call; no `LLMProvider`/`LLMModel`/
+  `StageModelAssignment` row changed; no M5/M6 process ran; no Gate approved; `JobApplication` 9,
+  `JobRequirementAnalysis` 10, and `CandidateMemory` 7 untouched.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -1251,8 +1308,11 @@ operator-authorized rerun, never an automatic or invisible switch -- see `docs/D
 UI exists yet, and none is implemented by D-028 itself. D-029 (configurable per-stage read timeout),
 D-030 (OpenRouter key-status service + sanitized 429 diagnostics + operator UI), and D-031 (`gpt-5`
 Chat Completions compatibility fix, no live call) -- see "Runtime timeout/OpenRouter-diagnostics/
-GPT-5-readiness work" above -- are all **APPROVED AND IMPLEMENTED**. Neither D-016 nor anything else
-is blocking for M7 as currently scoped.
+GPT-5-readiness work" above -- are all **APPROVED AND IMPLEMENTED**. D-032 (OpenAI Structured
+Outputs strict-schema `required`-completion fix, no live call -- see "OpenAI strict-schema
+`required`-completion fix" above) is **APPROVED AND IMPLEMENTED**; its own HTTP-400 classification
+sub-question is explicitly deferred as a distinct follow-up, not itself blocking. Neither D-016 nor
+anything else is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

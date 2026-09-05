@@ -10,7 +10,7 @@ import os
 import requests
 
 from ..errors import LLMErrorCategory, NormalizedLLMError
-from ..schema_translation import to_openai_strict_schema
+from ..schema_translation import OpenAIStrictSchemaContractError, to_openai_strict_schema
 from ..types import NormalizedLLMRequest, NormalizedLLMResult, TokenUsage
 from .base import BaseLLMAdapter
 
@@ -212,7 +212,14 @@ class OpenAIAdapter(BaseLLMAdapter):
                 )
             )
 
-        schema = self.translate_schema(request.output_schema)
+        try:
+            schema = self.translate_schema(request.output_schema)
+        except OpenAIStrictSchemaContractError as exc:
+            # D-032: a locally-detected incomplete strict-mode schema is a request-contract
+            # configuration problem, caught before any HTTP call -- never sent and never retried.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(category=LLMErrorCategory.CONFIGURATION, message=str(exc))
+            )
         # GPT-5-family compatibility (2026-09-05, D-029/Phase F): a reasoning-capable OpenAI model
         # (o1/o3/gpt-5, ...) requires `max_completion_tokens` in place of `max_tokens` and rejects
         # any explicit `temperature` value -- see `build_chat_completion_body`'s own docstring.

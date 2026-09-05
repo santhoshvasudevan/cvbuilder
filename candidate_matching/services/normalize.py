@@ -60,6 +60,10 @@ core concept.
 from the original requirement, preserved verbatim (never translated or altered).
 - source_language: the job posting's source language you were given.
 
+diagnostic_terms, equivalents, and preserved_technical_terms are always present in your output, \
+one per requirement -- when a requirement genuinely has nothing to report for one of them, return \
+an empty list for it rather than omitting the field or inventing content to fill it.
+
 Every list is short and bounded -- do not enumerate exhaustively. Each entry in diagnostic_terms, \
 equivalents, and preserved_technical_terms must be a short term or short phrase of at most \
 {MAX_TERM_CHARS} characters -- never a complete sentence, an action clause, or a restatement of \

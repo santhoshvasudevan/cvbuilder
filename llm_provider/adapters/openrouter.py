@@ -35,7 +35,7 @@ import requests
 
 from ..errors import LLMErrorCategory, NormalizedLLMError, sanitize_error_message
 from ..models import LLMProvider
-from ..schema_translation import to_openai_strict_schema
+from ..schema_translation import OpenAIStrictSchemaContractError, to_openai_compatible_strict_schema
 from ..types import NormalizedLLMRequest, NormalizedLLMResult
 from .base import BaseLLMAdapter
 from .openai import build_chat_completion_body, parse_openai_style_chat_completion
@@ -155,8 +155,10 @@ _VALID_DATA_COLLECTION_VALUES = {
 class OpenRouterAdapter(BaseLLMAdapter):
     @staticmethod
     def translate_schema(output_schema: type) -> dict:
-        # OpenRouter's structured-output contract is the same OpenAI-strict dialect NIM uses.
-        return to_openai_strict_schema(output_schema)
+        # OpenRouter's structured-output contract is the same OpenAI-strict dialect NIM uses --
+        # the NVIDIA/OpenRouter dialect (D-032), not OpenAI's own; see
+        # `to_openai_compatible_strict_schema`'s docstring for why the two differ.
+        return to_openai_compatible_strict_schema(output_schema)
 
     def _call_once(self, request: NormalizedLLMRequest) -> NormalizedLLMResult:
         if not self.llm_model.supports_structured_output:
@@ -212,7 +214,14 @@ class OpenRouterAdapter(BaseLLMAdapter):
                 )
             )
 
-        schema = self.translate_schema(request.output_schema)
+        try:
+            schema = self.translate_schema(request.output_schema)
+        except OpenAIStrictSchemaContractError as exc:
+            # D-032: same local, pre-HTTP configuration failure as OpenAIAdapter -- see its
+            # `_call_once` for the full rationale.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(category=LLMErrorCategory.CONFIGURATION, message=str(exc))
+            )
         body = build_chat_completion_body(request, self.llm_model.model_id, schema)
         body["stream"] = False
         if request.top_p is not None:

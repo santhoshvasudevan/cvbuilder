@@ -1832,3 +1832,132 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   `supports_structured_output=True`, `max_output_tokens=128000`, `supports_reasoning=True` (capability
   flag only -- no stage's `NormalizedLLMRequest.reasoning_effort` is set by this decision), no
   fallback/substitution model anywhere in the adapter or registry.
+
+## D-032: OpenAI Structured Outputs strict-schema `required`-completion fix (no live call)
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-05) -- confirmed against a real, safe
+  diagnostic HTTP 400 (never a raw response body -- only the sanitized `type`/`param`/`message`
+  fields, reproduced here as a regression fixture) and against current official OpenAI Structured
+  Outputs documentation (`developers.openai.com/api/docs/guides/structured-outputs`, "Supported
+  properties" / "Some type-specific keywords are not yet supported" / "All fields must be
+  required" sections, fetched and quoted verbatim during this work). **No live OpenAI call was
+  made or authorized by this decision** -- schema correctness was verified entirely through
+  deterministic Pydantic/JSON-Schema inspection and mocked-HTTP adapter tests. No `LLMProvider`/
+  `LLMModel`/`StageModelAssignment` row, `JobApplication` 9, `JobRequirementAnalysis` 10,
+  `CandidateMemory` 7, Gate, `FitAssessment`, or `ResumeDraft` was touched.
+- **Confirmed incident**: a synthetic OpenAI `gpt-5` diagnostic request returned HTTP 400,
+  `type=invalid_request_error`, `param=response_format`: "Invalid schema for response_format
+  'RequirementNormalizationOutput': In context=(), 'required' is required to be supplied and to
+  be an array including every key in properties. Missing 'diagnostic_terms'."
+- **Root cause**: `RequirementNormalizationItem` (`candidate_matching/schemas.py`) has six
+  properties; Pydantic's `model_json_schema()` only lists a field in JSON Schema `required` when
+  it has no default, so `diagnostic_terms`/`equivalents`/`preserved_technical_terms` (all
+  `default_factory=list`) were silently absent from `required`. OpenAI's own documented rule is
+  "all fields must be required" -- there is no way to mark a property "optional" other than
+  folding `null` into its own type (`anyOf [..., {"type": "null"}]`) -- so OpenAI rejects an
+  incomplete `required` array before generation ever starts. The pre-existing
+  `to_openai_strict_schema()` (`llm_provider/schema_translation.py`) added
+  `additionalProperties: false` but never completed `required`.
+- **Every-property-required fix**: `_complete_object_contract()` now recursively walks the entire
+  JSON-Schema structure -- root object, `$defs`, nested objects, array item objects, and anything
+  reached through `$ref` -- and, for every node describing an object, sets
+  `additionalProperties: False` and `required = list(properties.keys())` in `properties`' own
+  insertion order (deterministic). A field with a non-null default (an empty list, `""`, a fixed
+  string) keeps its original, non-nullable type -- the provider must always supply a value, and
+  the AC_NORMALIZE prompt/schema guide the model toward the empty/default shape. A field that was
+  already `Optional[X] = None` is untouched beyond being added to `required` -- its schema already
+  expresses "no value" via OpenAI's own documented nullable-union pattern.
+  `_assert_object_contract_complete()` re-walks the result and raises
+  `OpenAIStrictSchemaContractError` -- caught by each of `OpenAIAdapter`/`NvidiaNimAdapter`/
+  `OpenRouterAdapter`'s `_call_once`, before `build_chat_completion_body`/`requests.post` are ever
+  reached, and returned as `NormalizedLLMResult(error=NormalizedLLMError(category=CONFIGURATION,
+  ...))` -- a local configuration/request-contract failure, never retried
+  (`CONFIGURATION` is not in `TRANSIENT_ERROR_CATEGORIES`), never a provider response issue.
+- **Official OpenAI supported-keyword assessment** (quoted from the live doc, 2026-09-05):
+  supported `string` properties are only `pattern` and `format` (a fixed enumerated list:
+  `date-time`/`time`/`date`/`duration`/`email`/`hostname`/`ipv4`/`ipv6`/`uuid`); supported
+  `number` properties are `multipleOf`/`maximum`/`exclusiveMaximum`/`minimum`/`exclusiveMinimum`;
+  supported `array` properties are `minItems`/`maxItems`; `additionalProperties: false` is always
+  required on every object; composition keywords `allOf`/`not`/`dependentRequired`/
+  `dependentSchemas`/`if`/`then`/`else` are never supported; `$ref`/`$defs` (including recursive
+  schemas) and `enum`/`anyOf` are fully supported. **`minLength`/`maxLength` for strings are never
+  listed as supported for any model** -- confirmed by omission from the documented "Supported
+  `string` properties" list, independent of the separate "fine-tuned models additionally do not
+  support..." caveat (which is a stricter subset for fine-tuned models only and does not imply
+  base models support `minLength`/`maxLength` either). This project's only current use of a
+  string-length constraint (`candidate_matching.schemas.BoundedTerm`,
+  `MAX_TERM_CHARS=60`/`RequirementNormalizationItem.canonical_english_text`'s
+  `MAX_TEXT_CHARS=500`) is therefore confirmed unsupported by OpenAI and stripped from its
+  outbound schema only. A schema audit of every registry-used Pydantic model (`ChunkExtractionResult`,
+  `AgentJobberAnalysis`, `RequirementNormalizationOutput`, `RelevanceRankingOutput`,
+  `AgentCandidateAssessment`, `AgentBuilderOutput`, `SmokeTestOutput`) found `maxLength` as the
+  *only* officially-unsupported keyword generated anywhere in this codebase; no `allOf`,
+  `patternProperties`, or other unsupported composition keyword is ever generated.
+- **Provider-specific schema dialect (D-032)**: `to_openai_strict_schema()` remains OpenAI's own
+  dialect: full `required`-completion plus stripping `minLength`/`maxLength`
+  (`_OPENAI_UNSUPPORTED_STRING_LENGTH_KEYS`). A new sibling, `to_openai_compatible_strict_schema()`,
+  applies the identical `required`-completion fix for NVIDIA NIM/OpenRouter -- both OpenAI-
+  compatible `response_format: {type: json_schema, strict: true}` endpoints, per the pre-existing
+  adapter docstrings -- but does **not** strip `minLength`/`maxLength`: neither provider is
+  confirmed (by documentation or an observed error) to reject them, and this project already
+  relies on NVIDIA/OpenRouter enforcing `maxLength: 60` server-side
+  (`candidate_matching/tests/test_normalize.py::ProviderFacingSchemaContractTests`, predating this
+  decision). `OpenAIAdapter.translate_schema` calls `to_openai_strict_schema`;
+  `NvidiaNimAdapter.translate_schema`/`OpenRouterAdapter.translate_schema` now call
+  `to_openai_compatible_strict_schema` (previously all three called the same, OpenAI-named,
+  function -- an accurate description before this decision, since it never diverged from what
+  NVIDIA/OpenRouter needed; it does now, since only OpenAI has a confirmed keyword gap). This
+  is the "explicit schema dialect/profile" the task's Phase D asked for, rather than provider-name
+  conditionals scattered through pipeline/adapter call sites -- the branching exists in exactly
+  one place per adapter (`translate_schema`), matching the adapters' pre-existing per-provider
+  customization point.
+- **Canonical Pydantic validation is unchanged and remains authoritative**: `BaseLLMAdapter.
+  generate()`'s `request.output_schema.model_validate(result.content)` call (D-005) was not
+  touched. `MAX_TERM_CHARS=60`, `MAX_TEXT_CHARS=500`, every array-count bound, `extra="forbid"`,
+  and the requirement-ID-set integrity check all continue to reject non-conforming content after
+  a provider response, regardless of whether the constraint that would have caught it earlier is
+  present in the outbound schema OpenAI now receives -- verified directly: a mocked OpenAI
+  response containing a 61-character `diagnostic_terms` entry, a 501-character
+  `canonical_english_text`, and 101 `items` (all values a stricter OpenAI-bound schema would have
+  previously rejected server-side) each still produce
+  `NormalizedLLMResult(error.category=SCHEMA_VALIDATION)` through the unmodified post-response
+  path (`llm_provider/tests/test_strict_schema_required_completion.py::
+  PostResponseValidationStillEnforcesStrippedConstraintsTests`).
+- **Prompt alignment**: `candidate_matching/services/normalize.py`'s `SYSTEM_PROMPT` gained one
+  sentence stating `diagnostic_terms`/`equivalents`/`preserved_technical_terms` are always present
+  in the output and must be an empty list, never omitted or fabricated, when a requirement has
+  nothing to report for one of them -- the existing `MAX_TERM_CHARS`-based sentence (added under
+  D-027) was left as the single source of truth for the length limit, not duplicated. Other
+  registry prompts (`AJ_ANALYZE`'s `screening_risks`, `AB_BUILD`'s many `default_factory=list`
+  fields) were reviewed and judged not to need a change: `AJ_ANALYZE`'s prompt already states an
+  empty `screening_risks` is correct ("it is either an ordinary requirement... or nothing at all"),
+  and `AB_BUILD`'s existing claim-ID-citation validator (`resume_builder/validators/no_
+  fabrication.py`) already rejects any fabricated content regardless of prompt wording, so a
+  defaulted-list field being forced into OpenAI's `required` array carries no new fabrication risk
+  there.
+- **HTTP-400 classification boundary: deferred, not fixed in this decision**. The task raised
+  whether an OpenAI `invalid_request_error` with `param=response_format` should classify as
+  `CONFIGURATION` (a request-contract problem) rather than the generic `SCHEMA_VALIDATION` bucket
+  `parse_openai_style_chat_completion`'s catch-all `>= 400` branch currently assigns it (that
+  branch does not parse the response body at all today). This decision's own fix eliminates the
+  schema-shape cause of the confirmed incident before any HTTP call is made
+  (`_assert_object_contract_complete`), so no residual classification gap exists for this specific
+  failure mode going forward. Implementing body-parsing-based reclassification would require new
+  JSON-body-parsing logic in that shared branch -- not "already available in the parser" per the
+  task's own Phase G gating criterion -- so it is deferred as a distinct, independently-scoped
+  follow-up decision rather than bundled into a schema-correction task, to avoid widening this
+  change's blast radius. If taken up later: it must extract only `error.type`/`error.param` (never
+  persist the raw body), remain non-retryable, and leave every existing status-classification test
+  (`test_error_classification.py`) unchanged for every status code this decision did not touch.
+- **Consequence**: no migration (no model/schema-field change). 26 new deterministic tests
+  (`llm_provider/tests/test_strict_schema_required_completion.py`) plus 5 new/updated tests in
+  `candidate_matching/tests/test_normalize.py::ProviderFacingSchemaContractTests` and one new test
+  in `PromptContractTests` -- covering the regression fixture, recursive `required`-completeness
+  across every registry-used schema in both dialects (including `$defs`, nested objects, array
+  item objects, `$ref` targets, nullable-optional fields, and defaulted non-null lists),
+  determinism, the OpenAI/NVIDIA/OpenRouter keyword-stripping split, the pre-HTTP invariant guard
+  (mocked `requests.post` proven never called), the final request body for both dialects, and
+  post-response canonical validation surviving the stripped keyword. Full suite: 1042/1042 passing
+  (`llm_provider`, `candidate_matching`, `candidate_memory`, `job_intake`, `resume_builder`,
+  `job_applications`, `reviews`); `manage.py check`/`makemigrations --check --dry-run`/
+  `ruff check .`/`git diff --check` all clean; zero live provider calls.

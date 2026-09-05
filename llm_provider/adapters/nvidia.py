@@ -22,7 +22,7 @@ import os
 import requests
 
 from ..errors import LLMErrorCategory, NormalizedLLMError
-from ..schema_translation import to_openai_strict_schema
+from ..schema_translation import OpenAIStrictSchemaContractError, to_openai_compatible_strict_schema
 from ..types import NormalizedLLMRequest, NormalizedLLMResult
 from .base import BaseLLMAdapter
 from .openai import build_chat_completion_body, parse_openai_style_chat_completion
@@ -33,8 +33,10 @@ DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 class NvidiaNimAdapter(BaseLLMAdapter):
     @staticmethod
     def translate_schema(output_schema: type) -> dict:
-        # NIM is OpenAI-compatible for structured output (requirements.md Sec 9.3).
-        return to_openai_strict_schema(output_schema)
+        # NIM is OpenAI-compatible for structured output (requirements.md Sec 9.3). Uses the
+        # NVIDIA/OpenRouter dialect (D-032), not OpenAI's own -- see
+        # `to_openai_compatible_strict_schema`'s docstring for why the two differ.
+        return to_openai_compatible_strict_schema(output_schema)
 
     def _call_once(self, request: NormalizedLLMRequest) -> NormalizedLLMResult:
         if not self.llm_model.supports_structured_output:
@@ -61,7 +63,14 @@ class NvidiaNimAdapter(BaseLLMAdapter):
                 )
             )
 
-        schema = self.translate_schema(request.output_schema)
+        try:
+            schema = self.translate_schema(request.output_schema)
+        except OpenAIStrictSchemaContractError as exc:
+            # D-032: same local, pre-HTTP configuration failure as OpenAIAdapter -- see its
+            # `_call_once` for the full rationale.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(category=LLMErrorCategory.CONFIGURATION, message=str(exc))
+            )
         body = build_chat_completion_body(request, self.llm_model.model_id, schema)
         # NVIDIA-specific translation of generic, opt-in normalized options -- applied only when
         # the caller explicitly set them (never a blanket per-adapter default); see module

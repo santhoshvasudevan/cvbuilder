@@ -232,7 +232,19 @@ milestone scope):
   locally with invented, non-personal requirement text, no network call) all expose
   `maxLength: MAX_TERM_CHARS` on every bounded term-list item, and the `SYSTEM_PROMPT` states the
   same limit in natural language — closing the gap a real M5 run found, where a limit was enforced
-  locally but invisible to the model.
+  locally but invisible to the model. **(D-032, 2026-09-05)** `test_normalize.py` was updated for
+  the provider-specific schema dialect split this decision introduced:
+  `to_openai_strict_schema()` (OpenAI's own outbound schema) no longer carries `maxLength` (not in
+  OpenAI's documented supported subset) while `to_openai_compatible_strict_schema()` (NVIDIA/
+  OpenRouter) still does — both dialects are asserted separately, and a new adapter-level test
+  proves an over-length term in a *returned* OpenAI response still fails canonical Pydantic
+  validation even with `maxLength` absent from what was sent. A new
+  `llm_provider/tests/test_strict_schema_required_completion.py` recursively asserts
+  `set(required) == set(properties.keys())` and `additionalProperties: false` for every object
+  node (root, `$defs`, nested, array-item, `$ref`-reached) of every registry-used schema, in both
+  dialects — this is the general form of the same gap D-027 found for term length: a constraint
+  invisible to the provider must still be enforced canonically after the fact, and here the
+  invisible thing was entire required fields, not just a length bound.
 - **M6 (`resume_builder`), implemented 2026-09-03**: the no-fabrication validator running against the **structured**
   representation before any markdown is rendered (a fixture `ResumeElement` with no evidence, or
   with an ID that doesn't resolve to an existing/confirmed/eligible `MemoryClaim`, is rejected

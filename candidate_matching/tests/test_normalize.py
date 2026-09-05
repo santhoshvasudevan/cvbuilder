@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from candidate_memory.models import CandidateMemory
 from llm_provider.adapters.openai import build_chat_completion_body
-from llm_provider.schema_translation import to_openai_strict_schema
+from llm_provider.schema_translation import to_openai_compatible_strict_schema, to_openai_strict_schema
 
 from ..schemas import RequirementNormalizationItem, RequirementNormalizationOutput
 from ..services.candidate_generation import generate_candidates_for_requirement
@@ -480,10 +480,13 @@ class TermLengthAndListCountBoundaryTests(SimpleTestCase):
 
 
 class ProviderFacingSchemaContractTests(SimpleTestCase):
-    """Proves `MAX_TERM_CHARS` is not merely enforced locally but actually reaches the provider:
-    the Pydantic-generated JSON schema, the strict-schema conversion every adapter uses, and the
-    final OpenAI-compatible request body all carry `maxLength: MAX_TERM_CHARS` on every bounded
-    term-list item. No provider/network call is made -- this only builds objects locally."""
+    """Proves `MAX_TERM_CHARS` is not merely enforced locally but actually reaches every provider
+    that can enforce it, and that OpenAI's own outbound schema -- which cannot (D-032:
+    `maxLength` is not in OpenAI's documented Structured Outputs supported-keyword subset) -- is
+    still backed by canonical Pydantic validation. `to_openai_strict_schema` is OpenAI's own
+    dialect; `to_openai_compatible_strict_schema` is the shared NVIDIA/OpenRouter dialect (see
+    `llm_provider/schema_translation.py`). No provider/network call is made -- this only builds
+    objects locally."""
 
     def test_generated_pydantic_schema_has_item_level_max_length_for_every_term_list(self):
         schema = RequirementNormalizationOutput.model_json_schema()
@@ -494,8 +497,10 @@ class ProviderFacingSchemaContractTests(SimpleTestCase):
                     item_schema["properties"][field_name]["items"]["maxLength"], MAX_TERM_CHARS
                 )
 
-    def test_strict_schema_conversion_preserves_max_length_max_items_and_additional_properties(self):
-        strict = to_openai_strict_schema(RequirementNormalizationOutput)
+    def test_nvidia_openrouter_schema_conversion_preserves_max_length_max_items_and_additional_properties(
+        self,
+    ):
+        strict = to_openai_compatible_strict_schema(RequirementNormalizationOutput)
         item_schema = strict["$defs"]["RequirementNormalizationItem"]
         for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
             with self.subTest(field=field_name):
@@ -507,18 +512,41 @@ class ProviderFacingSchemaContractTests(SimpleTestCase):
         # Nothing else already-present was silently loosened or removed by the conversion.
         self.assertEqual(item_schema["properties"]["canonical_english_text"]["maxLength"], MAX_TEXT_CHARS)
         self.assertEqual(strict["properties"]["items"]["maxItems"], MAX_NORMALIZATION_ITEMS)
+        # required is complete for every object node too (D-032), not just the pre-existing bounds.
+        self.assertEqual(set(item_schema["required"]), set(item_schema["properties"].keys()))
+
+    def test_openai_schema_conversion_drops_max_length_but_keeps_max_items_and_required(self):
+        """D-032: `maxLength` is not part of OpenAI's documented Structured Outputs
+        supported-keyword subset, so OpenAI's own outbound schema must not carry it -- but
+        `maxItems` (officially supported) and the completed `required` array must still be
+        present. `canonical_english_text`'s 500-char bound is likewise stripped from the outbound
+        schema here but remains enforced by `RequirementNormalizationOutput.model_validate()`
+        post-response (D-005) -- see `test_final_nvidia_bound_request_body_exposes_max_length_for_
+        every_term_list`'s sibling test for the OpenAI-bound body proof."""
+        strict = to_openai_strict_schema(RequirementNormalizationOutput)
+        item_schema = strict["$defs"]["RequirementNormalizationItem"]
+        for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                field_schema = item_schema["properties"][field_name]
+                self.assertNotIn("maxLength", field_schema["items"])
+                self.assertEqual(field_schema["maxItems"], limit)
+        self.assertNotIn("maxLength", item_schema["properties"]["canonical_english_text"])
+        self.assertEqual(item_schema["additionalProperties"], False)
+        self.assertEqual(strict["additionalProperties"], False)
+        self.assertEqual(strict["properties"]["items"]["maxItems"], MAX_NORMALIZATION_ITEMS)
+        self.assertEqual(set(item_schema["required"]), set(item_schema["properties"].keys()))
 
     def test_final_nvidia_bound_request_body_exposes_max_length_for_every_term_list(self):
         """Builds the real AC_NORMALIZE request (invented, non-personal requirement text) through
         the production request builder, translates it through the exact strict-schema conversion
-        NVIDIA/OpenAI adapters use, and assembles the final chat-completion body those adapters
-        send -- all locally, no network call -- to prove `maxLength` reaches the actual
+        the NVIDIA adapter uses, and assembles the final chat-completion body that adapter sends
+        -- all locally, no network call -- to prove `maxLength` reaches the actual
         `response_format.json_schema.schema` NVIDIA would receive."""
         requirements = [
             {"requirement_id": "JR-TEST-1", "text": "Invented, non-personal requirement text."}
         ]
         request = build_request(requirements, posting_language="en", max_output_tokens=8192)
-        schema = to_openai_strict_schema(request.output_schema)
+        schema = to_openai_compatible_strict_schema(request.output_schema)
         body = build_chat_completion_body(request, "invented-model-id", schema)
         item_schema = body["response_format"]["json_schema"]["schema"]["$defs"][
             "RequirementNormalizationItem"
@@ -528,6 +556,24 @@ class ProviderFacingSchemaContractTests(SimpleTestCase):
                 self.assertEqual(
                     item_schema["properties"][field_name]["items"]["maxLength"], MAX_TERM_CHARS
                 )
+
+    def test_final_openai_bound_request_body_has_no_max_length_but_keeps_required_and_max_items(self):
+        """The OpenAI-bound sibling of the NVIDIA test above: `maxLength` must be absent from the
+        actual request body OpenAI would receive, while `required`/`maxItems` are still correct."""
+        requirements = [
+            {"requirement_id": "JR-TEST-1", "text": "Invented, non-personal requirement text."}
+        ]
+        request = build_request(requirements, posting_language="en", max_output_tokens=8192)
+        schema = to_openai_strict_schema(request.output_schema)
+        body = build_chat_completion_body(request, "invented-model-id", schema)
+        item_schema = body["response_format"]["json_schema"]["schema"]["$defs"][
+            "RequirementNormalizationItem"
+        ]
+        for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                self.assertNotIn("maxLength", item_schema["properties"][field_name]["items"])
+                self.assertEqual(item_schema["properties"][field_name]["maxItems"], limit)
+        self.assertEqual(set(item_schema["required"]), set(item_schema["properties"].keys()))
 
 
 class PromptContractTests(SimpleTestCase):
@@ -543,3 +589,14 @@ class PromptContractTests(SimpleTestCase):
         self.assertIn("never a complete sentence", SYSTEM_PROMPT)
         self.assertIn("action clause", SYSTEM_PROMPT)
         self.assertIn("restatement of", SYSTEM_PROMPT)
+
+    def test_prompt_states_empty_list_semantics_for_the_three_term_lists(self):
+        """D-032/Phase E: OpenAI strict Structured Outputs requires `diagnostic_terms`/
+        `equivalents`/`preserved_technical_terms` to always be present in the schema (they can no
+        longer be silently omitted) -- the prompt must tell the model an empty list is the correct
+        way to report "nothing here", not an invitation to invent content."""
+        self.assertIn("always present", SYSTEM_PROMPT)
+        self.assertIn("empty list", SYSTEM_PROMPT)
+        self.assertIn("diagnostic_terms", SYSTEM_PROMPT)
+        self.assertIn("equivalents", SYSTEM_PROMPT)
+        self.assertIn("preserved_technical_terms", SYSTEM_PROMPT)
