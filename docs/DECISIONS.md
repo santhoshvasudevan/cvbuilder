@@ -1537,3 +1537,95 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   approved; `JobApplication` 9, `JobRequirementAnalysis` 10, and `CandidateMemory` 7 were untouched.
   This work was isolated in worktree `ac-normalize-contract-alignment` / branch
   `worktree-ac-normalize-contract-alignment`, left uncommitted to `main` for independent re-audit.
+
+## D-028: Provider/model fallback is an operator-authorized rerun, never an automatic or invisible switch
+
+- **Status**: **APPROVED** (2026-09-05) -- an explicit Product Owner directive, recorded verbatim
+  here before any implementation is attempted, per the standing rule that a decision only becomes
+  actionable once the product owner sets it to `APPROVED` in a session. No code changes accompany
+  this decision; it is a policy record governing how a future rerun/fallback capability must behave
+  once built, and how an operator may already reason about a failed stage today using only actions
+  that already exist (a plain rerun of the same stage through the existing registry).
+- **Context**: D-027 (immediately above) independently qualified both NVIDIA and OpenRouter
+  (`z-ai/glm-5.2:free`) for AC_NORMALIZE against the real `JobApplication` 9 / `JobRequirementAnalysis`
+  10 (v2, 30-requirement) workload -- both succeeded, 30/30 requirement IDs, no length violations
+  (`LLMCallLog` ids 310/311). This raised an operational question the codebase does not yet answer
+  procedurally: when a stage fails, who decides whether to rerun it against a different qualified
+  provider/model, and under what constraints. This decision answers that question as policy, ahead
+  of any M5 run that might need it.
+- **The decision** (Product Owner's own words, preserved verbatim as the operative text):
+
+  > A failed LLM stage may be rerun using a different qualified provider/model. A different
+  > registered model within the same provider, including OpenRouter, may also be selected.
+  > Provider/model switching must be explicit, stage-specific, visible to the operator, and
+  > audit-logged. It must never silently select a different model, incur paid usage, weaken privacy
+  > routing, or bypass capability qualification. The future UI should let the operator inspect and
+  > select the provider/model for each LLM call and explicitly authorize a fallback or rerun.
+  > Completing the current M5/M6 workflow takes priority; implementing the full UI control and
+  > automated orchestration is deferred.
+
+  "Fallback" is interpreted as **an operator-authorized new invocation** -- a fresh, explicit call
+  the operator chooses to make after a classified failure -- **never an invisible provider/model
+  switch inside an already-running logical call**. A logical invocation (one `adapter.generate()`
+  call and its automatic transient retries, per `retry.py`/D-008/LLM-008) keeps one fixed model
+  slug for its entire duration; nothing in this decision authorizes changing that mid-flight.
+- **Binding constraints this decision imposes on any future fallback/rerun capability**:
+  1. Fallback is an operator-authorized rerun after a classified stage failure -- never automatic,
+     never triggered by the pipeline itself deciding a provider "isn't working."
+  2. A rerun may select another qualified provider, or another qualified registered model within
+     the *same* provider (e.g. a different OpenRouter-routed model) -- both are equally valid
+     fallback targets, never privileging one provider type over another as a matter of policy.
+  3. Every fallback candidate must already satisfy, before it is offered as an option: credential
+     configuration (`LLMProvider.credential_env_var` resolves to a present environment value),
+     model capability (`LLMModel.max_output_tokens` covers the stage's required budget),
+     structured-output support when the stage requires it, reasoning support when the stage would
+     request it, a valid privacy/data-collection policy, a passed smoke qualification, and, where
+     applicable (as for AC_NORMALIZE, D-027's own qualification runs), a passed stage-specific
+     workload qualification. A candidate that has not cleared all of these is not "qualified" and
+     must not be offered, regardless of how the operator's selection UI is eventually built.
+  4. The exact model slug is fixed for one logical invocation and its automatic retries --
+     reaffirming `ARCHITECTURE.md` §3.3's existing OpenRouter-adapter invariant ("no fallback to a
+     paid or different model exists anywhere in the adapter") at the pipeline-orchestration level
+     too: nothing may swap providers/models between retries of the same logical call.
+  5. No paid-model fallback without explicit operator authorization -- an operator selecting a
+     fallback target must be able to see that it is a paid model before authorizing the rerun; nothing
+     may silently route a failure to a paid alternative.
+  6. Privacy settings (`data_collection=deny`, `require_parameters=true` for OpenRouter, and the
+     equivalent posture for any other provider) can never be weakened as a side effect of a
+     fallback decision -- a fallback target inherits its own registry row's privacy policy exactly
+     as configured, never a loosened one chosen to make the fallback succeed.
+  7. Every invocation -- primary or fallback -- retains its own exact, distinct provider/model
+     identity in its own `LLMCallLog` row (already true today via `BaseLLMAdapter._write_call_log`,
+     LLM-010); a fallback rerun is a second, separately logged call, never a correction merged into
+     the first row.
+  8. A schema/configuration failure (`SCHEMA_VALIDATION`, `CONFIGURATION`) must never be
+     mischaracterized as transient to justify an automatic retry or fallback -- `retry.py`'s
+     existing `TRANSIENT_ERROR_CATEGORIES` boundary already enforces this for automatic retries,
+     and this decision extends the same boundary to any future fallback UI: it must classify a
+     failure honestly before offering fallback as a remedy, never blur the two so a real contract
+     defect gets silently retried into passing.
+  9. **What exists today remains manual and operator-controlled**: no automatic cross-provider
+     fallback mechanism is being added now. An operator today can already rerun a failed stage by
+     re-invoking the relevant service entry point (e.g. `expand_requirements_for_search`,
+     `build_fit_assessment`) against whichever `StageModelAssignment` is currently configured, or by
+     an authorized, explicit, in-memory adapter substitution for one investigative call (the
+     technique both this decision and D-027's qualification runs used) -- never a standing
+     mechanism the pipeline invokes on its own.
+  10. **Future UI work** (deferred, not started) should expose, before each LLM call: the stage;
+      the primary provider/model; the available *qualified* alternatives (per constraint 3 above);
+      the output budget; the reasoning state; the privacy policy; an estimated call count/cost
+      where available; and an explicit Execute/Rerun/Fallback authorization control -- never a
+      one-click "just retry with anything."
+  11. **Priority**: completing the current M5/M6 workflow takes priority over building this UI: the
+      full provider/model-selection control and any automated orchestration around it is a
+      deferred, traceable follow-up, not a prerequisite for the M5 run this decision was recorded
+      ahead of.
+- **Non-goal reaffirmed**: this decision does not authorize implementing the future UI, does not
+  authorize assigning OpenRouter (or any alternative model) to any stage now, and does not authorize
+  an automatic fallback mechanism of any kind in this session. It is a policy record only.
+- **Consequence**: no code change, no migration, no `StageModelAssignment` change. Documentation-only
+  commit to `docs/DECISIONS.md` (this entry) and `docs/CURRENT_STATE.md` (a corresponding summary
+  update and a correction of D-027's now-stale "not yet merged to main and not yet re-verified"
+  status line, since D-027 has since been independently audited, fast-forward merged to `main`, and
+  qualified live against both NVIDIA and OpenRouter -- a factual-status correction, not a rewrite of
+  D-027's own historical rationale, which is preserved unchanged above).

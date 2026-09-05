@@ -1175,9 +1175,14 @@ parsing fix" above) is **APPROVED AND IMPLEMENTED** -- a provider-boundary corre
 D-025's own smoke test, still no stage assignment and no live call performed under D-026 itself.
 D-027 (AC_NORMALIZE provider-facing contract alignment, see "AC_NORMALIZE provider-facing contract
 alignment" above) is **APPROVED AND IMPLEMENTED** -- a contract-alignment correction found by a
-real M5 run's AC_NORMALIZE failure against `JobApplication` 9, not yet merged to `main` and not yet
-re-verified against a live provider call. Neither D-016 nor anything else is blocking for M7 as
-currently scoped.
+real M5 run's AC_NORMALIZE failure against `JobApplication` 9. Since first written, D-027 has been
+independently re-audited, fast-forward merged to `main` (HEAD `011a628`), and qualified live against
+both NVIDIA (`LLMCallLog` id 310) and OpenRouter `z-ai/glm-5.2:free` (`LLMCallLog` id 311) -- both
+succeeded, 30/30 requirement IDs, no length violations. D-028 (provider/model fallback is an
+operator-authorized rerun, never an automatic or invisible switch -- see `docs/DECISIONS.md`) is
+**APPROVED** as a policy record only, ahead of the next authorized M5 run; no fallback mechanism or
+UI exists yet, and none is implemented by D-028 itself. Neither D-016 nor anything else is blocking
+for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
