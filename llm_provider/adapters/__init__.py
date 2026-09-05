@@ -8,8 +8,13 @@ from __future__ import annotations
 
 from django.conf import settings
 
-from ..models import LLMProvider, StageModelAssignment
-from .base import DEFAULT_MAX_OUTPUT_TOKENS, BaseLLMAdapter
+from ..models import MAX_READ_TIMEOUT_SECONDS, MIN_READ_TIMEOUT_SECONDS, LLMProvider, StageModelAssignment
+from .base import (
+    DEFAULT_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_READ_TIMEOUT_SECONDS,
+    BaseLLMAdapter,
+)
 from .fake import FakeAdapter
 from .gemini import GeminiAdapter
 from .nvidia import NvidiaNimAdapter
@@ -45,6 +50,16 @@ class InvalidStageBudgetError(Exception):
     the provider or silently clamped."""
 
 
+class InvalidStageTimeoutError(Exception):
+    """Raised by `get_adapter_for_stage` when a stage's own `StageModelAssignment.
+    read_timeout_seconds` falls outside `[MIN_READ_TIMEOUT_SECONDS, MAX_READ_TIMEOUT_SECONDS]`
+    (2026-09-05, configurable per-stage timeout). `StageModelAssignment.clean()` already rejects
+    this at admin-save time -- this is the same defense-in-depth pattern as
+    `InvalidStageBudgetError` immediately above, for a row that reached the database without going
+    through `full_clean()`, caught here before any provider call rather than silently sent to the
+    provider or silently clamped."""
+
+
 def get_adapter_for_stage(stage: str) -> BaseLLMAdapter:
     """Look up which LLMModel is currently assigned to `stage` and return an adapter instance
     for it. This is the *only* place pipeline code needs to call to route a stage to whichever
@@ -78,17 +93,29 @@ def get_adapter_for_stage(stage: str) -> BaseLLMAdapter:
                 "StageModelAssignment before this stage can be used."
             )
         adapter.effective_max_output_tokens = assignment.max_output_tokens
+    if assignment.read_timeout_seconds is not None:
+        if not (MIN_READ_TIMEOUT_SECONDS <= assignment.read_timeout_seconds <= MAX_READ_TIMEOUT_SECONDS):
+            raise InvalidStageTimeoutError(
+                f"Stage {stage!r}'s configured read_timeout_seconds "
+                f"({assignment.read_timeout_seconds}) is outside the allowed range "
+                f"[{MIN_READ_TIMEOUT_SECONDS}, {MAX_READ_TIMEOUT_SECONDS}] -- fix the "
+                "StageModelAssignment before this stage can be used."
+            )
+        adapter.effective_read_timeout_seconds = assignment.read_timeout_seconds
     return adapter
 
 
 __all__ = [
     "ADAPTER_CLASSES",
     "BaseLLMAdapter",
+    "DEFAULT_CONNECT_TIMEOUT_SECONDS",
     "DEFAULT_MAX_OUTPUT_TOKENS",
+    "DEFAULT_READ_TIMEOUT_SECONDS",
     "FakeAdapter",
     "FakeProviderNotAllowedError",
     "GeminiAdapter",
     "InvalidStageBudgetError",
+    "InvalidStageTimeoutError",
     "NvidiaNimAdapter",
     "OpenAIAdapter",
     "OpenRouterAdapter",

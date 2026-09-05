@@ -26,6 +26,23 @@ from ..types import NormalizedLLMRequest, NormalizedLLMResult, TokenUsage
 # hard-coding its own fallback constant.
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
+# Timeout defaults (2026-09-05, configurable per-stage timeout). Every real adapter previously
+# passed a single hardcoded `timeout=60` to `requests.post()` -- a combined connect+read budget,
+# identical for every provider and every stage, with no way to give one stage (e.g. one with a
+# larger prompt or reasoning enabled) more time without changing it for every other stage on the
+# same provider. `DEFAULT_READ_TIMEOUT_SECONDS` preserves that exact prior value as the built-in
+# default read timeout, so a stage with no configured override behaves identically to before.
+# `DEFAULT_CONNECT_TIMEOUT_SECONDS` is new: previously there was no distinct connect-phase budget
+# at all (a hung TCP/TLS handshake could consume the entire 60s before failing); every adapter now
+# passes `requests`' own `(connect, read)` tuple form so a hung connection fails fast without
+# affecting how long a genuinely slow-but-connected response is allowed to stream. This is a
+# disclosed, conservative default (10s is generous for reaching any of the configured providers'
+# API hosts under normal conditions) -- not a per-stage-configurable value in this change; only
+# the read timeout is exposed for per-stage override (see `StageModelAssignment.
+# read_timeout_seconds`).
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_READ_TIMEOUT_SECONDS = 60
+
 
 class BaseLLMAdapter(ABC):
     def __init__(self, llm_model: LLMModel, retry_policy: RetryPolicy | None = None):
@@ -36,6 +53,19 @@ class BaseLLMAdapter(ABC):
         # `get_adapter_for_stage` overrides this afterward only when the stage's own
         # `StageModelAssignment.max_output_tokens` is explicitly configured.
         self.effective_max_output_tokens = llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+        # Same resolution pattern as `effective_max_output_tokens` immediately above, for the
+        # read timeout: a sensible built-in default, available even for an adapter constructed
+        # directly, overridden by `get_adapter_for_stage` only when the stage's own
+        # `StageModelAssignment.read_timeout_seconds` is explicitly configured.
+        self.effective_read_timeout_seconds = DEFAULT_READ_TIMEOUT_SECONDS
+
+    @property
+    def request_timeout(self) -> tuple[float, float]:
+        """The `(connect, read)` tuple every adapter's `requests.post()`/`requests.get()` call
+        must pass as its `timeout=` argument -- never a single combined number again. Centralized
+        here so no adapter can silently drift from the connect-timeout default or forget the
+        tuple form."""
+        return (DEFAULT_CONNECT_TIMEOUT_SECONDS, self.effective_read_timeout_seconds)
 
     @abstractmethod
     def _call_once(self, request: NormalizedLLMRequest) -> NormalizedLLMResult:
@@ -86,4 +116,5 @@ class BaseLLMAdapter(ABC):
             retry_count=result.retry_count,
             error_category=result.error.category.value if result.error else "",
             error_message=result.error.message if result.error else "",
+            rate_limit_diagnostics=result.error.rate_limit_diagnostics if result.error else None,
         )

@@ -1,0 +1,107 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+<a href="{% url 'admin:index' %}">Home</a>
+&rsaquo; <a href="{% url 'admin:app_list' app_label='llm_provider' %}">Llm provider</a>
+&rsaquo; OpenRouter diagnostics
+</div>
+{% endblock %}
+
+{% block content %}
+<p style="max-width: 60em; padding: 0.75em; border: 1px solid #c9a227; background: #fff8e1;">
+<strong>Note:</strong> free-tier and upstream provider capacity can still return HTTP 429 even when
+the locally-observed request count below looks well under any known limit -- a local count is
+never a substitute for OpenRouter's own authoritative usage/limit figures, and neither guarantees
+the other provider (when OpenRouter is routing to one) has capacity right now.
+</p>
+
+<h2>Key status</h2>
+{% if not provider_rows %}
+<p>No OpenRouter provider is currently registered.</p>
+{% endif %}
+{% for row in provider_rows %}
+<fieldset style="margin-bottom: 1.5em; padding: 1em; border: 1px solid #ccc;">
+  <legend><strong>{{ row.provider.name }}</strong> ({{ row.provider.credential_env_var|default:"no credential env var configured" }})</legend>
+
+  {% with status=row.status %}
+  {% if status %}
+    <p><em>Last refreshed {{ status.fetched_at }} -- authoritative OpenRouter-reported data as of that moment, not live.</em></p>
+    {% if status.success %}
+    <table>
+      <tr><th style="text-align:left; padding-right:1em;">Label</th><td>{{ status.label|default:"(none)" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Free tier</th><td>{{ status.is_free_tier|default_if_none:"unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Credit limit</th><td>{{ status.limit|default_if_none:"unlimited/unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Credit remaining</th><td>{{ status.limit_remaining|default_if_none:"unlimited/unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Limit reset</th><td>{{ status.limit_reset|default:"(none)" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Usage (all-time)</th><td>{{ status.usage|default_if_none:"unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Usage (daily)</th><td>{{ status.usage_daily|default_if_none:"unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Usage (weekly)</th><td>{{ status.usage_weekly|default_if_none:"unknown" }}</td></tr>
+      <tr><th style="text-align:left; padding-right:1em;">Usage (monthly)</th><td>{{ status.usage_monthly|default_if_none:"unknown" }}</td></tr>
+    </table>
+    {% else %}
+    <p style="color:#a94442;">Last refresh failed: {{ status.error_message }}</p>
+    {% endif %}
+  {% else %}
+    <p>Never refreshed yet.</p>
+  {% endif %}
+  {% endwith %}
+
+  <p><em>Locally observed OpenRouter calls today (this application's own {{ "LLMCallLog" }} rows, UTC day, not an OpenRouter-reported figure):</em>
+  {{ row.locally_observed_today }}</p>
+
+  <form method="post" action="{{ row.refresh_url }}">
+    {% csrf_token %}
+    <input type="submit" value="Refresh OpenRouter status">
+  </form>
+</fieldset>
+{% endfor %}
+
+<h2>Recent OpenRouter rate-limit (429) events</h2>
+<p>Most recent {{ recent_rate_limit_limit }} sanitized <code>RATE_LIMIT</code> entries for OpenRouter
+calls. No prompt, generated content, reasoning, or credential ever appears here -- only stage,
+provider/model identity, retry count, timestamp, and the small set of sanitized diagnostic fields
+this application retains (Retry-After, limit/remaining/reset headers when present, and
+upstream-vs-OpenRouter attribution only when the response itself named an upstream provider).</p>
+{% if recent_rate_limits %}
+<table>
+  <thead>
+    <tr>
+      <th style="text-align:left; padding-right:1em;">Timestamp</th>
+      <th style="text-align:left; padding-right:1em;">Stage</th>
+      <th style="text-align:left; padding-right:1em;">Provider / model</th>
+      <th style="text-align:left; padding-right:1em;">Retry count</th>
+      <th style="text-align:left; padding-right:1em;">Retry-After (s)</th>
+      <th style="text-align:left; padding-right:1em;">Limit</th>
+      <th style="text-align:left; padding-right:1em;">Remaining</th>
+      <th style="text-align:left; padding-right:1em;">Reset</th>
+      <th style="text-align:left; padding-right:1em;">Attribution</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for log in recent_rate_limits %}
+    <tr>
+      <td>{{ log.created_at }}</td>
+      <td>{{ log.stage }}</td>
+      <td>{{ log.provider.name }} / {{ log.model.model_id }}</td>
+      <td>{{ log.retry_count }}</td>
+      <td>{{ log.rate_limit_diagnostics.retry_after_seconds|default:"--" }}</td>
+      <td>{{ log.rate_limit_diagnostics.limit|default:"--" }}</td>
+      <td>{{ log.rate_limit_diagnostics.remaining|default:"--" }}</td>
+      <td>{{ log.rate_limit_diagnostics.reset|default:"--" }}</td>
+      <td>
+        {% if log.rate_limit_diagnostics.source == "upstream" %}
+          upstream{% if log.rate_limit_diagnostics.upstream_provider %} ({{ log.rate_limit_diagnostics.upstream_provider }}){% endif %}
+        {% else %}
+          unknown
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No RATE_LIMIT entries recorded for OpenRouter yet.</p>
+{% endif %}
+{% endblock %}

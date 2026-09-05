@@ -19,8 +19,16 @@ def make_model(provider=None, model_id="test-model", **kwargs):
     return LLMModel.objects.create(provider=provider, model_id=model_id, **defaults)
 
 
-def make_stage_assignment(stage=StageModelAssignment.Stage.MEMORY_BUILD, model=None, max_output_tokens=None):
+def make_stage_assignment(
+    stage=StageModelAssignment.Stage.MEMORY_BUILD,
+    model=None,
+    max_output_tokens=None,
+    read_timeout_seconds=None,
+):
     model = model or make_model()
     return StageModelAssignment.objects.create(
-        stage=stage, model=model, max_output_tokens=max_output_tokens
+        stage=stage,
+        model=model,
+        max_output_tokens=max_output_tokens,
+        read_timeout_seconds=read_timeout_seconds,
     )

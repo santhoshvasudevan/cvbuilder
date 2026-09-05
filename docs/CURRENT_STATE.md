@@ -1,6 +1,13 @@
 # Current State
 
-Last updated: 2026-09-04 (stage-specific LLM output-token budgets, committed -- see "Stage-specific
+Last updated: 2026-09-05 (runtime agent/stage architecture documentation, configurable per-stage
+LLM read timeout, OpenRouter key-status service + sanitized 429 diagnostics + operator UI, and a
+read-only `gpt-5` Chat Completions compatibility fix -- see "Runtime timeout/OpenRouter-diagnostics/
+GPT-5-readiness work (2026-09-05, D-029/D-030/D-031)" below. No M5/M6/Gate action, no live provider
+call, no `StageModelAssignment` change, and no operational timeout value change were made in this
+session -- everything above is additive mechanism/UI/documentation, committed on branch
+`worktree-timeout-openrouter-diagnostics`, not merged to `main`.). Previously, as of 2026-09-04:
+stage-specific LLM output-token budgets, committed -- see "Stage-specific
 LLM output-token budgets (2026-09-04, D-024)" below, motivated by a real AJ_ANALYZE rerun of
 JobApplication 9 truncating at the model's shared 4,096-token capability. Not applied live: the
 intended 16,384/8,192 configuration is a separate follow-up action.). Previously, also 2026-09-04:
@@ -1131,6 +1138,66 @@ overreach, and the fix) is in D-027 in `docs/DECISIONS.md`; summarized here:
   AC_NORMALIZE now succeeds against a real NVIDIA response with the aligned contract, followed by
   the independent Gate-1 FitAssessment review that was deferred pending a successful run.
 
+## Runtime timeout/OpenRouter-diagnostics/GPT-5-readiness work (2026-09-05, D-029/D-030/D-031)
+
+An implementation-plus-independent-verification work package, committed on its own branch
+(`worktree-timeout-openrouter-diagnostics`, not merged to `main` in this session). Covers, in full
+detail in `docs/DECISIONS.md` D-029/D-030/D-031:
+
+- **`docs/ARCHITECTURE.md` §9a** (new): a consolidated "Runtime agents and LLM stages" section --
+  the four agentic components, the six LLM stages and their deterministic support, both human
+  review gates, the data-driven `StageModelAssignment` routing invariant, and a Mermaid diagram --
+  cross-referencing rather than duplicating the existing per-app (§2) and per-provider (§3) detail.
+- **Configurable per-stage read timeout** (D-029): `StageModelAssignment.read_timeout_seconds`
+  (migration `llm_provider.0006_stagemodelassignment_read_timeout_seconds`), resolved through the
+  same `get_adapter_for_stage` path as D-024's output-token budget. Every adapter now passes
+  `requests`' own `(connect, read)` tuple (`BaseLLMAdapter.request_timeout`) instead of a bare
+  scalar `timeout=60` -- `DEFAULT_READ_TIMEOUT_SECONDS=60` preserves the exact prior behavior when
+  unconfigured; `DEFAULT_CONNECT_TIMEOUT_SECONDS=10` is new, disclosed, and not per-stage
+  configurable. Bounds `[1, 300]` seconds are enforced by `full_clean()` and, defensively, at
+  `get_adapter_for_stage` resolution time (`InvalidStageTimeoutError`). No stage's
+  `read_timeout_seconds` was set on any real row -- the built-in 60s default still governs every
+  real stage exactly as before.
+- **OpenRouter key-status service and 429 diagnostics** (D-030): `llm_provider/
+  openrouter_key_status.py`'s `fetch_openrouter_key_status()` performs an explicit, operator-
+  triggered `GET /api/v1/key` (never `/api/v1/credits`, never automatic, never during a retry loop),
+  reporting only documented non-secret quota/limit fields into the new `OpenRouterKeyStatus` model.
+  `llm_provider/adapters/openrouter.py`'s new `parse_openrouter_rate_limit` retains sanitized,
+  bounded 429 diagnostics (`retry_after_seconds`, `limit`, `remaining`, `reset`, upstream-vs-unknown
+  `source`/`upstream_provider`) onto the new `LLMCallLog.rate_limit_diagnostics` `JSONField`
+  (migration `llm_provider.0007_llmcalllog_rate_limit_diagnostics_and_more`) -- scoped to
+  `OpenRouterAdapter` only, the shared OpenAI-compatible 429 branch used by OpenAI/NVIDIA NIM is
+  untouched. An operator-facing admin view (`admin:llm_provider_openrouter_diagnostics`, linked from
+  the `LLMProvider` changelist) shows the last key-status snapshot, a POST-only/CSRF-protected
+  "Refresh OpenRouter status" action, a locally-observed-vs-authoritative-data distinction, and the
+  most recent 25 sanitized OpenRouter `RATE_LIMIT` log rows -- no Candidate Memory/job/resume/
+  employer/application content appears anywhere in this view (it queries only `llm_provider`'s own
+  models).
+- **`gpt-5` Chat Completions compatibility fix, no live call** (D-031): confirmed against current
+  official OpenAI documentation that `gpt-5` (exactly that slug, never `gpt-5-chat-latest` or any
+  other variant) supports Chat Completions, structured outputs, and `reasoning.effort` in
+  {minimal, low, medium, high}, with a 128,000-token output ceiling -- but rejects the pre-existing
+  shared request body on two counts (`max_tokens` unsupported, must be `max_completion_tokens`;
+  `temperature` unsupported at any non-default value, and this codebase's own
+  `NormalizedLLMRequest.temperature` defaults to `0.0`). Fixed in `llm_provider/adapters/openai.py`:
+  `build_chat_completion_body` gained two keyword-only, default-preserving overrides, and
+  `OpenAIAdapter._call_once` now branches on the existing `LLMModel.supports_reasoning` flag to use
+  them (plus, only when explicitly requested, OpenAI's own top-level `reasoning_effort` field) --
+  zero behavior change for NVIDIA NIM, OpenRouter, or any non-reasoning OpenAI model. No
+  `LLMProvider`/`LLMModel`/`StageModelAssignment` row for OpenAI/`gpt-5` was created; `AB_BUILD`
+  remains unassigned.
+- **Tests**: 100 new deterministic tests across
+  `test_stage_read_timeouts.py` (19), `test_openrouter_key_status.py` (11),
+  `test_openrouter_rate_limit_diagnostics.py` (13), `test_openrouter_diagnostics_view.py` (15), and
+  `test_gpt5_compatibility.py` (11), plus incidental fixture additions -- full `llm_provider` suite
+  278/278 passing, `ruff check .` clean, `manage.py check`/`makemigrations --check --dry-run` clean.
+- **Confirmed unchanged**: `AJ_ANALYZE`/`MEMORY_BUILD`/`AC_MATCH`/`AC_RANK` remain on NVIDIA
+  Nemotron, `AC_NORMALIZE` remains on OpenRouter `z-ai/glm-5.2:free`, `AB_BUILD` remains unassigned
+  -- exactly the "Known state" this work package was given at the start. `JobApplication` 9 (JRA
+  id 10/version 2, 30 requirements), Gate 1's unapproved status, and the absence of any
+  `FitAssessment`/`ResumeDraft` are all unchanged. No M5, M6, Gate action, provider smoke test, or
+  live LLM inference of any kind occurred in this session.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -1181,8 +1248,11 @@ both NVIDIA (`LLMCallLog` id 310) and OpenRouter `z-ai/glm-5.2:free` (`LLMCallLo
 succeeded, 30/30 requirement IDs, no length violations. D-028 (provider/model fallback is an
 operator-authorized rerun, never an automatic or invisible switch -- see `docs/DECISIONS.md`) is
 **APPROVED** as a policy record only, ahead of the next authorized M5 run; no fallback mechanism or
-UI exists yet, and none is implemented by D-028 itself. Neither D-016 nor anything else is blocking
-for M7 as currently scoped.
+UI exists yet, and none is implemented by D-028 itself. D-029 (configurable per-stage read timeout),
+D-030 (OpenRouter key-status service + sanitized 429 diagnostics + operator UI), and D-031 (`gpt-5`
+Chat Completions compatibility fix, no live call) -- see "Runtime timeout/OpenRouter-diagnostics/
+GPT-5-readiness work" above -- are all **APPROVED AND IMPLEMENTED**. Neither D-016 nor anything else
+is blocking for M7 as currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

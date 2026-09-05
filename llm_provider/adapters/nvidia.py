@@ -77,7 +77,7 @@ class NvidiaNimAdapter(BaseLLMAdapter):
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=body,
-                timeout=60,
+                timeout=self.request_timeout,
             )
         except requests.Timeout as exc:
             return NormalizedLLMResult(

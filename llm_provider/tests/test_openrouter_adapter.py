@@ -37,8 +37,9 @@ class _TinyOutput(BaseModel):
 
 
 class _FakeHttpResponse:
-    def __init__(self, status_code=200, payload=None):
+    def __init__(self, status_code=200, payload=None, headers=None):
         self.status_code = status_code
+        self.headers = headers or {}
         self._payload = (
             payload
             if payload is not None

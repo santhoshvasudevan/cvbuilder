@@ -7,8 +7,22 @@ every call made (docs/ARCHITECTURE.md Sec 3/Sec 4).
 """
 
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
+# Bounds for `StageModelAssignment.read_timeout_seconds` (2026-09-05, configurable per-stage
+# timeout). `MIN_READ_TIMEOUT_SECONDS` rejects a zero/negative value that would make every call
+# fail instantly; `MAX_READ_TIMEOUT_SECONDS` rejects an excessive value that would make a single
+# stuck call block far longer than any interactive/local-operator workflow should tolerate --
+# with `RetryPolicy.max_attempts=3` (`llm_provider/retry.py`), a stage configured at this ceiling
+# has a worst-case wall-clock wait (all three attempts time out) of
+# `3 * MAX_READ_TIMEOUT_SECONDS + backoff (~3s)` -- about 15 minutes. Both bounds are enforced by
+# `full_clean()` here (admin/service-layer saves) and re-checked defensively in
+# `llm_provider.adapters.get_adapter_for_stage` for a row that reached the database through a path
+# that bypassed `full_clean()` (e.g. a fixture or script), mirroring the existing
+# `max_output_tokens`/`InvalidStageBudgetError` defense-in-depth pattern.
+MIN_READ_TIMEOUT_SECONDS = 1
+MAX_READ_TIMEOUT_SECONDS = 300
 
 
 class LLMProvider(models.Model):
@@ -125,23 +139,57 @@ class StageModelAssignment(models.Model):
             "declare one) -- the previous, single-budget-per-model behavior."
         ),
     )
+    read_timeout_seconds = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(MIN_READ_TIMEOUT_SECONDS),
+            MaxValueValidator(MAX_READ_TIMEOUT_SECONDS),
+        ],
+        help_text=(
+            "Optional per-stage HTTP read-timeout override, in seconds (2026-09-05, configurable "
+            "per-stage timeout). When set, this stage's provider requests use this value instead "
+            f"of the built-in default (see `llm_provider.adapters.base."
+            f"DEFAULT_READ_TIMEOUT_SECONDS`). Must be between {MIN_READ_TIMEOUT_SECONDS} and "
+            f"{MAX_READ_TIMEOUT_SECONDS} seconds inclusive. This is the read timeout only -- the "
+            "connect timeout is a separate, fixed, non-configurable value shared by every stage "
+            "(`llm_provider.adapters.base.DEFAULT_CONNECT_TIMEOUT_SECONDS`), never the same "
+            "'one combined number' the pre-2026-09-05 code passed to every adapter's HTTP call. "
+            "Leave blank to use the built-in default."
+        ),
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
         super().clean()
-        if self.max_output_tokens is None:
-            return
-        try:
-            model_capability = self.model.max_output_tokens
-        except LLMModel.DoesNotExist:
-            return
-        if model_capability is not None and self.max_output_tokens > model_capability:
+        if self.max_output_tokens is not None:
+            try:
+                model_capability = self.model.max_output_tokens
+            except LLMModel.DoesNotExist:
+                model_capability = None
+            if model_capability is not None and self.max_output_tokens > model_capability:
+                raise ValidationError(
+                    {
+                        "max_output_tokens": (
+                            f"Stage budget ({self.max_output_tokens}) exceeds the assigned model "
+                            f"{self.model}'s capability ({model_capability}) -- lower the stage "
+                            "budget or raise the model's own max_output_tokens first."
+                        )
+                    }
+                )
+        if self.read_timeout_seconds is not None and not (
+            MIN_READ_TIMEOUT_SECONDS <= self.read_timeout_seconds <= MAX_READ_TIMEOUT_SECONDS
+        ):
+            # PositiveIntegerField's own MinValueValidator/MaxValueValidator (declared above)
+            # already enforce this during a normal `full_clean()` -- this branch only guards
+            # against a value that reached this method by some other write path;  ValidationError
+            # is still the right way to fail closed here rather than silently clamping.
             raise ValidationError(
                 {
-                    "max_output_tokens": (
-                        f"Stage budget ({self.max_output_tokens}) exceeds the assigned model "
-                        f"{self.model}'s capability ({model_capability}) -- lower the stage "
-                        "budget or raise the model's own max_output_tokens first."
+                    "read_timeout_seconds": (
+                        f"read_timeout_seconds ({self.read_timeout_seconds}) must be between "
+                        f"{MIN_READ_TIMEOUT_SECONDS} and {MAX_READ_TIMEOUT_SECONDS} seconds "
+                        "inclusive."
                     )
                 }
             )
@@ -170,6 +218,18 @@ class LLMCallLog(models.Model):
     error_message = models.TextField(
         blank=True, help_text="Sanitized message only -- never raw provider request/response content."
     )
+    rate_limit_diagnostics = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Sanitized rate-limit diagnostic metadata (2026-09-05, OpenRouter 429 diagnostics). "
+            "Populated only for RATE_LIMIT errors where the adapter could extract it from "
+            "documented, non-secret response headers/metadata -- a small fixed set of keys "
+            "(retry_after_seconds, limit, remaining, reset, source, upstream_provider), never a "
+            "raw response body or headers wholesale. Null for every other error/success row and "
+            "for a RATE_LIMIT row where no such metadata was present."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -179,3 +239,36 @@ class LLMCallLog(models.Model):
     def __str__(self) -> str:
         timestamp = self.created_at.strftime("%Y-%m-%d %H:%M:%S")
         return f"{self.stage} via {self.provider.name}/{self.model.model_id} @ {timestamp}"
+
+
+class OpenRouterKeyStatus(models.Model):
+    """The last known result of an explicit, operator-triggered OpenRouter key-status check
+    (`GET /api/v1/key`, 2026-09-05) -- never queried automatically (not during inference, not on
+    every page load, not from a retry loop). One row per `LLMProvider` (a provider could
+    theoretically have more than one OpenRouter row, e.g. two different keys/accounts, each
+    tracked independently). Every field here is a documented, non-secret quota/limit field from
+    OpenRouter's own response -- the credential value itself is never stored, displayed, hashed,
+    or logged anywhere in this model or the service that populates it."""
+
+    provider = models.OneToOneField(
+        LLMProvider, on_delete=models.CASCADE, related_name="openrouter_key_status"
+    )
+    fetched_at = models.DateTimeField(auto_now=True)
+    success = models.BooleanField(default=False)
+    label = models.CharField(max_length=200, blank=True)
+    is_free_tier = models.BooleanField(null=True, blank=True)
+    limit = models.FloatField(null=True, blank=True)
+    limit_remaining = models.FloatField(null=True, blank=True)
+    limit_reset = models.CharField(max_length=50, blank=True)
+    usage = models.FloatField(null=True, blank=True)
+    usage_daily = models.FloatField(null=True, blank=True)
+    usage_weekly = models.FloatField(null=True, blank=True)
+    usage_monthly = models.FloatField(null=True, blank=True)
+    error_message = models.CharField(
+        max_length=300,
+        blank=True,
+        help_text="Sanitized failure reason from the last refresh attempt, if it failed. Blank on success.",
+    )
+
+    def __str__(self) -> str:
+        return f"OpenRouter key status for {self.provider.name} @ {self.fetched_at}"

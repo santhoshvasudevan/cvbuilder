@@ -145,12 +145,26 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
 
 
 def build_chat_completion_body(
-    request: NormalizedLLMRequest, model_id: str, schema: dict
+    request: NormalizedLLMRequest,
+    model_id: str,
+    schema: dict,
+    *,
+    token_limit_key: str = "max_tokens",
+    include_temperature: bool = True,
 ) -> dict:
+    """Shared by OpenAI/NVIDIA NIM/OpenRouter (all OpenAI-compatible `/chat/completions`). The two
+    keyword-only overrides (2026-09-05, GPT-5 compatibility) exist for exactly one caller --
+    `OpenAIAdapter._call_once` on a `supports_reasoning` model -- and default to the original,
+    unconditional behavior every existing caller (NVIDIA NIM, OpenRouter, and OpenAI on a
+    non-reasoning model) still relies on unchanged: always `max_tokens`, always `temperature`.
+    OpenAI's reasoning-model family (o1/o3/gpt-5, ...) rejects both of those on the Chat
+    Completions API -- `max_tokens` must be `max_completion_tokens`, and `temperature` must be
+    omitted entirely (only the provider's own default is accepted; sending any explicit value,
+    including this codebase's own `NormalizedLLMRequest.temperature=0.0` default, is a 400).
+    """
     body: dict = {
         "model": model_id,
         "messages": request.messages,
-        "temperature": request.temperature,
         "response_format": {
             "type": "json_schema",
             "json_schema": {
@@ -160,8 +174,10 @@ def build_chat_completion_body(
             },
         },
     }
+    if include_temperature:
+        body["temperature"] = request.temperature
     if request.max_output_tokens:
-        body["max_tokens"] = request.max_output_tokens
+        body[token_limit_key] = request.max_output_tokens
     return body
 
 
@@ -184,8 +200,37 @@ class OpenAIAdapter(BaseLLMAdapter):
                 )
             )
 
+        is_reasoning_model = self.llm_model.supports_reasoning
+        if request.reasoning_effort is not None and not is_reasoning_model:
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(
+                    category=LLMErrorCategory.CONFIGURATION,
+                    message=(
+                        f"reasoning_effort was requested but LLMModel '{self.llm_model.model_id}' "
+                        "is not registered as supporting reasoning."
+                    ),
+                )
+            )
+
         schema = self.translate_schema(request.output_schema)
-        body = build_chat_completion_body(request, self.llm_model.model_id, schema)
+        # GPT-5-family compatibility (2026-09-05, D-029/Phase F): a reasoning-capable OpenAI model
+        # (o1/o3/gpt-5, ...) requires `max_completion_tokens` in place of `max_tokens` and rejects
+        # any explicit `temperature` value -- see `build_chat_completion_body`'s own docstring.
+        # Every non-reasoning model's request body is byte-for-byte unchanged by this branch.
+        body = build_chat_completion_body(
+            request,
+            self.llm_model.model_id,
+            schema,
+            token_limit_key="max_completion_tokens" if is_reasoning_model else "max_tokens",
+            include_temperature=not is_reasoning_model,
+        )
+        if is_reasoning_model and request.reasoning_effort is not None:
+            # OpenAI's own top-level Chat Completions field name -- never nested, unlike NVIDIA's
+            # `chat_template_kwargs.enable_thinking` or Gemini's `thinkingConfig`. Sent only when
+            # explicitly requested by the caller (never a blanket per-adapter default), matching
+            # the same opt-in translation pattern `nvidia.py`/`openrouter.py` already use for their
+            # own reasoning parameters.
+            body["reasoning_effort"] = request.reasoning_effort
         base_url = provider.base_url or DEFAULT_BASE_URL
 
         try:
@@ -193,7 +238,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 f"{base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=body,
-                timeout=60,
+                timeout=self.request_timeout,
             )
         except requests.Timeout as exc:
             return NormalizedLLMResult(

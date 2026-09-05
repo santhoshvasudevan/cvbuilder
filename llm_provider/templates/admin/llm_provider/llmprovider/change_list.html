@@ -1,0 +1,6 @@
+{% extends "admin/change_list.html" %}
+
+{% block object-tools-items %}
+<li><a href="{% url 'admin:llm_provider_openrouter_diagnostics' %}">OpenRouter diagnostics</a></li>
+{{ block.super }}
+{% endblock %}

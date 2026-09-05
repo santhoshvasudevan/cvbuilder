@@ -765,6 +765,96 @@ distinguishes `MemoryClaim` (evidence, potentially resume-eligible) from `Candid
 (constraint/positioning, never resume-eligible) precisely so a downstream bug can't accidentally
 treat a positioning suggestion as a factual claim.
 
+## 9a. Runtime agents and LLM stages (operational summary, 2026-09-05)
+
+This section is the single consolidated map of what actually runs at request time. It
+cross-references the per-app detail in §2 and the per-provider detail in §3 rather than
+restating it — read this section for "which agent, which stage, which gate, in what order,"
+and §2/§3 for the design rationale behind each piece.
+
+**Live provider/model assignments and output-token/timeout budgets are operational data, not
+architecture** — they change by admin action, not by code change, and are tracked in
+`docs/CURRENT_STATE.md` (the "What exists" / decision sections), never hardcoded here.
+
+### 9a.1 The four runtime agentic components
+
+| Component | App | Responsibility |
+| --- | --- | --- |
+| **Candidate Memory Builder** | `candidate_memory` | Turns the operator-approved source documents into the versioned, reviewable `CandidateMemory` (§2.2, §8). Runs only during an explicit bootstrap/update command invocation — never per job application. |
+| **Agent Jobber (AJ)** | `job_intake` | Turns one job posting (URL or pasted text) into a structured, stably-IDed `JobRequirementAnalysis` (§2.3). |
+| **Agent Candidate (AC)** | `candidate_matching` | Retrieves a bounded, relevant slice of the `ACTIVE` CandidateMemory and produces a per-requirement fit/gap `FitAssessment` (§2.4, §9). |
+| **Agent Builder (AB)** | `resume_builder` | Selects the strongest truthful positioning and drafts a structured, evidence-attached `ResumeDraft` (§2.5). |
+
+### 9a.2 The six LLM stages
+
+Every LLM call in the system is tagged with exactly one of these six `StageModelAssignment.Stage`
+values (`llm_provider/models.py`). Several stages have significant deterministic work immediately
+before or after the LLM call itself — that work is never skipped just because the LLM call
+succeeded, and never substitutes for it either.
+
+| Stage | Owning component | What the LLM call does | Deterministic support around it |
+| --- | --- | --- | --- |
+| `MEMORY_BUILD` | Candidate Memory Builder | Per-chunk extraction/classification of one bounded source excerpt into evidence/constraint/positioning items (§8) | `chunking.py` (bounded, provenance-preserving chunking), `subject_scope.py`, `quote_recovery.py`, `comparable_values.py`, `conflicts.py` (deterministic conflict detection), `confirmation.py` (deterministic auto-confirm policy) |
+| `AJ_ANALYZE` | Agent Jobber | One structured analysis of the fetched/pasted posting into requirements + screening risks | `services/fetch.py` (bounded, SSRF-defended URL fetch with pasted-text fallback), `validators/integrity.py` (deterministic provenance/duplicate/non-empty gate, D-022/D-023 — never a semantic judgment) |
+| `AC_NORMALIZE` | Agent Candidate | Bounded per-`JobRequirement` canonical-English restatement + a handful of diagnostic terms/equivalents (D-021) — a retrieval hint only, never evidence | `services/normalization_limits.py` (provider-visible per-term/length caps, D-027) |
+| `AC_RANK` | Agent Candidate | Bounded LLM relevance-ranking over the lexically-narrowed candidate claim/engagement pool (D-021) | `services/lexical_relevance.py` (rarity-aware BM25-style scoring), `candidate_generation.py`, `retrieval_limits.py`, `dedup.py` — orchestrated by `bounded_retrieval.py`, which is what AC_MATCH actually calls into |
+| `AC_MATCH` | Agent Candidate | Narrative fit/gap judgment, only for requirements the deterministic classifier below can't resolve | `services/static_requirements.py` (zero-LLM tenure/location/employment-relationship assessment straight from `CareerEngagement`, D-019), `validators/disposition_coverage.py` (drops fabricated IDs, downgrades unevidenced MATCH/PARTIAL, fills full per-requirement coverage) |
+| `AB_BUILD` | Agent Builder | Selects positioning and drafts structured resume elements (summary, bullets, skills, etc.) citing only real claim/engagement IDs | `services/context.py` (bounded context assembly), `validators/no_fabrication.py` (fail-closed: rejects the entire build on any unevidenced/fabricated/unapproved-engagement element, D-019/D-020), the deterministic markdown renderer (`docs/RESUME_OUTPUT_STRUCTURE.md`) |
+
+### 9a.3 Human review gates
+
+- **Gate 1** (`reviews`, HITL-004..007) sits between Agent Candidate's `FitAssessment` and Agent
+  Builder. `JobApplication.approve_gate1()` is a plain state transition on `JobApplication` — it
+  requires `current_fit_assessment.based_on_jra_id == current_jra_id` (D-006 freshness, an identity
+  comparison, never a timestamp comparison) and is checked fresh every time, never a paused
+  execution waiting to be resumed (D-001).
+- **Gate 2** (`reviews`) sits between Agent Builder's `ResumeDraft` and treating the application as
+  ready. `ResumeDraft.confirm()` is the one further mutation a draft is ever allowed after creation;
+  the same freshness check applies against `current_fit_assessment_id`.
+- Both gates are DB-state preconditions a normal Django view reads at the start of the next request
+  — never a framework-level interrupt/resume mechanism (per this document's durable §1 invariant).
+
+### 9a.4 Provider/model selection is data-driven, never hardcoded
+
+Every stage above is routed exclusively through `llm_provider.adapters.get_adapter_for_stage(stage)`
+(`llm_provider/adapters/__init__.py`): it looks up the single `StageModelAssignment` row for that
+stage, resolves the `LLMModel`/`LLMProvider` it points at, and returns the matching adapter instance
+from `ADAPTER_CLASSES` (keyed by `LLMProvider.provider_type`). No pipeline app (`candidate_memory`,
+`job_intake`, `candidate_matching`, `resume_builder`) imports a provider SDK or branches on provider
+identity anywhere — reassigning a stage to a different provider/model is purely an admin-data change
+(NFR-005), never a code change. The same function is also where a stage's effective output-token
+budget (D-024) and, from this session's timeout work (§9a.5), its effective request timeout are
+resolved — one resolution path for every per-stage operational override, not two parallel ones.
+
+### 9a.5 Diagram
+
+```mermaid
+flowchart TD
+    subgraph Memory["Candidate Memory Builder (bootstrap/update only)"]
+        MB[MEMORY_BUILD LLM call] --> CM[(ACTIVE CandidateMemory)]
+    end
+
+    Posting[Job posting: URL or pasted text] --> AJ[Agent Jobber]
+    AJ -->|AJ_ANALYZE| JRA[(JobRequirementAnalysis)]
+
+    JRA --> AC[Agent Candidate]
+    CM -.confirmed + resume_eligible claims, engagements, rules.-> AC
+    AC -->|AC_NORMALIZE| Norm[bounded restatement + terms]
+    Norm -->|AC_RANK| Ranked[lexically-narrowed, ranked pool]
+    Ranked -->|AC_MATCH, narrative only| FA[(FitAssessment)]
+    StaticReq[static_requirements.py\nzero-LLM tenure/location/employment] --> FA
+
+    FA --> Gate1{{Gate 1 human review}}
+    Gate1 -->|approved, fresh| AB[Agent Builder]
+    CM -.confirmed + resume_eligible claims, engagements.-> AB
+    AB -->|AB_BUILD| RD[(ResumeDraft)]
+    RD --> Gate2{{Gate 2 human review}}
+    Gate2 -->|confirmed, fresh| Ready[JobApplication READY]
+
+    MB & AJ & AC & AB -.every LLM call routed via.-> SMA[StageModelAssignment]
+    SMA --> Adapter[llm_provider adapter layer\nOpenAI / NVIDIA NIM / Gemini / OpenRouter / Fake]
+```
+
 ## 9. Runtime-context boundaries (D-015, M0.1)
 
 These boundaries apply once the pipeline is calling into Candidate Memory (M5 onward) and are as

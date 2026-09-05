@@ -1629,3 +1629,206 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   status line, since D-027 has since been independently audited, fast-forward merged to `main`, and
   qualified live against both NVIDIA and OpenRouter -- a factual-status correction, not a rewrite of
   D-027's own historical rationale, which is preserved unchanged above).
+
+## D-029: Configurable per-stage HTTP read timeout, split from a fixed connect timeout
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-05) -- directed by the product owner as a
+  read-only-audit-then-implement work package. No live provider call, M5/M6 run, or provider
+  smoke test was made or authorized as part of this decision; no `StageModelAssignment`
+  provider/model assignment and no operational timeout *value* was changed in the persistent
+  development database -- only the mechanism and its inert-by-default schema exist now.
+- **Context (read-only audit finding)**: every real adapter (`OpenAIAdapter`, `NvidiaNimAdapter`,
+  `OpenRouterAdapter`, `GeminiAdapter`) passed a literal `timeout=60` to `requests.post()` --
+  independently hardcoded in each of the four files, not a shared constant. Per `requests`'
+  semantics, a single scalar `timeout=` value is a *combined* connect+read budget: a hung TCP/TLS
+  handshake and a slow-but-connected streaming response were indistinguishable and shared the same
+  60-second ceiling. All four providers shared the identical value; there was no way to give one
+  stage (e.g. one with a larger prompt or reasoning enabled) more time without changing every other
+  stage on the same provider. Retry interaction: `RetryPolicy(max_attempts=3, backoff_seconds=1.0)`
+  retries a `TIMEOUT` classification with linear backoff (`sleep(backoff_seconds * attempt)`), so the
+  pre-existing worst-case wall-clock wait for a call that timed out on every attempt was
+  `3 * 60 + (1 + 2) = 183` seconds.
+- **Design**: `StageModelAssignment.read_timeout_seconds` (new, nullable `PositiveIntegerField`,
+  `MinValueValidator(1)`/`MaxValueValidator(300)`) -- an optional per-stage *read*-timeout override,
+  resolved through the exact same path as D-024's `max_output_tokens` budget:
+  `BaseLLMAdapter.__init__` sets `self.effective_read_timeout_seconds =
+  DEFAULT_READ_TIMEOUT_SECONDS` (60 -- the exact prior hardcoded value, so an unconfigured stage's
+  behavior is byte-for-byte unchanged); `get_adapter_for_stage` overrides it with the stage's own
+  configured value when set, re-validating against `[MIN_READ_TIMEOUT_SECONDS,
+  MAX_READ_TIMEOUT_SECONDS]` and raising `InvalidStageTimeoutError` (mirroring
+  `InvalidStageBudgetError`) for a row that reached the database without `full_clean()`. Every
+  adapter now passes `self.request_timeout` -- a new `BaseLLMAdapter` property returning
+  `(DEFAULT_CONNECT_TIMEOUT_SECONDS, self.effective_read_timeout_seconds)`, `requests`' own
+  `(connect, read)` tuple form -- instead of a bare scalar. `DEFAULT_CONNECT_TIMEOUT_SECONDS = 10`
+  is a new, disclosed, non-per-stage-configurable constant: previously there was no distinct
+  connect-phase budget at all, so this is additive risk-reduction (a hung connection now fails in
+  10s instead of up to 60s) rather than a narrowing of any existing behavior -- 10s is generous for
+  reaching any of the four configured providers' API hosts under normal conditions and was not
+  observed to be a bottleneck in this session's test runs. The 300-second (5-minute) upper bound on
+  `read_timeout_seconds` keeps the worst case computable: at the ceiling, three timed-out attempts
+  plus backoff is `3 * 300 + (1 + 2) = 903` seconds (~15 minutes) -- bounded, not unlimited, and
+  never silently exceedable by a persisted value. `StageModelAssignmentAdmin` exposes
+  `read_timeout_seconds` and a computed `effective_timeout_display` (e.g. "`(10s connect, 60s read
+  (built-in default))`") in its list view, so the operator never has to infer the resolved value.
+- **Classification unchanged**: a client-side `requests.Timeout` (both `ConnectTimeout` and
+  `ReadTimeout`, which both subclass it) was already, and remains, classified `TIMEOUT` regardless
+  of which phase raised it -- this decision only changes *how long each phase is allowed to run*,
+  never how a timeout is categorized or retried. `RetryPolicy` itself (`max_attempts=3`,
+  `backoff_seconds=1.0`) is unchanged.
+- **Consequence**: `llm_provider.0006_stagemodelassignment_read_timeout_seconds` (additive, nullable
+  field -- no data migration, no existing row's resolved behavior changes). 19 new deterministic
+  tests (`llm_provider/tests/test_stage_read_timeouts.py`) cover resolution/override/isolation,
+  full_clean and admin-form rejection of zero/negative/excessive values, the `InvalidStageTimeoutError`
+  defense-in-depth path, the exact `(connect, read)` tuple reaching all four adapters' `requests.post`
+  calls, connect-vs-read `requests.Timeout` subclasses both classifying as `TIMEOUT`, and the
+  worst-case wall-clock arithmetic above. No `StageModelAssignment.read_timeout_seconds` value was
+  set on any real row in the development database.
+
+## D-030: OpenRouter key-status service and sanitized 429 diagnostic retention
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-05) -- same work package as D-029. No live
+  OpenRouter call (key-status or inference) was made in this session; no OpenRouter management key
+  was requested, stored, or referenced anywhere.
+- **Key-status service** (`llm_provider/openrouter_key_status.py`, new): `fetch_openrouter_key_status
+  (provider)` performs exactly one `GET {base_url}/key` using the provider's existing
+  `credential_env_var`-referenced inference credential -- **never** `/api/v1/credits`, which
+  OpenRouter documents as requiring a separate management key this application does not have and
+  this decision does not authorize acquiring. A short, bounded `(5, 10)`-second `(connect, read)`
+  timeout applies (deliberately far shorter than any inference stage's budget -- this is a
+  lightweight metadata lookup, never a generation call). Parses only the documented, non-secret
+  fields under the response's `data` envelope (`label`, `is_free_tier`, `limit`, `limit_remaining`,
+  `limit_reset`, `usage`, `usage_daily`, `usage_weekly`, `usage_monthly`); every failure mode
+  (missing credential, non-OpenRouter provider, timeout, network error, non-2xx status, malformed/
+  unexpected JSON) returns a typed `OpenRouterKeyStatusResult(success=False, error_message=<
+  sanitized>)` rather than raising, using the existing `sanitize_error_message()`. The credential
+  value itself never appears on the result object, in any log line, or in the new
+  `OpenRouterKeyStatus` model (new, one row per `LLMProvider`, storing only the fields listed above
+  plus `fetched_at`/`success`/`error_message` -- migration
+  `llm_provider.0007_llmcalllog_rate_limit_diagnostics_and_more`). **Never invoked automatically**
+  -- not during inference, not during a retry, not on every page load of the diagnostics view below;
+  the only call site is the view's explicit POST "Refresh OpenRouter status" action.
+- **429 diagnostic retention** (`llm_provider/adapters/openrouter.py`'s new
+  `parse_openrouter_rate_limit`, scoped to `OpenRouterAdapter` only -- the shared
+  `parse_openai_style_chat_completion` branch used by `OpenAIAdapter`/`NvidiaNimAdapter` for their
+  own 429s is untouched): retains, as a small typed dict on the existing
+  `NormalizedLLMError.rate_limit_diagnostics` field (new, `None` for every non-RATE_LIMIT error and
+  for a RATE_LIMIT error with no extractable metadata) --
+  - `retry_after_seconds` (from the documented `Retry-After` header, digits-only parse, dropped
+    rather than guessed if malformed/negative);
+  - `limit`/`remaining` (from `X-RateLimit-Limit`/`X-RateLimit-Remaining`, read defensively since
+    OpenRouter's own docs for this endpoint document only `Retry-After` -- present if some gateway
+    layer attaches them, silently absent otherwise, never assumed);
+  - `reset` (from `X-RateLimit-Reset`, reduced to a bounded digits-only token, never the raw header
+    value);
+  - `source` (`"upstream"` only when the error body's own `error.metadata` names an upstream
+    provider under `provider_name`/`provider`, else `"unknown"` -- **never** a positive
+    `"openrouter"` classification, since no documented signal distinguishes an OpenRouter-key-level
+    limit from an upstream one by its absence; a false "openrouter-level" claim would be worse than
+    an honest "unknown");
+  - `upstream_provider` (the named provider label, sanitized and bounded to 100 characters) when
+    `source == "upstream"`.
+  `BaseLLMAdapter._write_call_log` persists this dict verbatim onto the new
+  `LLMCallLog.rate_limit_diagnostics` `JSONField` (null for every other row) -- never the raw
+  response body or headers wholesale, never a prompt, generated content, or credential. No change to
+  retry behavior: OpenRouter 429s were already, and remain, classified `RATE_LIMIT` (a transient,
+  retried category) with the same `RetryPolicy` bound as every other transient error; `Retry-After`
+  is retained for operator visibility only and does not (in this decision) alter
+  `execute_with_retry`'s fixed linear backoff -- doing so would mean changing the shared retry
+  abstraction `llm_provider/retry.py` itself, which the task scoping this work explicitly flagged as
+  a separate follow-up rather than a change to fold in invisibly here.
+- **Operator UI** (`llm_provider/admin.py`, integrated into the existing Django admin rather than a
+  new app/route namespace): a `LLMProviderAdmin`-attached view at
+  `admin:llm_provider_openrouter_diagnostics`, linked from the `LLMProvider` changelist's object
+  tools, showing -- per OpenRouter provider row -- the last-refreshed key-status snapshot (or "never
+  refreshed yet"), a POST-only, CSRF-protected "Refresh OpenRouter status" action
+  (`admin:llm_provider_openrouter_diagnostics_refresh`) that is the *only* call site for
+  `fetch_openrouter_key_status`, a locally-observed (this application's own `LLMCallLog` rows,
+  explicitly labeled "not an OpenRouter-reported figure") today's-call count clearly separated from
+  the authoritative fetched data, and the most recent 25 sanitized OpenRouter `RATE_LIMIT`
+  `LLMCallLog` rows (timestamp, stage, exact provider/model, retry count, and the diagnostic fields
+  above) -- with a standing on-page warning that free-tier/upstream capacity can still return 429
+  even when the local estimate looks fine. The view queries only `llm_provider`'s own models
+  (`LLMProvider`/`LLMModel`/`LLMCallLog`/`OpenRouterKeyStatus`), which hold no Candidate Memory,
+  job-posting, resume, employer, or application content at all -- so no such content can leak into
+  this view by construction, and no unrelated schema expansion was needed or made to correlate a
+  call log to a specific `JobApplication` (that correlation does not exist and is out of scope here,
+  per the task's own explicit "keep the view provider/stage-level" instruction). Authenticated via
+  Django's standard admin `staff_member_required`/session auth (`self.admin_site.admin_view`) --
+  the same mechanism every other admin page on this site already uses.
+- **Consequence**: `llm_provider.0007_llmcalllog_rate_limit_diagnostics_and_more` (additive: one new
+  nullable `JSONField` on `LLMCallLog`, one new model `OpenRouterKeyStatus`). 39 new deterministic
+  tests across `test_openrouter_key_status.py` (11), `test_openrouter_rate_limit_diagnostics.py`
+  (13), and `test_openrouter_diagnostics_view.py` (15) -- success/auth-error/timeout/malformed-
+  payload/sanitization for the key-status service; header parsing, malformed/missing-header
+  handling, upstream-attribution presence/absence, sanitization/bounding, and end-to-end
+  `LLMCallLog` persistence for 429 diagnostics; authentication requirements, content rendering,
+  credential non-leakage, the "never automatic" refresh guarantee, CSRF enforcement, and absence of
+  other apps' content vocabulary for the admin view. No live OpenRouter call, no
+  `OpenRouterKeyStatus` row, and no `StageModelAssignment` change exists in the development database
+  as a result of this decision.
+
+## D-031: `gpt-5` Chat Completions request-contract compatibility fix (no live call)
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-05) -- read-only-audit-then-fix work package,
+  confirmed against current official OpenAI documentation
+  (`developers.openai.com/api/docs/models/gpt-5`, the reasoning-models guide, and corroborating
+  OpenAI Developer Community reports of the exact 400 error text). **No live OpenAI call was made or
+  authorized by this decision** -- it is separate from, and does not consume, the independently
+  authorized one-time GPT-5 M5 run. No `LLMProvider`/`LLMModel`/`StageModelAssignment` row was
+  created in the development database; `AB_BUILD` (or any stage) was not assigned to OpenAI/gpt-5.
+- **Confirmed model metadata for the exact `gpt-5` slug** (never `gpt-5-chat-latest` or any other
+  variant): supports `v1/chat/completions` and `v1/responses`; context window 400,000 tokens; **max
+  output tokens 128,000**; supported features include `structured_outputs` and `function_calling`;
+  `reasoning.effort` accepts `minimal`/`low`/`medium`/`high` (not the `none`/`xhigh`/`max` values
+  later, unrelated model generations added).
+- **Confirmed incompatibility with this codebase's pre-existing shared request-body contract**
+  (`build_chat_completion_body` in `llm_provider/adapters/openai.py`, shared by `OpenAIAdapter`,
+  `NvidiaNimAdapter`, and `OpenRouterAdapter`), on two counts specific to OpenAI's reasoning-model
+  family (o1/o3/gpt-5, ...), both independently corroborated by OpenAI's own documented 400 error
+  text ("Unsupported parameter: 'max_tokens' is not supported with this model. Use
+  'max_completion_tokens' instead." / "Unsupported value: 'temperature' does not support 0 with this
+  model. Only the default (1) value is supported."):
+  1. **Output-token parameter name**: `gpt-5` rejects `max_tokens` outright; the equivalent
+     parameter is `max_completion_tokens`. The pre-existing shared builder always sent `max_tokens`.
+  2. **Temperature**: `gpt-5` rejects any explicit `temperature` other than its own default (`1`).
+     `NormalizedLLMRequest.temperature` defaults to `0.0` and the pre-existing builder always sent
+     it -- an unmodified call against `gpt-5` would 400 on essentially every request, not just an
+     edge case.
+  `top_p` was never sent by `OpenAIAdapter` at all (only `nvidia.py`/`openrouter.py` send it), so no
+  separate fix was needed for it; `reasoning_effort` was previously never read or sent by
+  `OpenAIAdapter` at all (a pre-existing gap, not a regression this decision introduces). Structured
+  output (`response_format: {"type": "json_schema", ..., "strict": true}`), the shared parser's
+  `finish_reason=length`/null-content handling (D-026, already provider/model-agnostic), and usage
+  parsing (`completion_tokens` already includes any reasoning-token consumption per OpenAI's own
+  usage accounting -- no separate `reasoning_tokens` field needed to be added) were all confirmed
+  compatible with `gpt-5` as-is, requiring no change.
+- **Fix**: `build_chat_completion_body` gained two keyword-only parameters, `token_limit_key`
+  (default `"max_tokens"`) and `include_temperature` (default `True`) -- both defaults reproduce the
+  exact prior behavior for every existing caller (`nvidia.py`/`openrouter.py`, which call it with no
+  overrides at all, and `OpenAIAdapter` itself on a non-reasoning model), so **zero behavior change**
+  for NVIDIA NIM, OpenRouter, or any already-configured OpenAI model. `OpenAIAdapter._call_once` now
+  branches on the existing `LLMModel.supports_reasoning` capability flag (the same flag
+  `nvidia.py`/`openrouter.py` already use to gate their own reasoning parameters) -- when true, it
+  requests `token_limit_key="max_completion_tokens"`/`include_temperature=False`, and additionally
+  sends OpenAI's own top-level `reasoning_effort` field, but **only** when
+  `NormalizedLLMRequest.reasoning_effort` is explicitly set by the caller (never a blanket default --
+  matching this task's own "stage reasoning setting: unset unless the production stage explicitly
+  supports and requests it" instruction) and fails closed with `CONFIGURATION` (no HTTP call) if
+  `reasoning_effort` is requested against a model not registered as `supports_reasoning`, mirroring
+  `nvidia.py`/`openrouter.py`'s identical guard for their own reasoning parameters.
+- **Consequence**: no migration (no schema change). 11 new deterministic tests
+  (`llm_provider/tests/test_gpt5_compatibility.py`) construct a registry `LLMModel` at the exact
+  intended future metadata (`model_id="gpt-5"`, `supports_reasoning=True`,
+  `max_output_tokens=128_000`, `supports_structured_output=True`) and confirm, with `requests.post`
+  mocked (no network, no credential, no live call): `max_completion_tokens` sent and `max_tokens`
+  absent; `temperature` entirely absent even when the request specifies the codebase's own `0.0`
+  default; `reasoning_effort` sent only when explicitly requested and rejected closed on a
+  non-reasoning model; the exact `"gpt-5"` slug reaches the request body unsubstituted; structured
+  output, `finish_reason=length` classification, and usage parsing all behave correctly; and a
+  parallel non-reasoning-model test class proves `gpt-4o`-class models keep the byte-for-byte
+  original request shape. **Intended future registry row** (not created in this decision, per the
+  task's "prepare the exact values, do not make operational DB changes" instruction): provider type
+  `OPENAI`, credential env var `OPENAI_API_KEY`, model slug exactly `gpt-5`,
+  `supports_structured_output=True`, `max_output_tokens=128000`, `supports_reasoning=True` (capability
+  flag only -- no stage's `NormalizedLLMRequest.reasoning_effort` is set by this decision), no
+  fallback/substitution model anywhere in the adapter or registry.

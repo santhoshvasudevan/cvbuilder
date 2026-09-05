@@ -57,6 +57,15 @@ class NormalizedLLMError:
     category: LLMErrorCategory
     message: str
     partial_output_received: bool = False
+    # Sanitized, typed rate-limit diagnostic metadata (2026-09-05, OpenRouter 429 diagnostics) --
+    # populated only for RATE_LIMIT errors where the provider adapter could safely extract it from
+    # documented, non-secret response headers/metadata. Never the raw response body or headers
+    # wholesale -- only a small, fixed set of keys (see `adapters/openrouter.py`'s
+    # `parse_openrouter_rate_limit`): `retry_after_seconds`, `limit`, `remaining`, `reset`,
+    # `source` (`"upstream"`/`"unknown"`), `upstream_provider` (a provider label, when named).
+    # `None` for every non-RATE_LIMIT error and for a RATE_LIMIT error where no such metadata was
+    # present in the response.
+    rate_limit_diagnostics: dict | None = None
 
     @classmethod
     def from_exception(

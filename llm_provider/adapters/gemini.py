@@ -76,7 +76,7 @@ class GeminiAdapter(BaseLLMAdapter):
                     "contents": _to_gemini_contents(request.messages),
                     "generationConfig": generation_config,
                 },
-                timeout=60,
+                timeout=self.request_timeout,
             )
         except requests.Timeout as exc:
             return NormalizedLLMResult(
