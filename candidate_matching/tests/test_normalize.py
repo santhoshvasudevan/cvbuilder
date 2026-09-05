@@ -1,20 +1,37 @@
 from __future__ import annotations
 
 from django.test import SimpleTestCase, TestCase
+from pydantic import ValidationError
 
 from candidate_memory.models import CandidateMemory
+from llm_provider.adapters.openai import build_chat_completion_body
+from llm_provider.schema_translation import to_openai_strict_schema
 
-from ..schemas import RequirementNormalizationItem
+from ..schemas import RequirementNormalizationItem, RequirementNormalizationOutput
 from ..services.candidate_generation import generate_candidates_for_requirement
 from ..services.dedup import DedupedClaim, deduplicate_claims
-from ..services.normalization_limits import MAX_DIAGNOSTIC_TERMS, MAX_TERM_CHARS, MAX_TEXT_CHARS
+from ..services.normalization_limits import (
+    MAX_DIAGNOSTIC_TERMS,
+    MAX_EQUIVALENTS,
+    MAX_NORMALIZATION_ITEMS,
+    MAX_PRESERVED_TERMS,
+    MAX_TERM_CHARS,
+    MAX_TEXT_CHARS,
+)
 from ..services.normalize import (
+    SYSTEM_PROMPT,
     NormalizationFailedError,
     build_request,
     build_search_text,
     expand_requirements_for_search,
 )
 from .factories import freeze_revision, make_narrative_claim, make_revision, scripted_normalization
+
+TERM_LIST_FIELDS_AND_LIMITS = [
+    ("diagnostic_terms", MAX_DIAGNOSTIC_TERMS),
+    ("equivalents", MAX_EQUIVALENTS),
+    ("preserved_technical_terms", MAX_PRESERVED_TERMS),
+]
 
 
 def _claim(claim_id, text, engagement_ids=()):
@@ -418,3 +435,111 @@ class ParaphraseAndCrossLanguageBridgeTests(SimpleTestCase):
         search_text = build_search_text(requirement_text, norm)
         candidates = generate_candidates_for_requirement(search_text, [adas_claim, generic_claim])
         self.assertEqual(candidates[0].claim_id, "MC-1")
+
+
+class TermLengthAndListCountBoundaryTests(SimpleTestCase):
+    """2026-09-05 provider-facing contract-alignment correction: `MAX_TERM_CHARS` moved from a
+    Python-only `@field_validator` to a Pydantic-native string constraint (`schemas.BoundedTerm`)
+    so it appears in `model_json_schema()` -- see `ProviderFacingSchemaContractTests` below. These
+    tests prove the *behavior* at the exact boundary is unchanged by that move, for all three
+    bounded term-list fields, not just the one case the pre-existing tests happened to cover."""
+
+    def test_a_term_of_exactly_max_term_chars_passes_for_every_term_list_field(self):
+        for field_name, _ in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                norm = _norm(**{field_name: ["x" * MAX_TERM_CHARS]})
+                self.assertEqual(getattr(norm, field_name), ["x" * MAX_TERM_CHARS])
+
+    def test_a_term_of_max_term_chars_plus_one_fails_for_every_term_list_field(self):
+        for field_name, _ in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                with self.assertRaises(ValidationError):
+                    _norm(**{field_name: ["x" * (MAX_TERM_CHARS + 1)]})
+
+    def test_exactly_the_max_item_count_passes_for_every_term_list_field(self):
+        for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                norm = _norm(**{field_name: [f"t{i}" for i in range(limit)]})
+                self.assertEqual(len(getattr(norm, field_name)), limit)
+
+    def test_max_item_count_plus_one_fails_for_every_term_list_field(self):
+        for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                with self.assertRaises(ValidationError):
+                    _norm(**{field_name: [f"t{i}" for i in range(limit + 1)]})
+
+    def test_ordinary_short_terms_still_behave_unchanged(self):
+        norm = _norm(
+            diagnostic_terms=["Kubernetes", "BM25"],
+            equivalents=["container orchestration"],
+            preserved_technical_terms=["ADAS", "GKE"],
+        )
+        self.assertEqual(norm.diagnostic_terms, ["Kubernetes", "BM25"])
+        self.assertEqual(norm.equivalents, ["container orchestration"])
+        self.assertEqual(norm.preserved_technical_terms, ["ADAS", "GKE"])
+
+
+class ProviderFacingSchemaContractTests(SimpleTestCase):
+    """Proves `MAX_TERM_CHARS` is not merely enforced locally but actually reaches the provider:
+    the Pydantic-generated JSON schema, the strict-schema conversion every adapter uses, and the
+    final OpenAI-compatible request body all carry `maxLength: MAX_TERM_CHARS` on every bounded
+    term-list item. No provider/network call is made -- this only builds objects locally."""
+
+    def test_generated_pydantic_schema_has_item_level_max_length_for_every_term_list(self):
+        schema = RequirementNormalizationOutput.model_json_schema()
+        item_schema = schema["$defs"]["RequirementNormalizationItem"]
+        for field_name, _ in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                self.assertEqual(
+                    item_schema["properties"][field_name]["items"]["maxLength"], MAX_TERM_CHARS
+                )
+
+    def test_strict_schema_conversion_preserves_max_length_max_items_and_additional_properties(self):
+        strict = to_openai_strict_schema(RequirementNormalizationOutput)
+        item_schema = strict["$defs"]["RequirementNormalizationItem"]
+        for field_name, limit in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                field_schema = item_schema["properties"][field_name]
+                self.assertEqual(field_schema["items"]["maxLength"], MAX_TERM_CHARS)
+                self.assertEqual(field_schema["maxItems"], limit)
+        self.assertEqual(item_schema["additionalProperties"], False)
+        self.assertEqual(strict["additionalProperties"], False)
+        # Nothing else already-present was silently loosened or removed by the conversion.
+        self.assertEqual(item_schema["properties"]["canonical_english_text"]["maxLength"], MAX_TEXT_CHARS)
+        self.assertEqual(strict["properties"]["items"]["maxItems"], MAX_NORMALIZATION_ITEMS)
+
+    def test_final_nvidia_bound_request_body_exposes_max_length_for_every_term_list(self):
+        """Builds the real AC_NORMALIZE request (invented, non-personal requirement text) through
+        the production request builder, translates it through the exact strict-schema conversion
+        NVIDIA/OpenAI adapters use, and assembles the final chat-completion body those adapters
+        send -- all locally, no network call -- to prove `maxLength` reaches the actual
+        `response_format.json_schema.schema` NVIDIA would receive."""
+        requirements = [
+            {"requirement_id": "JR-TEST-1", "text": "Invented, non-personal requirement text."}
+        ]
+        request = build_request(requirements, posting_language="en", max_output_tokens=8192)
+        schema = to_openai_strict_schema(request.output_schema)
+        body = build_chat_completion_body(request, "invented-model-id", schema)
+        item_schema = body["response_format"]["json_schema"]["schema"]["$defs"][
+            "RequirementNormalizationItem"
+        ]
+        for field_name, _ in TERM_LIST_FIELDS_AND_LIMITS:
+            with self.subTest(field=field_name):
+                self.assertEqual(
+                    item_schema["properties"][field_name]["items"]["maxLength"], MAX_TERM_CHARS
+                )
+
+
+class PromptContractTests(SimpleTestCase):
+    """The prompt must state, in natural language, the same rule the schema now enforces
+    machine-readably -- so the model has an actual chance to comply, not just a rule it fails
+    silently against. Deliberately checks for the presence of key phrases rather than the full
+    prompt text, so unrelated prompt wording changes don't make this test brittle."""
+
+    def test_prompt_states_the_term_length_limit_and_shape_prohibition(self):
+        self.assertIn(str(MAX_TERM_CHARS), SYSTEM_PROMPT)
+        self.assertIn("short term or short phrase", SYSTEM_PROMPT)
+        self.assertIn("characters", SYSTEM_PROMPT)
+        self.assertIn("never a complete sentence", SYSTEM_PROMPT)
+        self.assertIn("action clause", SYSTEM_PROMPT)
+        self.assertIn("restatement of", SYSTEM_PROMPT)

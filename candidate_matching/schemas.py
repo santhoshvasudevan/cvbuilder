@@ -7,7 +7,9 @@ are never part of this schema).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .services.normalization_limits import (
     MAX_DIAGNOSTIC_TERMS,
@@ -17,6 +19,13 @@ from .services.normalization_limits import (
     MAX_TERM_CHARS,
     MAX_TEXT_CHARS,
 )
+
+# A single JSON-Schema-visible constraint (never a Python-only custom validator) so the
+# `maxLength` bound every one of the three bounded term lists below already enforces locally is
+# also present in `model_json_schema()` -- and therefore in the provider-facing request body every
+# adapter builds from it (2026-09-05 contract-alignment correction, see docs/DECISIONS.md). Reused
+# across all three fields so they can never drift to different per-term limits.
+BoundedTerm = Annotated[str, StringConstraints(max_length=MAX_TERM_CHARS)]
 
 
 class RequirementAssessmentItem(BaseModel):
@@ -69,18 +78,12 @@ class RequirementNormalizationItem(BaseModel):
 
     requirement_id: str
     canonical_english_text: str = Field(max_length=MAX_TEXT_CHARS)
-    diagnostic_terms: list[str] = Field(default_factory=list, max_length=MAX_DIAGNOSTIC_TERMS)
-    equivalents: list[str] = Field(default_factory=list, max_length=MAX_EQUIVALENTS)
-    preserved_technical_terms: list[str] = Field(default_factory=list, max_length=MAX_PRESERVED_TERMS)
+    diagnostic_terms: list[BoundedTerm] = Field(default_factory=list, max_length=MAX_DIAGNOSTIC_TERMS)
+    equivalents: list[BoundedTerm] = Field(default_factory=list, max_length=MAX_EQUIVALENTS)
+    preserved_technical_terms: list[BoundedTerm] = Field(
+        default_factory=list, max_length=MAX_PRESERVED_TERMS
+    )
     source_language: str
-
-    @field_validator("diagnostic_terms", "equivalents", "preserved_technical_terms")
-    @classmethod
-    def _bound_each_term_length(cls, value: list[str]) -> list[str]:
-        for term in value:
-            if len(term) > MAX_TERM_CHARS:
-                raise ValueError(f"term exceeds {MAX_TERM_CHARS} characters: {term!r}")
-        return value
 
 
 class RequirementNormalizationOutput(BaseModel):

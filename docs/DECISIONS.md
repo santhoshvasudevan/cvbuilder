@@ -1467,3 +1467,73 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   invalid final answer the same way and always produces an audit log row for it; a future
   reasoning-enabled OpenRouter smoke qualification has a budget mechanism that won't reproduce the
   same starved-budget failure mode.
+
+## D-027: AC_NORMALIZE per-term length limit must be provider-visible, not Python-only
+
+- **Status**: **APPROVED AND IMPLEMENTED** (2026-09-05) -- directed by the product owner after a
+  read-only audit of a real M5 failure against `JobApplication` 9 / `JobRequirementAnalysis` 10
+  (v2, 30 requirements). The controlled run's AC_NORMALIZE call (`LLMCallLog` id 309) returned 15
+  schema-validation errors, all `items[N].equivalents` entries longer than `MAX_TERM_CHARS` (60) --
+  e.g. `'build generative AI workflow orchestrations using AWS AI services'` (67 characters), a
+  full action clause rather than a short synonym/term.
+- **Audit finding**: `MAX_TERM_CHARS` (`candidate_matching/services/normalization_limits.py`) was a
+  real, correctly-enforced, fail-closed limit -- but it reached the model through no channel at
+  all. It was checked only by a Python-only `@field_validator` on
+  `schemas.RequirementNormalizationItem` (`_bound_each_term_length`), which has no corresponding
+  Pydantic `Field` constraint on the list item type, so it produced no `maxLength` in
+  `RequirementNormalizationOutput.model_json_schema()` -- confirmed by generating the schema
+  directly. `llm_provider.schema_translation.to_openai_strict_schema()` only adds
+  `additionalProperties: false`; it does not add or remove length constraints, so nothing was lost
+  in translation -- there was simply nothing to translate. The AC_NORMALIZE `SYSTEM_PROMPT`
+  (`candidate_matching/services/normalize.py`) said only "Every list is short and bounded -- do not
+  enumerate exhaustively," with no character number and no instruction against full sentences,
+  action clauses, or requirement restatements. The model was validated against a rule it had no
+  way to know existed, in either machine-readable (schema) or natural-language (prompt) form.
+- **This is a contract-alignment defect, not deterministic overreach**: the audit found no evidence
+  that 60 characters is itself unreasonable -- `candidate_generation.py`/`lexical_relevance.py`
+  treat the whole `build_search_text` union as an unordered, rarity-weighted token bag (never
+  exact-phrase matching), so a longer term does not distort scoring more than a short one; common
+  connecting words are already dampened regardless of source field. The representative rejected
+  value reads as a misplaced restatement (arguably canonical-text material), not proof that a
+  faithful short synonym routinely needs 61+ characters. The fix below therefore only exposes the
+  existing, unchanged limit -- it does not raise it, lower it, or add a different limit for any of
+  the three bounded term-list fields.
+- **Fix (structural, not semantic)**: `candidate_matching/schemas.py` now defines `BoundedTerm =
+  Annotated[str, StringConstraints(max_length=MAX_TERM_CHARS)]` and uses it as the item type for
+  `diagnostic_terms`, `equivalents`, and `preserved_technical_terms` (replacing the Python-only
+  `@field_validator`, which is now fully redundant and removed rather than left as inconsistent
+  duplicate validation). `MAX_TERM_CHARS` remains the single source of truth -- the literal `60` is
+  never duplicated. This produces `{"type": "string", "maxLength": 60}` on every one of those
+  fields' items in `model_json_schema()`, and therefore in `to_openai_strict_schema()`'s output and
+  the final `response_format.json_schema.schema` every OpenAI-compatible adapter (OpenAI, NVIDIA
+  NIM, OpenRouter) sends -- verified by building the real AC_NORMALIZE request locally (invented,
+  non-personal requirement text) through the production request builder and the exact
+  strict-schema/request-body-construction path those adapters use, with no network call made.
+  `normalize.py`'s `SYSTEM_PROMPT` gained one sentence, built from `MAX_TERM_CHARS` (never a second
+  hardcoded `60`): each entry in the three bounded lists "must be a short term or short phrase of
+  at most {MAX_TERM_CHARS} characters -- never a complete sentence, an action clause, or a
+  restatement of the full requirement." Boundary behavior (exactly 60 accepted, 61 rejected; list
+  counts unchanged) is identical before and after -- confirmed by test.
+- **Boundary preserved, not weakened**: this is exposure of an existing structural bound, never a
+  deterministic semantic judgment. No term is truncated, dropped, or rewritten after generation; no
+  keyword heuristic was added; `extra="forbid"`, canonical-text length enforcement, requirement-ID
+  set-integrity checking, and fail-closed `SCHEMA_VALIDATION` behavior on any violation are all
+  unchanged. `AgentCandidateAssessment`/`candidate_generation.py`/`lexical_relevance.py` and every
+  request/token/retrieval bound (`retrieval_limits.py`) are untouched. `RequirementNormalizationItem`
+  still has no field that could carry a claim id or evidence -- normalization output remains
+  non-citable search assistance only.
+- **Deferred, not attempted here**: raising or lowering `MAX_TERM_CHARS`, adding a bounded
+  LLM repair/regeneration call on schema failure, and making `SCHEMA_VALIDATION` retryable are all
+  explicitly out of scope for this correction. If AC_NORMALIZE still produces oversized terms after
+  the model can actually see the rule in both the schema and the prompt, that is new evidence for a
+  separate decision -- not something to pre-emptively design for here.
+- **Consequence**: no migration (`normalization_limits.py`'s constants are unchanged in value).
+  `candidate_matching/schemas.py` and `candidate_matching/services/normalize.py` changed; focused
+  tests added to `candidate_matching/tests/test_normalize.py` covering the exact-boundary behavior
+  for all three term-list fields, the generated Pydantic schema, the strict-schema conversion, the
+  final provider-facing request body, and the prompt's stated rule. No live provider call was made;
+  no `StageModelAssignment`/budget/provider row changed (AC_RANK remains at its separately
+  authorized 16384; AC_NORMALIZE/AC_MATCH remain at 8192); no M5/M6 process ran; no Gate was
+  approved; `JobApplication` 9, `JobRequirementAnalysis` 10, and `CandidateMemory` 7 were untouched.
+  This work was isolated in worktree `ac-normalize-contract-alignment` / branch
+  `worktree-ac-normalize-contract-alignment`, left uncommitted to `main` for independent re-audit.

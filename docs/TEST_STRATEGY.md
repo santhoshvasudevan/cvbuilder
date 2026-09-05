@@ -226,6 +226,13 @@ milestone scope):
   are each redundant with claims that did reach the pool for the same requirement (see D-021's
   Finding 3). No unit test asserts a specific real claim ID must appear in the pool, since that
   would overfit the scorer to one gold set rather than testing the scoring mechanism itself.
+  **(D-027, 2026-09-05)** `test_normalize.py` additionally asserts the *provider-facing* contract,
+  not just local Python validation: the generated Pydantic `model_json_schema()`, the
+  `to_openai_strict_schema()` conversion, and the final OpenAI-compatible request body (built
+  locally with invented, non-personal requirement text, no network call) all expose
+  `maxLength: MAX_TERM_CHARS` on every bounded term-list item, and the `SYSTEM_PROMPT` states the
+  same limit in natural language — closing the gap a real M5 run found, where a limit was enforced
+  locally but invisible to the model.
 - **M6 (`resume_builder`), implemented 2026-09-03**: the no-fabrication validator running against the **structured**
   representation before any markdown is rendered (a fixture `ResumeElement` with no evidence, or
   with an ID that doesn't resolve to an existing/confirmed/eligible `MemoryClaim`, is rejected

@@ -1086,6 +1086,51 @@ including the precise root cause and every classification rule, is in D-026 in
   to confirm the fix against a genuine reasoning-enabled response, before any `StageModelAssignment`
   is ever pointed at OpenRouter.
 
+## AC_NORMALIZE provider-facing contract alignment (2026-09-05, D-027) -- IMPLEMENTED, no live call
+
+A controlled, real M5 run against `JobApplication` 9 / `JobRequirementAnalysis` 10 (v2, 30
+requirements) reached AC_RANK on its first attempt (after a separately authorized AC_RANK budget
+increase to 16384) but failed on a second attempt at the earlier AC_NORMALIZE stage: 15 schema-
+validation errors, all `equivalents` entries longer than `MAX_TERM_CHARS` (60 characters). A
+read-only audit found the limit was real and correctly fail-closed, but reached the model through
+no channel at all -- enforced only by a Python-only `@field_validator`
+(`schemas.RequirementNormalizationItem._bound_each_term_length`), invisible to
+`model_json_schema()` and therefore to the provider-facing request body, and never stated in the
+`SYSTEM_PROMPT` in any form. Full detail (root cause, why 60 itself was judged not to be
+overreach, and the fix) is in D-027 in `docs/DECISIONS.md`; summarized here:
+
+- **Fix (structural, not semantic)**: `candidate_matching/schemas.py` replaces the custom
+  validator with `BoundedTerm = Annotated[str, StringConstraints(max_length=MAX_TERM_CHARS)]`,
+  used as the item type for `diagnostic_terms`/`equivalents`/`preserved_technical_terms` --
+  `MAX_TERM_CHARS` stays the single source of truth, never duplicated as a literal. This produces
+  `maxLength: 60` in `model_json_schema()`, `to_openai_strict_schema()`'s output, and the final
+  `response_format.json_schema.schema` every OpenAI-compatible adapter sends -- verified locally
+  (invented, non-personal requirement text; no network call) through the actual production request
+  builder and adapter body-construction path. `normalize.py`'s `SYSTEM_PROMPT` gained one sentence,
+  built from `MAX_TERM_CHARS`, stating each bounded-list entry must be a short term/phrase of at
+  most that many characters, never a complete sentence, action clause, or requirement restatement.
+- **Boundary preserved, not weakened**: `MAX_TERM_CHARS` itself is unchanged (60); no term is
+  truncated/dropped/rewritten after generation; no repair/regeneration call was added;
+  `SCHEMA_VALIDATION` is still never retried; `extra="forbid"`, canonical-text length enforcement,
+  requirement-ID set-integrity checking, every request/token/retrieval bound, and non-citability of
+  normalization output are all unchanged.
+- **No migration**: `normalization_limits.py`'s constants are unchanged in value;
+  `makemigrations --check --dry-run` confirmed no schema change.
+- **Tests**: `candidate_matching/tests/test_normalize.py` gained exact-boundary coverage (60 passes/
+  61 fails, list-count boundaries) for all three term-list fields, plus new assertions on the
+  generated Pydantic schema, the strict-schema conversion, the final provider-facing request body,
+  and the prompt's stated rule. Full suite: 944/944 passing; `check`/`makemigrations --check
+  --dry-run`/`ruff check .`/`git diff --check` all clean.
+- **Not done in this session**: no live provider call; no `StageModelAssignment`/budget/provider
+  row changed (AC_RANK remains at its separately authorized 16384; AC_NORMALIZE/AC_MATCH remain at
+  8192); no M5/M6 process ran; no Gate approved; `JobApplication` 9, `JobRequirementAnalysis` 10,
+  and `CandidateMemory` 7 untouched. Implemented in isolated worktree
+  `ac-normalize-contract-alignment` / branch `worktree-ac-normalize-contract-alignment`, on top of
+  `main` HEAD `1530f0b` -- not merged into `main`.
+- **Next action**: a separately authorized M5 re-run against `JobApplication` 9 to confirm
+  AC_NORMALIZE now succeeds against a real NVIDIA response with the aligned contract, followed by
+  the independent Gate-1 FitAssessment review that was deferred pending a successful run.
+
 ## What does not exist
 
 - The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
@@ -1128,7 +1173,11 @@ above) is **APPROVED AND IMPLEMENTED**, now merged to `main` with real (unassign
 D-026 (null-content response parsing fix + separated smoke budgets, see "Null-content response
 parsing fix" above) is **APPROVED AND IMPLEMENTED** -- a provider-boundary correction found by
 D-025's own smoke test, still no stage assignment and no live call performed under D-026 itself.
-Neither D-016 nor anything else is blocking for M7 as currently scoped.
+D-027 (AC_NORMALIZE provider-facing contract alignment, see "AC_NORMALIZE provider-facing contract
+alignment" above) is **APPROVED AND IMPLEMENTED** -- a contract-alignment correction found by a
+real M5 run's AC_NORMALIZE failure against `JobApplication` 9, not yet merged to `main` and not yet
+re-verified against a live provider call. Neither D-016 nor anything else is blocking for M7 as
+currently scoped.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

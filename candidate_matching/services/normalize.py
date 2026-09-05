@@ -37,10 +37,11 @@ from llm_provider.types import NormalizedLLMRequest, NormalizedLLMResult
 
 from ..schemas import RequirementNormalizationItem, RequirementNormalizationOutput
 from .dedup import normalize_text
+from .normalization_limits import MAX_TERM_CHARS
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 You are a bounded requirement-normalization step in a resume-matching pipeline. You are given a \
 job posting's source language and a list of job requirements (each with a requirement_id and its \
 original text). You know nothing else about this job or any candidate -- do not assume or invent \
@@ -59,9 +60,12 @@ core concept.
 from the original requirement, preserved verbatim (never translated or altered).
 - source_language: the job posting's source language you were given.
 
-Every list is short and bounded -- do not enumerate exhaustively. Never invent a specific \
-technology, product, or standard that is not implied by the requirement text itself. This output \
-is a retrieval hint only, never evidence, never a claim about any candidate.
+Every list is short and bounded -- do not enumerate exhaustively. Each entry in diagnostic_terms, \
+equivalents, and preserved_technical_terms must be a short term or short phrase of at most \
+{MAX_TERM_CHARS} characters -- never a complete sentence, an action clause, or a restatement of \
+the full requirement. Never invent a specific technology, product, or standard that is not \
+implied by the requirement text itself. This output is a retrieval hint only, never evidence, \
+never a claim about any candidate.
 """
 
 
