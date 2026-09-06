@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Application {{ application.pk }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'job_applications:dashboard' %}">&larr; Dashboard</a></p>
+
+<h2>Job Application {{ application.pk }}</h2>
+{% if error %}
+<p class="error">{{ error }}</p>
+{% endif %}
+
+<table border="1" cellpadding="4">
+  <tr><th>Employer</th><td>{{ row.employer|default:"--" }}</td></tr>
+  <tr><th>Role</th><td>{{ row.role_title|default:"--" }}</td></tr>
+  <tr><th>Status</th><td>{{ row.status }}</td></tr>
+  <tr><th>Pipeline phase</th><td>{{ application.get_pipeline_phase_display }}</td></tr>
+  <tr><th>Application outcome</th><td>{{ application.get_application_outcome_display }}</td></tr>
+  <tr><th>Created</th><td>{{ application.created_at }}</td></tr>
+  <tr><th>Updated</th><td>{{ application.updated_at }}</td></tr>
+</table>
+
+<h3>Pipeline artifacts</h3>
+<table border="1" cellpadding="4">
+  <tr>
+    <th>Job Requirement Analysis</th>
+    <td>
+      {% if row.jra_exists %}
+        v{{ row.jra_version }}
+        <a href="{% url 'job_intake:analysis_detail' application_id=application.pk %}">view</a>
+      {% else %}none{% endif %}
+    </td>
+  </tr>
+  <tr>
+    <th>Fit Assessment (Gate 1)</th>
+    <td>
+      {% if row.fit_assessment_exists %}
+        {% if row.fit_assessment_current %}current{% else %}<strong>stale</strong>{% endif %}
+      {% else %}none{% endif %}
+      -- {% if row.gate1_approved %}approved{% else %}pending{% endif %}
+      <a href="{% url 'reviews:gate1' application_id=application.pk %}">view Gate 1</a>
+    </td>
+  </tr>
+  <tr>
+    <th>Resume Draft (Gate 2)</th>
+    <td>
+      {% if row.resume_draft_exists %}
+        {% if row.resume_draft_current %}current{% else %}<strong>stale</strong>{% endif %}
+        {% if row.resume_draft_confirmed %}(confirmed){% endif %}
+      {% else %}none{% endif %}
+      -- {% if row.gate2_approved %}approved{% else %}pending{% endif %}
+      <a href="{% url 'reviews:gate2' application_id=application.pk %}">view Gate 2</a>
+    </td>
+  </tr>
+</table>
+
+<h3>Next action</h3>
+{% if next_action.url %}
+<p><a href="{{ next_action.url }}">{{ next_action.label }}</a></p>
+{% else %}
+<p>{{ next_action.label }}</p>
+{% endif %}
+
+{% if row.gate2_approved and not row.is_stale %}
+<p><a href="{% url 'resume_builder:preview' application_id=application.pk %}">View final resume (preview / copy / download)</a></p>
+{% endif %}
+
+<h3>Application outcome</h3>
+<p>Current outcome: <strong>{{ application.get_application_outcome_display }}</strong></p>
+{% if row.gate2_approved and not row.is_stale %}
+<form method="post">
+  {% csrf_token %}
+  <select name="application_outcome">
+    {% for value, label in outcome_choices %}
+    <option value="{{ value }}" {% if value == application.application_outcome %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Set outcome</button>
+</form>
+{% else %}
+<p>Application outcome can only be recorded once Gate 2 is approved and the current resume draft
+is not stale.</p>
+{% endif %}
+{% endblock %}

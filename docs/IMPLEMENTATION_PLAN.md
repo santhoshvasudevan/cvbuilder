@@ -480,6 +480,11 @@ live call was made.
 
 ## M7 — Integrated per-job workflow and markdown deliverable
 
+**Status (2026-09-06): implemented and tested on an isolated worktree/branch, not yet merged to
+`main`.** See `docs/CURRENT_STATE.md`'s "M7 -- integrated per-job workflow and final markdown
+deliverable" section and `docs/REQUIREMENT_TRACEABILITY.md`'s DASH-002 through DASH-005/HITL-007
+rows for the concrete evidence behind each acceptance criterion below.
+
 - **Objective**: wire M3–M6 into one coherent per-job-application flow through `job_applications`,
   full HITL-007 enforcement across the whole chain, and **the job-application tracking dashboard**
   (requirements.md §17).

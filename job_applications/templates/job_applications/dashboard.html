@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Job Application Dashboard{% endblock %}
+{% block content %}
+<h2>Job Application Dashboard</h2>
+<p><a href="{% url 'job_intake:intake' %}">Start a new job application</a></p>
+
+<table border="1" cellpadding="4">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Employer</th>
+      <th>Role</th>
+      <th>Status</th>
+      <th>Pipeline phase</th>
+      <th>Outcome</th>
+      <th>JRA</th>
+      <th>Fit Assessment</th>
+      <th>Resume Draft</th>
+      <th>Gate 1</th>
+      <th>Gate 2</th>
+      <th>Review required</th>
+      <th>Stale</th>
+      <th>Created</th>
+      <th>Updated</th>
+      <th>Next action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{% url 'job_applications:detail' pk=row.application.pk %}">{{ row.application.pk }}</a></td>
+      <td>{{ row.employer|default:"--" }}</td>
+      <td>{{ row.role_title|default:"--" }}</td>
+      <td>{{ row.status }}</td>
+      <td>{{ row.application.get_pipeline_phase_display }}</td>
+      <td>{{ row.application.get_application_outcome_display }}</td>
+      <td>{% if row.jra_exists %}v{{ row.jra_version }}{% else %}none{% endif %}</td>
+      <td>
+        {% if row.fit_assessment_exists %}
+          {% if row.fit_assessment_current %}current{% else %}stale{% endif %}
+        {% else %}none{% endif %}
+      </td>
+      <td>
+        {% if row.resume_draft_exists %}
+          {% if row.resume_draft_current %}current{% else %}stale{% endif %}
+          {% if row.resume_draft_confirmed %}(confirmed){% endif %}
+        {% else %}none{% endif %}
+      </td>
+      <td>{% if row.gate1_approved %}approved{% else %}pending{% endif %}</td>
+      <td>{% if row.gate2_approved %}approved{% else %}pending{% endif %}</td>
+      <td>{% if row.review_required %}YES{% else %}no{% endif %}</td>
+      <td>{% if row.is_stale %}YES{% else %}no{% endif %}</td>
+      <td>{{ row.application.created_at }}</td>
+      <td>{{ row.application.updated_at }}</td>
+      <td>
+        {% if row.next_action.url %}
+          <a href="{{ row.next_action.url }}">{{ row.next_action.label }}</a>
+        {% else %}
+          {{ row.next_action.label }}
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="16">No job applications yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

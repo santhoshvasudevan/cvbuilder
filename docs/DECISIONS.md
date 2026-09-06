@@ -1961,3 +1961,69 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   (`llm_provider`, `candidate_matching`, `candidate_memory`, `job_intake`, `resume_builder`,
   `job_applications`, `reviews`); `manage.py check`/`makemigrations --check --dry-run`/
   `ruff check .`/`git diff --check` all clean; zero live provider calls.
+
+## D-033: Accept ResumeDraft id=4 (JobApplication 9) as the v1 final deliverable despite named engagement/language evidence gaps
+
+- **Status**: **APPROVED** (2026-09-06) -- an explicit operator decision, recorded here verbatim
+  rather than inferred, ahead of Milestone M7's integration/dashboard work.
+- **Context**: `JobApplication` 9 completed a real, live-provider M5/M6 run (`LLMCallLog` ids
+  318-320 for `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`, id 321 for `AB_BUILD`, OpenAI `gpt-5` via
+  `StageModelAssignment` id 24, budget 16384, read timeout 300s). Both Human Review Gates were
+  manually approved by the operator: Gate 1 (after three AJ feedback/re-run cycles, landing on
+  `JobRequirementAnalysis` id 10/version 2) and Gate 2, which confirmed `ResumeDraft` id 4/version
+  1 (`FitAssessment` id 9/version 1) and advanced `JobApplication` 9 to `READY`.
+- **Decision**: the operator accepts this draft as the v1 final markdown deliverable for
+  `JobApplication` 9 despite three known, named limitations:
+  1. no Continental-specific résumé bullets (CE-0002);
+  2. no Maruti-specific résumé bullets (CE-0003);
+  3. no generated `LanguageProficiency` elements.
+- **What this decision is not**: it is not a correction to Candidate Memory (no `MemoryClaim`,
+  support, or rule was edited, retired, or reinterpreted because of this draft), and it is not
+  evidence that the missing Continental/Maruti/language facts do not exist in Candidate Memory --
+  only that they did not surface through this particular bounded M5 retrieval pass for this
+  particular job requirement analysis. The résumé's section *structure* (headings, ordering,
+  certifications/languages-omitted-when-empty) is deterministic/static per
+  `docs/RESUME_OUTPUT_STRUCTURE.md` and was not in question here; the *contents* of a language
+  section, when one is generated, are never static facts hard-coded anywhere -- they must trace to
+  eligible Candidate Memory evidence exactly like any other `ResumeElement`, the same as this
+  draft's summary/experience/skill elements do.
+- **Consequence**: no code change follows from this decision by itself -- it is a record of an
+  operator judgment call about one specific artifact's acceptability, not a defect fix. The
+  Continental/Maruti engagement-balanced retrieval gap and the absent language evidence are
+  recorded as a future M5 retrieval-completeness improvement (broaden bounded retrieval to more
+  reliably surface evidence for every `APPROVED` `CareerEngagement` referenced by a posting's
+  requirements, and confirm eligible language evidence reaches the `FitAssessment`/Agent Builder
+  context), not undertaken in this decision or in the M7 work package that accompanies it.
+  `JobApplication` 9, `JobRequirementAnalysis` 10, `FitAssessment` 9, and `ResumeDraft` 4 were not
+  regenerated, re-run, or edited as part of recording this decision.
+
+## D-034: `application_outcome` may only be recorded once Gate 2 is approved and the chain is current
+
+- **Status**: **PROPOSED** (2026-09-06) -- an implementation-level interpretation of DASH-003
+  (requirements.md Sec 17), not yet product-owner-approved; recorded honestly as proposed rather
+  than silently treated as settled.
+- **Requirement**: DASH-003 (`application_outcome` is operator-set, independent of
+  `pipeline_phase`, no speculative states beyond `NOT_APPLIED`/`APPLIED`/`INTERVIEWING`/
+  `REJECTED`).
+- **Gap**: requirements.md Sec 17 establishes that the two dimensions are independent but does not
+  say whether an outcome may be recorded *before* a final resume actually exists.
+  Recording `APPLIED` against a `JobApplication` with no `READY`, confirmed, current resume draft
+  would mean the dashboard claims an application was submitted with no corresponding deliverable
+  on record -- a misleading combination of durable state, not merely an early one.
+- **Decision (proposed)**: `job_applications.services.set_application_outcome` refuses to move
+  `application_outcome` away from `NOT_APPLIED` unless `pipeline_phase == READY` **and** the chain
+  is not stale (the current resume draft is confirmed and current relative to the current fit
+  assessment, which is itself current relative to the current job requirement analysis -- the same
+  chain-wide freshness check, HITL-007, used everywhere else in this milestone). Once outcome has
+  moved away from `NOT_APPLIED`, the operator may freely move among `APPLIED`/`INTERVIEWING`/
+  `REJECTED` (e.g. to correct a mis-click) without an additional precondition, since `pipeline_phase`
+  never regresses once `READY`. This never blocks `pipeline_phase` or the current-version pointers
+  from advancing further (e.g. a later Gate-2 feedback re-run and re-approval) -- and,
+  independently of this decision, nothing anywhere in the codebase ever writes
+  `application_outcome` except this one action, so a later artifact regeneration never reverts an
+  outcome already recorded (verified by `job_applications/tests/test_dashboard_services.py::
+  ApplicationOutcomeServiceTests::test_outcome_survives_resume_draft_regeneration`).
+- **Consequence**: no schema change (`application_outcome`'s choices are unchanged). If the product
+  owner later decides an outcome should be recordable earlier (e.g. `APPLIED` recorded manually
+  outside this system before the dashboard existed), this decision's precondition is the one place
+  to relax, not a scattered set of view-level checks.

@@ -1,6 +1,14 @@
 # Current State
 
-Last updated: 2026-09-05 (OpenAI Structured Outputs strict-schema `required`-completion fix -- see
+Last updated: 2026-09-06 (Milestone M7 -- integrated per-job workflow and final markdown
+deliverable -- implemented and tested on an isolated worktree/branch, not merged to `main` in this
+session; plus the real live M5->Gate1->M6->Gate2 run for `JobApplication` 9 and the operator's
+D-033 acceptance of its draft as the v1 final deliverable, both from a separately-authorized
+session preceding this one -- see "Real live M5->Gate1->M6->Gate2 run for JobApplication 9" and
+"M7 -- integrated per-job workflow and final markdown deliverable" below. No M5/M6 rerun, no Gate
+change, no résumé regeneration, no PDF/DOCX, and zero live provider calls were made or authorized
+by the M7 work itself.). Previously, as of 2026-09-05 (OpenAI Structured Outputs strict-schema
+`required`-completion fix -- see
 "OpenAI strict-schema `required`-completion fix (2026-09-05, D-032)" below. No M5/M6/Gate action,
 no live provider call, and no `StageModelAssignment`/registry change were made in this session --
 committed on branch `worktree-openai-strict-schema-fix`, not merged to `main`.). Previously, also
@@ -1255,14 +1263,152 @@ A schema-correction-plus-test work package, committed on its own branch
   `StageModelAssignment` row changed; no M5/M6 process ran; no Gate approved; `JobApplication` 9,
   `JobRequirementAnalysis` 10, and `CandidateMemory` 7 untouched.
 
+## Real live M5->Gate1->M6->Gate2 run for JobApplication 9, and its accepted v1 draft (2026-09-06, D-033)
+
+In a separately-authorized session between the D-032 work above and the M7 work below, a real,
+live-provider M5/M6 run completed for `JobApplication` 9 and both Human Review Gates were manually
+approved by the operator. Read-only ORM inspection performed at the start of the M7 work below
+independently confirmed every element of this state directly against the real development
+database (never assumed from a hand-off note):
+
+- `JobApplication` 9: `pipeline_phase=READY`, `current_jra_id=10`, `current_fit_assessment_id=9`,
+  `current_resume_draft_id=4`; no newer `JobRequirementAnalysis`/`FitAssessment`/`ResumeDraft`
+  version exists for this application beyond these.
+- `JobRequirementAnalysis` id 10 is version 2 (role title "Generative AI Solutions Architect", 30
+  requirements) -- version 2 exists because Gate 1 went through three AJ feedback/re-run cycles
+  (`ReviewFeedback` ids 3/4/5, all `GATE_1`/`AJ`) before settling.
+- `FitAssessment` id 9 (version 1, 30 `RequirementAssessment` rows) is based on JRA id 10 --
+  fresh, not stale.
+- `ResumeDraft` id 4 (version 1, 29 `ResumeElement` rows) is based on FitAssessment id 9 -- fresh,
+  not stale -- and is confirmed (`confirmed_at` set, via `approve_gate2()`'s canonical guarded
+  transition; no other code path in this codebase ever sets `confirmed_at` or `pipeline_phase=
+  READY`, confirmed by a full grep across `job_applications`/`resume_builder`/`reviews`).
+- `LLMCallLog` ids 318-320 (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`) and 321 (`AB_BUILD`) are the real
+  calls behind this run; `LLMCallLog`'s max id in the development database is exactly 321 -- no
+  call of any kind has been logged since, confirming no M5/M6/provider process has run again.
+  `StageModelAssignment` id 24 (`AB_BUILD`) is OpenAI `gpt-5` (`LLMModel` id 12, provider
+  capability 128000 tokens), stage budget 16384, read timeout 300s -- unchanged since this run.
+- The rendered markdown (3270 characters, sha256 recorded in the M7 verification evidence, not
+  reproduced here to avoid embedding personal claim text in project documentation) was confirmed
+  to have been produced exactly once, by the existing `resume_builder/services/build.py` ->
+  `rendering/markdown.py::render_resume_markdown` path, strictly after the no-fabrication
+  validator passed -- never regenerated or re-rendered by any M7 work.
+- **Operator decision (D-033, APPROVED)**: the operator accepts `ResumeDraft` id 4 as the v1 final
+  deliverable for `JobApplication` 9 despite three known limitations -- no Continental-specific
+  bullets, no Maruti-specific bullets, no generated `LanguageProficiency` elements. This is
+  recorded as an accepted, non-blocking limitation of *this specific draft*, not as a correction to
+  Candidate Memory and not as proof the underlying Continental/Maruti/language facts do not exist
+  -- see D-033 in `docs/DECISIONS.md` for the full record, including why the résumé's section
+  *structure* is deterministic/static while a language section's *contents*, when generated, are
+  never static facts and must still trace to eligible Candidate Memory evidence. The Continental/
+  Maruti engagement-balanced retrieval gap and the absent language evidence remain a future M5
+  retrieval-completeness improvement, not undertaken here. No regeneration of `ResumeDraft` id 4,
+  no re-run of Agent Candidate/Agent Builder, and no Gate/phase change occurred as part of
+  recording this decision or the M7 work below.
+
+## M7 -- integrated per-job workflow and final markdown deliverable (2026-09-06)
+
+Implemented on an isolated worktree/branch off `main` at `924d508` (not merged to `main` in this
+session). Per `docs/IMPLEMENTATION_PLAN.md` M7's scope: the dashboard, `JobApplication` detail/
+resume flow, chain-wide freshness enforcement, and the operator's `application_outcome` action.
+No new agent capability, no M5/M6 rerun, no Gate change, no PDF/DOCX, and zero live provider calls
+were made or authorized by this work; `JobApplication` 9 and its artifact chain (above) were only
+ever read, never mutated, by any of it.
+
+- **`job_applications/services.py`** (new): the one place chain-wide freshness (HITL-007),
+  dashboard status derivation, next-valid-action resolution, and the `application_outcome` action
+  live. `ChainFreshness`/`compute_freshness()` compares each artifact's own immutable upstream
+  identity reference (D-006) -- FitAssessment-vs-JRA, ResumeDraft-vs-FitAssessment -- *and* folds
+  in the transitive case: a `ResumeDraft` can be perfectly in sync with its own `FitAssessment` yet
+  that `FitAssessment` has since gone stale relative to a newer JRA (e.g. a Gate-1 "re-analyze the
+  posting" feedback action taken after Gate 2 was already approved) -- `draft_stale` reflects the
+  whole chain, not just the last pair. `derive_dashboard_status()` shows the recorded
+  `application_outcome` once it leaves `NOT_APPLIED` (regenerating an artifact afterward never
+  reverts it -- nothing else in the codebase writes this field, verified by a dedicated test) and
+  the current `pipeline_phase` label otherwise. `resolve_next_action()` is advisory UI guidance
+  only -- the actual guard against an invalid transition always remains the pre-existing canonical
+  service/model methods, re-checked fresh on every request. `set_application_outcome()` is the one
+  new state-changing action this milestone adds: restricted to a `JobApplication` that has reached
+  `READY` with a non-stale chain (D-034, **PROPOSED** -- an implementation-level interpretation of
+  DASH-003, not yet product-owner-approved; see `docs/DECISIONS.md`).
+- **`job_applications/views.py`/`urls.py`/`templates/job_applications/*.html`** (new; previously
+  the app had models/admin/tests only, no views/urls/templates at all): `dashboard_view` (the
+  requirements.md Sec 17 tracking dashboard -- company/title/derived status/pipeline phase/
+  application outcome/JRA-FitAssessment-ResumeDraft existence-and-currency/Gate 1-2 status/review-
+  required/staleness/dates/next-action link, computed fresh from durable DB state on every
+  request, server-rendered, no SPA) and `detail_view` (per-application state plus the
+  `application_outcome` POST action, `@require_http_methods`, CSRF-protected via Django's standard
+  middleware). Neither view ever sets `pipeline_phase`, a current-version pointer, or a
+  confirmation field directly -- both delegate exclusively to `job_applications.services`/the
+  model's own guarded methods.
+- **`resume_builder/services/delivery.py`** (new): `get_final_markdown()` is the one guard for the
+  v1 final deliverable -- returns the already-persisted, immutable `ResumeDraft.rendered_markdown`
+  only when the draft is the application's current draft, confirmed, and non-stale anywhere in the
+  chain (including the transitive JRA-vs-FitAssessment case). It deliberately never calls the
+  generator or the renderer again: `rendered_markdown` was produced exactly once inside
+  `services/build.py`, strictly after the no-fabrication validator passed, and `ResumeDraft` is
+  append-only. (Observed, not fixed, while establishing this: `ResumeElement` rows for section=
+  `ACHIEVEMENT` are persisted in their original, pre-placement form -- `services/build.py`
+  persists Agent Builder's flattened elements *before* `render_resume_markdown`'s internal
+  `_place_achievements` step relocates each achievement into `SUMMARY`/`EXPERIENCE_BULLET` or
+  drops it as already-covered, so re-deriving markdown from `ResumeElement` rows alone, without
+  redoing that exact placement pass, would not reproduce what Gate 2 actually approved. This is
+  pre-existing M6 code, out of M7's "integration, not new pipeline logic" scope -- flagged here for
+  a future M6 follow-up, not changed by this work.) `build_filename()` is a pure, deterministic
+  function of already-persisted fields (application id, draft version, the JRA's own role title,
+  sanitized) -- repeated calls for the same draft always produce the same name.
+- **`resume_builder/views.py`/`urls.py`/`templates/resume_builder/preview.html`** (new; previously
+  the app had services/models/admin/tests only, no views/urls/templates): `preview_view` (GET-only
+  readable rendered preview plus a read-only, selectable `<textarea>` copy source) and
+  `download_view` (GET-only, `text/markdown; charset=utf-8`, `Content-Disposition: attachment`
+  with the deterministic sanitized filename, a 409 with a safe message when the current draft
+  is not confirmed/current/fresh). Both are pure reads -- verified by a dedicated test that GETting
+  the download endpoint does not change `ResumeDraft.rendered_markdown`/`confirmed_at`/
+  `created_at`, and that two consecutive downloads are byte-identical.
+- **`config/urls.py`**: mounted `resume_builder.urls` at `/resume/` and `job_applications.urls` at
+  `/applications/`, plus a `/` -> `/applications/` redirect so the dashboard is the natural landing
+  page.
+- **Live, read-only smoke verification against the real `JobApplication` 9** (Django test client
+  against the real development database, inside this M7 work, before any test-suite work): `/`,
+  `/applications/`, `/applications/9/`, `/resume/9/preview/`, and `/resume/9/download/` all
+  returned success; the download's `Content-Disposition` filename was
+  `resume-app9-v1-generative-ai-solutions-architect.md`; `JobApplication` 9's full identity tuple
+  (`pipeline_phase`, `application_outcome`, all three current-version pointers, `updated_at`) was
+  captured before and after every request and confirmed byte-for-byte unchanged.
+- **Automated test suite**: 45 new deterministic tests (`job_applications/tests/
+  test_dashboard_services.py`, `job_applications/tests/test_views_dashboard.py`,
+  `resume_builder/tests/test_delivery.py`) -- dashboard row/status for every pipeline phase,
+  next-action resolution (including both stale-chain redirect cases), gate status display, current
+  vs. stale JRA/FitAssessment/ResumeDraft (including the transitive case), broken/missing pointer
+  handling, cross-application ownership isolation, final markdown preview/copy-source/download
+  (filename/content-type/content/byte-identical-repeats/no-mutation/restricted-to-approved-
+  current-fresh), no evidence IDs or planning metadata in the rendered markdown, zero LLM calls
+  from any dashboard/render/download request, `application_outcome` updates/preservation-across-
+  regeneration/invalid-value-rejection/CSRF-and-POST-only enforcement, and a dedicated fixture-
+  based (never the operational database) reconstruction of `JobApplication` 9's exact accepted
+  `READY` shape. Full project suite: 1085/1085 passing; `manage.py check`/`makemigrations --check
+  --dry-run` (no changes -- no model/schema change in this work)/`ruff check .`/`git diff --check`
+  all clean; a manual diff/staged-content secret scan found nothing secret-shaped. Zero live
+  provider calls; `LLMCallLog`'s max id remained 321 throughout every check in this work package.
+- **Not done in this session**: `JobApplication` 9's `application_outcome` was deliberately left
+  `NOT_APPLIED` (setting it to `APPLIED` was explicitly out of scope for this work package); no
+  PDF/DOCX; the pre-existing `ResumeElement`-vs-`ACHIEVEMENT`-placement observation above was
+  documented, not fixed; the post-M7 architecture review checkpoint (D-001) and M8 were not
+  started, per this work package's explicit instruction.
+
 ## What does not exist
 
-- The M7 dashboard (list/detail views, `application_outcome` operator action) and any integration
-  wiring beyond the pointer-based freshness checks M5/M6 already enforce individually.
-- Any pipeline stage other than `MEMORY_BUILD`, `AJ_ANALYZE`, `AC_RANK`, `AC_MATCH`, and
-  `AB_BUILD` -- all five now exist and are exercised by the automated suite via the `FakeAdapter`;
-  none has been exercised against a live provider (no credentials configured in this environment
-  for any stage).
+- Applying the D-034 `application_outcome`-preconditions proposal or the D-001 post-M7
+  architecture review checkpoint (both intentionally not started per this M7 work package's
+  explicit instruction); marking `JobApplication` 9 `APPLIED` (deliberately left `NOT_APPLIED`).
+- A fix for the pre-existing, M6-era `ResumeElement`/`ACHIEVEMENT`-placement observation recorded
+  in the M7 section above (out of M7's integration-only scope).
+- Any pipeline stage other than `MEMORY_BUILD`, `AJ_ANALYZE`, `AC_NORMALIZE`, `AC_RANK`,
+  `AC_MATCH`, and `AB_BUILD` -- all six now exist and are exercised by the automated suite via the
+  `FakeAdapter`. `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD` each have exactly one live-verified
+  real run on record (`JobApplication` 9's M5/M6 run, `LLMCallLog` ids 318-321, see the M7 section
+  above); no stage has broader live-provider verification beyond that one run, and `MEMORY_BUILD`'s
+  live verification remains the earlier, separate qualification pass described above.
 - Any real-world URL fetch verification (only mocked HTTP responses have been exercised).
 - Any live-provider verification of the OpenAI/NVIDIA NIM/Gemini adapters (opt-in, operator-run,
   not performed in this environment -- no credentials configured).
@@ -1311,8 +1457,15 @@ Chat Completions compatibility fix, no live call) -- see "Runtime timeout/OpenRo
 GPT-5-readiness work" above -- are all **APPROVED AND IMPLEMENTED**. D-032 (OpenAI Structured
 Outputs strict-schema `required`-completion fix, no live call -- see "OpenAI strict-schema
 `required`-completion fix" above) is **APPROVED AND IMPLEMENTED**; its own HTTP-400 classification
-sub-question is explicitly deferred as a distinct follow-up, not itself blocking. Neither D-016 nor
-anything else is blocking for M7 as currently scoped.
+sub-question is explicitly deferred as a distinct follow-up, not itself blocking. D-033 (accepting
+`ResumeDraft` id 4 as `JobApplication` 9's v1 final deliverable despite named engagement/language
+evidence gaps, see "Real live M5->Gate1->M6->Gate2 run for JobApplication 9" above) is **APPROVED**
+-- an explicit operator decision, not a code change. D-034 (`application_outcome` may only be
+recorded once Gate 2 is approved and the chain is current, see the M7 section above) is
+**PROPOSED**, not yet product-owner-approved -- an honest implementation-level interpretation of
+DASH-003 made while building the M7 dashboard, not assumed settled. Neither D-016 nor D-034 nor
+anything else is blocking for the M7 work already completed above; D-034 would only need
+revisiting if the product owner later wants an outcome recordable before `READY`.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
@@ -1342,17 +1495,21 @@ against.
 
 ## Next action
 
-M1 through M6 are implemented, committed, and verified (M1-M4 against the `FakeAdapter`/mocked
-HTTP as already documented above; M5-M6 additionally verified in a real, rolled-back end-to-end
-walkthrough against the real ACTIVE CandidateMemory and a real APPROVED CareerEngagement). Per
-`docs/IMPLEMENTATION_PLAN.md`'s dependency graph, Milestone M7 (integrated per-job workflow,
-chain-wide freshness enforcement, and the dashboard) depends on M3, M4, M5, and M6, all now
-complete -- M7 may proceed. Per this work package's explicit instruction, M7 was **not started**
-in this session. Before any live M5->Gate1->M6->Gate2 run against a real provider, the operator
+M1 through M7 are implemented (M1-M4 against the `FakeAdapter`/mocked HTTP as already documented
+above; M5-M6 additionally verified in a real, rolled-back end-to-end walkthrough against the real
+ACTIVE CandidateMemory and a real APPROVED CareerEngagement, and separately verified live for the
+real `JobApplication` 9 -- see "Real live M5->Gate1->M6->Gate2 run for JobApplication 9" above; M7
+implemented and tested on an isolated worktree/branch, not yet merged to `main` -- see the M7
+section above). Recommended next: (1) merge the M7 worktree/branch to `main` after independent
+re-audit, since it is implementation-complete and fully tested but was deliberately kept isolated
+per this work package's instructions; (2) then proceed to the post-M7 architecture review
+checkpoint (D-001) immediately, before M8, per `docs/IMPLEMENTATION_PLAN.md`; (3) M8 (v1 quality,
+token-consumption reporting, remaining TEST-001 coverage) after that. Before any *further* live
+M5->Gate1->M6->Gate2 run against a real provider for a *different* job application, the operator
 must: configure a real credential in `.env` for whichever provider/model will serve `AC_MATCH` and
-`AB_BUILD`, create the corresponding `LLMProvider`/`LLMModel`/`StageModelAssignment` rows (none
-exist yet for either stage), and confirm CE-0001/CE-0002/CE-0003's mapped narrative claims are the
-intended evidence set for a real job application before approving either gate for real.
+`AB_BUILD` (already configured and exercised once for `JobApplication` 9 -- `StageModelAssignment`
+id 24, OpenAI `gpt-5`), and confirm CE-0001/CE-0002/CE-0003's mapped narrative claims are the
+intended evidence set for that job application before approving either gate for real.
 
 **OpenRouter addendum (2026-09-04, D-025/D-026)**: OpenRouter is now available as an additional
 provider option, merged to `main`, with real (unassigned) `LLMProvider`/`LLMModel` registry rows

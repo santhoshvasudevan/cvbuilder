@@ -256,14 +256,21 @@ milestone scope):
   on regeneration; freshness/staleness detection keyed on `JobApplication.current_fit_
   assessment_id` (D-006) rather than a timestamp (mutating the underlying `FitAssessment` version
   pointer after a draft exists is caught at the next read).
-- **M7 (integration, `job_applications` dashboard)**: cross-app status-transition wiring for a
-  full job-application run; chain-wide freshness enforcement at every step boundary (not LLM
-  output quality — that stays a manual review item, per below); `pipeline_phase`
-  NEW→ANALYSIS→PREPARATION→READY transitions occur automatically at the right points and never in
-  an impossible combination; `application_outcome` is independent of `pipeline_phase` (marking
-  `APPLIED` then regenerating a resume does not revert `application_outcome`); the dashboard list
-  view surfaces an accurate derived status for a fixture set of job applications in different
-  states.
+- **M7 (integration, `job_applications` dashboard), implemented 2026-09-06** (isolated worktree/
+  branch, not yet merged to `main`): cross-app status-transition wiring for a full job-application
+  run; chain-wide freshness enforcement at every step boundary, including the *transitive* case (a
+  `ResumeDraft` in sync with its own `FitAssessment` but that `FitAssessment` now stale relative to
+  a newer JRA) — not LLM output quality, which stays a manual review item, per below;
+  `pipeline_phase` NEW→ANALYSIS→PREPARATION→READY transitions occur automatically at the right
+  points and never in an impossible combination; `application_outcome` is independent of
+  `pipeline_phase` (marking `APPLIED` then regenerating a resume does not revert
+  `application_outcome`, verified by a dedicated regression test); the dashboard list view
+  surfaces an accurate derived status for a fixture set of job applications in every pipeline
+  phase, including one fixture reconstructing `JobApplication` 9's real accepted `READY` shape
+  without touching the operational database. 45 new deterministic tests (`job_applications/tests/
+  test_dashboard_services.py`, `job_applications/tests/test_views_dashboard.py`, `resume_builder/
+  tests/test_delivery.py`); zero live provider calls, verified directly by asserting `LLMCallLog`'s
+  row count is unchanged across dashboard/detail/preview/download requests.
 - **M8**: token-consumption report correctness against known `LLMCallLog` fixture rows (per
   job application, per stage, per provider, per model); any remaining gaps found across M1–M7.
 

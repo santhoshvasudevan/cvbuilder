@@ -16,10 +16,14 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic import RedirectView
 
 urlpatterns = [
+    path('', RedirectView.as_view(pattern_name='job_applications:dashboard'), name='home'),
     path('admin/', admin.site.urls),
     path('candidate-memory/', include('candidate_memory.urls')),
     path('job-intake/', include('job_intake.urls')),
     path('reviews/', include('reviews.urls')),
+    path('resume/', include('resume_builder.urls')),
+    path('applications/', include('job_applications.urls')),
 ]
