@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.test import TestCase
 
-from candidate_matching.services.retrieve import RetrievalContext, RetrievedClaim
+from candidate_matching.services.retrieve import RetrievalContext, RetrievedClaim, RetrievedEngagement
 from candidate_memory.models import CareerEngagement
 
 from ..models import ResumeElement
@@ -19,7 +19,23 @@ def _retrieval(claims_by_engagement: dict[str, str | None]) -> RetrievalContext:
         )
         for cid, eid in claims_by_engagement.items()
     ]
-    return RetrievalContext(candidate_memory_id=1, claims=claims, engagements=[], rules=[])
+    # D-035: the renderer now sources which engagement headers to render from `retrieval.
+    # engagements` (the baseline chronology), never from which engagement a bullet happened to
+    # cite -- so this fixture builder derives it from the same engagement IDs the claims above
+    # reference, mirroring what `services/context.py` would have populated for a real build.
+    engagement_ids = sorted({eid for eid in claims_by_engagement.values() if eid})
+    engagements = [
+        RetrievedEngagement(
+            engagement_id=engagement.engagement_id,
+            approved_role_title=engagement.approved_role_title,
+            displayed_organization=engagement.displayed_organization,
+            location=engagement.location,
+            is_current=engagement.is_current,
+            duration_months=engagement.duration_months(),
+        )
+        for engagement in CareerEngagement.objects.filter(engagement_id__in=engagement_ids)
+    ]
+    return RetrievalContext(candidate_memory_id=1, claims=claims, engagements=engagements, rules=[])
 
 
 class RenderResumeMarkdownTests(TestCase):

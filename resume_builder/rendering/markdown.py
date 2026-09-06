@@ -3,6 +3,13 @@
 `services/static_profile_boundary.render_engagement_header`, resolved fresh from the database by
 `engagement_id` -- never anything Agent Builder produced (D-019).
 
+Baseline chronology completeness (D-035, 2026-09-06): every engagement in `retrieval.engagements`
+(every currently `APPROVED` `CareerEngagement`, per `services/context.py`) gets a rendered header,
+regardless of whether Agent Builder actually wrote any bullets for it -- an engagement's presence in
+the résumé is no longer contingent on the model having selected/generated content for it. An
+engagement with zero bullets renders an explicit italic diagnostic line instead of either a blank
+section or a fabricated bullet -- see `_NO_EVIDENCE_DIAGNOSTIC`.
+
 Achievement placement (Sec 4's "avoid unnecessary duplication... left open for a future
 iteration"): a deterministic v1 policy, not a semantic/fuzzy dedup. An achievement is treated as
 "naturally covered" when its own supporting claim IDs overlap with any already-placed summary or
@@ -21,6 +28,10 @@ from candidate_memory.services.static_profile_boundary import render_engagement_
 
 from ..models import ResumeElement
 from ..validators.no_fabrication import ValidatedElement
+
+_NO_EVIDENCE_DIAGNOSTIC = (
+    "_No résumé-eligible narrative evidence is currently available for this engagement._"
+)
 
 
 def _engagement_sort_key(engagement: CareerEngagement) -> tuple[int, int]:
@@ -102,16 +113,20 @@ def render_resume_markdown(
 
     lines.append("## Professional Experience")
     lines.append("")
-    used_engagement_ids = {
-        e.engagement_id for e in elements
-        if e.section == ResumeElement.Section.EXPERIENCE_BULLET and e.engagement_id
-    }
-    engagements = list(CareerEngagement.objects.filter(engagement_id__in=used_engagement_ids))
+    # D-035: every retrieved (currently APPROVED) engagement is rendered, not only one that
+    # happens to have a bullet placed under it -- career-chronology completeness must never depend
+    # on whether Agent Builder's output referenced the engagement.
+    retrieved_engagement_ids = {e.engagement_id for e in retrieval.engagements}
+    engagements = list(CareerEngagement.objects.filter(engagement_id__in=retrieved_engagement_ids))
     for engagement in sorted(engagements, key=_engagement_sort_key):
         header = render_engagement_header(engagement.engagement_id, language=language)
         lines.append(f"### {header}")
-        for item in section_items(ResumeElement.Section.EXPERIENCE_BULLET, engagement.engagement_id):
-            lines.append(f"- {item.text}")
+        bullets = section_items(ResumeElement.Section.EXPERIENCE_BULLET, engagement.engagement_id)
+        if bullets:
+            for item in bullets:
+                lines.append(f"- {item.text}")
+        else:
+            lines.append(_NO_EVIDENCE_DIAGNOSTIC)
         lines.append("")
 
     lines.append("## Key Skills")

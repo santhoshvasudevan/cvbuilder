@@ -273,6 +273,19 @@ milestone scope):
   row count is unchanged across dashboard/detail/preview/download requests.
 - **M8**: token-consumption report correctness against known `LLMCallLog` fixture rows (per
   job application, per stage, per provider, per model); any remaining gaps found across M1–M7.
+- **M6 follow-up (2026-09-06, D-035/D-036)**: the hybrid baseline-chronology correction is tested
+  the same way M5/M6 already are — deterministic, `FakeAdapter`-only, zero network. Synthetic
+  Ford/Continental/Maruti/German-language/global-evidence/no-evidence-engagement fixtures
+  (`resume_builder/tests/test_hybrid_chronology.py`) prove the architecture-level invariants (every
+  approved engagement reaches the baseline regardless of AC_RANK selection, anchor selection is
+  bounded and deterministic with a documented tie-break, language evidence is unconditional, global
+  claims are never misattributed, no-evidence engagements are flagged rather than fabricated
+  around, and one end-to-end `build_resume_draft` run proves the corrected final markdown actually
+  contains the previously-omitted content) without needing any LLM-quality judgment call — this
+  correction is a deterministic data-flow/rendering fix, not a prompt-quality change, so it needed
+  no exception to the "no cassette testing until outputs stabilize" rule above.
+
+
 
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").

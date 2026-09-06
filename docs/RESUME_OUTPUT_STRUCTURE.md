@@ -161,6 +161,16 @@ This is an eligibility/attachment check, not a semantic-similarity check (requir
 explicitly rules out exact/near-text or embedding similarity as the fundamental truth test).
 Human review of wording quality and fairness happens afterward, at Human Review Gate 2.
 
+**Hybrid evidence context (D-035, 2026-09-06):** the claims/engagements Agent Builder actually
+receives are no longer only Agent Candidate's job-relevance-ranked selection. `services/context.py`
+merges that selection with a deterministic baseline layer computed independently of it — a small,
+fixed number of each `APPROVED` engagement's own anchor claims, and every confirmed language-
+proficiency claim, always included regardless of this posting's specific requirements (see
+`docs/ARCHITECTURE.md` §9c for the full design). This does not change §2/§3's structured
+contract or validation rules at all — every claim, from any source, is still cited by exactly one
+real `claim_id` and passes the same eligibility checks. It changes only what `retrieval.claims`/
+`retrieval.engagements` *contain* going into generation and rendering.
+
 ## 4. V1 markdown rendering contract
 
 Once the structured representation passes validation, it is rendered deterministically into this
@@ -206,6 +216,15 @@ is not naturally covered by any Experience bullet, it may be rendered under Expe
 relevant role rather than introducing a redundant standalone section, to keep the v1 rendering
 contract exactly as listed above. (Revisiting a standalone Achievements section is left open for a
 future iteration if operator experience shows the collapsed approach loses useful signal.)
+
+**Every retrieved engagement renders, with an explicit diagnostic when it has no bullets (D-035,
+2026-09-06):** the `### [header]` block under Professional Experience is no longer emitted only for
+an engagement a placed `EXPERIENCE_BULLET` happened to cite — every engagement in the baseline
+chronology (every currently `APPROVED` `CareerEngagement`) gets its header rendered unconditionally.
+An engagement with zero bullets shows one explicit italic diagnostic line (`_No résumé-eligible
+narrative evidence is currently available for this engagement._`) instead of either a blank section
+or Agent Builder inventing content to fill it — this is a rendering-time fact about evidence
+availability, never itself treated as evidence.
 
 ## 5. What this document deliberately does not do
 

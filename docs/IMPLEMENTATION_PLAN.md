@@ -477,6 +477,16 @@ live call was made.
   the LLM cites a real, confirmed, in-scope claim ID but writes wording that misrepresents it —
   that residual risk is exactly why Gate 2 human review of wording is still mandatory, not a
   redundant step.
+- **Follow-up (2026-09-06, D-035/D-036, worktree `worktree-hybrid-chronology-fix`, `main` still at
+  `fb91e60`)**: M6's own context builder was corrected to no longer rely solely on M5's
+  job-relevance-ranked selection for career-chronology completeness — see `docs/DECISIONS.md`
+  D-035/D-036 and `docs/ARCHITECTURE.md` §9c. `resume_builder/services/context.py`,
+  `.../services/generate.py`, `.../rendering/markdown.py`, and a new
+  `.../services/baseline_chronology.py` were changed/added; `FitAssessment`'s own schema and M5's
+  bounded-retrieval pipeline (§ M5 below) are unchanged. 15 new tests
+  (`resume_builder/tests/test_hybrid_chronology.py`); full suite 1111/1111. Not merged to `main`;
+  the real `JobApplication` 9 deliverable has not been regenerated with this correction (that is a
+  separately authorized M5/M6 rerun, out of this follow-up's own authorization).
 
 ## M7 — Integrated per-job workflow and markdown deliverable
 

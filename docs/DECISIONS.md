@@ -2104,3 +2104,44 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   re-approve Gate 2 -- `pipeline_phase` never needs to regress. This was not exercised in this work
   package (doing so would count as an M5/M6 invocation, which this work package's authorization
   explicitly excludes) and remains available for the future corrective work referenced above.
+
+## D-036: D-035's deterministic architecture correction -- hybrid baseline chronology implemented and tested; the real JobApplication 9 rerun remains separately authorized
+
+- **Status**: **PROPOSED** (2026-09-06) -- implemented and tested on an isolated worktree/branch
+  (`worktree-hybrid-chronology-fix`, branched from `fb91e60`), not merged to `main` and not yet
+  reviewed/approved by the product owner in this session. Recorded here as the concrete design D-035
+  asked for, per candidate remedy (3) (the recommended hybrid) in that entry.
+- **What this decision covers**: the deterministic, zero-LLM correction described in full in
+  `docs/ARCHITECTURE.md` §9c -- new `resume_builder/services/baseline_chronology.py`
+  (`compute_engagement_anchors`, `compute_language_evidence`, `merge_retrieved_claims`), a
+  `retrieval_reasons` provenance field added to `candidate_matching.services.retrieve.
+  RetrievedClaim` (plus an `engagements_without_eligible_evidence` diagnostic field on
+  `RetrievalContext`), `resume_builder/services/context.py::build_builder_context` rewritten to
+  merge job-relevant + engagement-anchor + language evidence and to enumerate `APPROVED`
+  engagements live rather than from `FitAssessment.retrieved_engagement_ids`, the Agent Builder
+  prompt (`services/generate.py`) restructured into four explicitly labeled evidence categories,
+  and the markdown renderer (`rendering/markdown.py`) changed to render every retrieved engagement
+  unconditionally with an explicit diagnostic line when it has zero eligible evidence, rather than
+  only an engagement a bullet happened to cite.
+- **What this decision does not cover**: it does not resolve D-035 as operationally closed. No
+  code change here touched `JobApplication` 9, `JobRequirementAnalysis` 10, `FitAssessment` 9,
+  `ResumeDraft` 4, or `CandidateMemory` 7 -- confirmed unchanged before/after (see
+  `docs/CURRENT_STATE.md`'s corresponding entry for the exact counts). Regenerating the real
+  deliverable with this correction requires a separately authorized, versioned M5/M6 rerun (a new
+  `FitAssessment` and `ResumeDraft` version for `JobApplication` 9), which this work package's
+  authorization explicitly excludes.
+- **Also delivered, same work package**: `job_applications.services.begin_new_version_from_ready`,
+  the canonical, explicit-authorization entry point for the READY-revision workflow D-035's own
+  investigation noted as a de facto, unformalized capability -- no migration required (see
+  `docs/ARCHITECTURE.md`'s `JobApplication` entry and `job_applications/tests/
+  test_revision_workflow.py`). Not exercised against `JobApplication` 9.
+- **Verification**: 19 new deterministic tests (`resume_builder/tests/test_hybrid_chronology.py`,
+  15; `job_applications/tests/test_revision_workflow.py`, 4) plus 2 existing M6 tests updated to
+  match the corrected architecture (`resume_builder/tests/test_context.py`'s missing-`based_on_jra`
+  fixture gap, exposed now that baseline-chronology computation always runs when an `ACTIVE`
+  `CandidateMemory` exists regardless of job-relevant claim survival; `resume_builder/tests/
+  test_engagement_placement_integration.py`'s cross-revision test, whose "context is entirely
+  empty" assumption no longer holds now that an engagement's own legitimate anchor claim is
+  deterministically present) -- full project suite green (1111/1111), `ruff check .` clean,
+  `manage.py check`/`makemigrations --check --dry-run` clean, zero live provider calls (`FakeAdapter`
+  only throughout).

@@ -1,6 +1,14 @@
 # Current State
 
-Last updated: 2026-09-06 (Milestone M7 -- integrated per-job workflow and final markdown
+Last updated: 2026-09-06 (D-035's hybrid baseline-chronology architecture correction --
+implemented and tested on an isolated worktree/branch `worktree-hybrid-chronology-fix` (branched
+from `fb91e60`), not merged to `main`, product-owner review pending (D-036, **PROPOSED**) -- see
+"D-035 hybrid baseline-chronology correction (2026-09-06, D-036)" below. This is a deterministic
+architecture correction plus a formalized READY-revision-workflow entry point only: no provider
+call was made, M5/M6 were not rerun, no Gate was touched, and `JobApplication` 9/`JobRequirementAnalysis`
+10/`FitAssessment` 9/`ResumeDraft` 4/`CandidateMemory` 7 were not reopened, regenerated, or
+otherwise mutated by this session -- confirmed unchanged before and after.). Previously, also
+2026-09-06 (Milestone M7 -- integrated per-job workflow and final markdown
 deliverable -- implemented and tested on an isolated worktree/branch, not merged to `main` in this
 session; plus the real live M5->Gate1->M6->Gate2 run for `JobApplication` 9 and the operator's
 D-033 acceptance of its draft as the v1 final deliverable, both from a separately-authorized
@@ -1577,6 +1585,106 @@ not change which provider currently serves `AC_MATCH`/`AB_BUILD` and does not al
 steps above in any way. A known parser bug the first live smoke test surfaced (D-026) has been
 fixed; a fresh, separately authorized smoke re-run against the real registry rows is the remaining
 step before OpenRouter could be considered for any stage assignment.
+
+## D-035 hybrid baseline-chronology correction (2026-09-06, D-036)
+
+Implemented on an isolated worktree/branch `worktree-hybrid-chronology-fix`, branched from `main`
+at `fb91e60` (not merged to `main` in this session; product-owner review pending, D-036
+**PROPOSED**). Scope: the deterministic architecture correction D-035 called for, plus a
+formalized (still unexercised-against-`JobApplication`-9) READY-revision-workflow entry point.
+Full design/rationale in `docs/ARCHITECTURE.md` §9c and the `JobApplication` entry in §4;
+full decision record in `docs/DECISIONS.md` D-036. **Not marking D-035 resolved** -- this closes
+the architecture-correction half only; the real `JobApplication` 9 deliverable still requires a
+separately authorized, versioned M5/M6 rerun (see "Remaining work" below).
+
+- **Root cause confirmed** (already diagnosed by D-035 itself, reconfirmed by reading the actual
+  retrieval/context code): `resume_builder/services/context.py::build_builder_context` (M6) built
+  its claim set *only* from `FitAssessment.retrieved_claim_ids` (M5's job-relevance-ranked
+  selection) and its engagement set from `FitAssessment.retrieved_engagement_ids` -- career-
+  chronology completeness was entirely a side effect of whether AC_RANK happened to select a given
+  engagement's claims for *this specific job posting*, with no engagement-balance guarantee
+  anywhere in the path. `resume_builder/rendering/markdown.py` compounded this by only rendering an
+  engagement header for one a placed `EXPERIENCE_BULLET` actually cited (`used_engagement_ids`,
+  derived from Agent Builder's own output) -- so even an engagement that *did* reach the retrieval
+  context could still vanish from the final markdown if the model wrote nothing for it.
+- **New module** `resume_builder/services/baseline_chronology.py`: `compute_engagement_anchors()`
+  (a small, fixed number -- `MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT = 3` -- of each `APPROVED`
+  `CareerEngagement`'s own confirmed/resume-eligible/narrative claims, selected deterministically by
+  `experience_level` rank then `claim_id` ascending, using only claims with an `APPROVED`
+  `ClaimEngagementMapping` to that specific engagement), `compute_language_evidence()` (every
+  confirmed/resume-eligible `language_proficiency` claim, included unconditionally), and
+  `merge_retrieved_claims()` (unions claims across sources by `claim_id`, never duplicating one
+  present via more than one path).
+- **`candidate_matching/services/retrieve.py`**: `RetrievedClaim` gained `retrieval_reasons: tuple`
+  (provenance-only, `JOB_RELEVANT`/`ENGAGEMENT_ANCHOR`/`LANGUAGE_EVIDENCE`, a claim may carry more
+  than one) and `RetrievalContext` gained `engagements_without_eligible_evidence` (an explicit
+  diagnostic list, always empty for M5 contexts). Both are additive fields with defaults -- no
+  M5 code or test needed to change.
+- **`resume_builder/services/context.py::build_builder_context`** rewritten: enumerates currently
+  `APPROVED` `CareerEngagement`s live (not from `FitAssessment.retrieved_engagement_ids`, which
+  happened to already include every approved engagement but was never guaranteed to); merges
+  job-relevant + engagement-anchor + language claims; adds the same `MAX_ESTIMATED_REQUEST_TOKENS`
+  bound M5 already enforces (previously unchecked at this M6 step); uses `candidate_matching.
+  services.retrieve.get_active_candidate_memory()` directly rather than deriving the active
+  revision from `claims[0]` (fixes a latent fragility where rule selection silently produced `[]`
+  whenever the job-relevant claim list was empty, even with a real `ACTIVE` revision present).
+- **`resume_builder/services/generate.py`**: the Agent Builder prompt now presents four explicitly
+  labeled sections -- Baseline career chronology (every engagement, always, with a
+  "NO ELIGIBLE NARRATIVE EVIDENCE" diagnostic tag where applicable), Job-relevant evidence,
+  Engagement anchor evidence, Confirmed language evidence -- and explicitly instructs the model
+  never to invent a bullet for a flagged engagement.
+- **`resume_builder/rendering/markdown.py`**: renders a header for every engagement in
+  `retrieval.engagements` (the baseline chronology) unconditionally; an engagement with zero
+  bullets gets an explicit italic diagnostic line (`_No résumé-eligible narrative evidence is
+  currently available for this engagement._`) instead of a blank section, a fabricated bullet, or
+  silent omission.
+- **`job_applications/services.py`**: `begin_new_version_from_ready()` (new) -- the canonical,
+  explicit-authorization entry point for the READY-revision workflow (raises
+  `RevisionNotAuthorizedError` unless `pipeline_phase == READY`; mutates nothing itself). No
+  migration required -- every actual state change reuses existing, already-hardened
+  `reviews.services`/`JobApplication` methods.
+- **Tests**: 15 new (`resume_builder/tests/test_hybrid_chronology.py`) proving, with synthetic
+  Ford/Continental/Maruti/German-language/global-evidence/no-evidence-engagement fixtures: every
+  approved engagement reaches the baseline context regardless of AC_RANK selection; Continental/
+  Maruti claims are present without being AC_RANK-selected; language evidence reaches the context
+  unconditionally; relevance selection still tags/tailors (Ford's claim carries both
+  `JOB_RELEVANT` and `ENGAGEMENT_ANCHOR`); unmapped global evidence is never pulled in by the
+  baseline; claims are never misattributed across engagements; a no-evidence engagement is flagged,
+  never fabricated around; provenance IDs all resolve to real confirmed claims; context stays
+  bounded (anchor cap enforced, tie-break rule verified); ordering is deterministic (claim_id/
+  engagement_id sorted, repeat calls identical); a cross-revision claim is never pulled into an
+  anchor; and one end-to-end `build_resume_draft` run (real orchestration, `FakeAdapter` only)
+  proves the final markdown actually contains the previously-omitted Continental/Maruti/German
+  content plus the no-evidence engagement's diagnostic line. 4 new
+  (`job_applications/tests/test_revision_workflow.py`) proving the READY-revision workflow: refusal
+  when not `READY`, no self-mutation, a full new-version sequence preserving the original
+  `ResumeDraft` version 1 immutable while producing version 2, and D-006 freshness still blocking
+  a premature Gate 2 re-approval mid-revision. 2 existing M6 tests updated to match the corrected
+  architecture, not weakened (`test_context.py`'s bare `FitAssessment` fixture needed a
+  `based_on_jra` now that baseline-chronology/rule computation always runs whenever an `ACTIVE`
+  `CandidateMemory` exists; the cross-revision adversarial test's "the context is entirely empty"
+  assertion became "the cross-revision claim specifically never resolves," since the real
+  engagement's own legitimate anchor claim is now deterministically present).
+- **Verification**: full suite 1111/1111 passing (up from 1092 pre-correction), `ruff check .`
+  clean, `manage.py check` clean, `manage.py makemigrations --check --dry-run` reports no changes
+  (confirming no migration was needed for either half of this work), zero live provider calls
+  (`FakeAdapter` only throughout, verified by code inspection -- no `requests`/provider-SDK call
+  anywhere in the new/changed code). Operational development-database counts (`JobApplication`,
+  `JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`, `CandidateMemory`) and `JobApplication`
+  9's own `pipeline_phase`/`current_jra_id`/`current_fit_assessment_id`/`current_resume_draft_id`
+  were confirmed identical before and after this session's work.
+- **Remaining work before `JobApplication` 9 can be regenerated with this correction**: a
+  separately authorized, versioned M5 (Agent Candidate re-run producing a new `FitAssessment`
+  version) and/or M6 (Agent Builder re-run producing a new `ResumeDraft` version) invocation
+  against the real `ACTIVE` `CandidateMemory` (id=7) and real `JobRequirementAnalysis` 10 -- this
+  correction only changes M6's context-construction step, so in principle a fresh Agent Builder run
+  against the *existing* `FitAssessment` 9 would already pick up the corrected baseline chronology
+  without needing a new `FitAssessment` version at all, but that is still a live M6 invocation this
+  work package's authorization explicitly excluded and did not perform. Recommended sequence:
+  independently audit this correction first (this document, `docs/DECISIONS.md` D-036,
+  `docs/ARCHITECTURE.md` §9c, and the diff itself), obtain explicit product-owner authorization,
+  then run Agent Builder once against `FitAssessment` 9 (no Agent Candidate re-run needed) and
+  review the result at Gate 2 before confirming a new `ResumeDraft` version.
 
 ## Maintenance rule for this file
 

@@ -49,7 +49,9 @@ class BuildBuilderContextTests(TestCase):
             confirmation_status=MemoryClaim.ConfirmationStatus.RETIRED
         )
 
-        fit_assessment = FitAssessment(retrieved_claim_ids=[claim.claim_id], retrieved_engagement_ids=[])
+        fit_assessment = FitAssessment(
+            based_on_jra=_make_jra(), retrieved_claim_ids=[claim.claim_id], retrieved_engagement_ids=[]
+        )
         context = build_builder_context(fit_assessment)
         self.assertEqual(context.claims, [])
 

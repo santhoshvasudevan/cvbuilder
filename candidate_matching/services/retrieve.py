@@ -32,6 +32,16 @@ class NoActiveCandidateMemoryError(Exception):
     pass
 
 
+# D-035 hybrid-context correction (2026-09-06): why a claim reached Agent Builder's context, never
+# mutually exclusive -- a claim can carry more than one reason (e.g. an engagement anchor that
+# AC_RANK also happened to select). `retrieval_reasons` is purely provenance/inspection metadata;
+# it plays no role in eligibility or no-fabrication checks, which continue to key only on
+# claim_id/approved_engagement_ids exactly as before this correction.
+RETRIEVAL_REASON_JOB_RELEVANT = "JOB_RELEVANT"
+RETRIEVAL_REASON_ENGAGEMENT_ANCHOR = "ENGAGEMENT_ANCHOR"
+RETRIEVAL_REASON_LANGUAGE_EVIDENCE = "LANGUAGE_EVIDENCE"
+
+
 @dataclasses.dataclass(frozen=True)
 class RetrievedClaim:
     claim_id: str
@@ -40,6 +50,7 @@ class RetrievedClaim:
     subject_scope: str
     approved_engagement_ids: tuple[str, ...] = ()
     duplicate_group_key: str = ""
+    retrieval_reasons: tuple[str, ...] = ()
 
     @property
     def is_global(self) -> bool:
@@ -70,6 +81,11 @@ class RetrievalContext:
     claims: list[RetrievedClaim]
     engagements: list[RetrievedEngagement]
     rules: list[RetrievedRule]
+    # D-035 hybrid-context correction: engagement_ids (from `engagements` above, so always a
+    # subset of it) with zero eligible baseline-anchor claims -- an explicit diagnostic for Agent
+    # Builder/the renderer, never a reason to fabricate or to drop the engagement. Always empty for
+    # M5 (Agent Candidate) contexts, which have no notion of baseline anchors.
+    engagements_without_eligible_evidence: tuple[str, ...] = ()
 
     @property
     def claim_ids(self) -> list[str]:

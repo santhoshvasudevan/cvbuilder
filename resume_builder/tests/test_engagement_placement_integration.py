@@ -233,7 +233,12 @@ class EngagementPlacementAdversarialTests(TestCase):
             retrieved_engagement_ids=[self.ford.engagement_id],
         )
         retrieval = build_builder_context(fit_assessment)
-        self.assertEqual(retrieval.claims, [])  # cross-revision claim never resolves at all
+        # The cross-revision, stale-pointer claim itself never resolves -- but (D-035 hybrid
+        # chronology) self.ford's own legitimate anchor claim (self.ford_claim, confirmed/eligible
+        # on the real ACTIVE revision) is now deterministically present regardless of what this
+        # particular FitAssessment happened to select, so the context is no longer expected to be
+        # empty outright.
+        self.assertNotIn(other_claim.claim_id, retrieval.claim_ids)
 
         output = AgentBuilderOutput.model_validate(
             _output_with_bullet(self.ford.engagement_id, [other_claim.claim_id])

@@ -653,6 +653,20 @@ semantics and invariants come first.
   `pipeline_phase` — regenerating a resume after `APPLIED` does not revert the outcome.
 - **Invariants**: this is the single source of "current version" truth that D-006's freshness
   checks and D-010's versioning model both depend on — no other model duplicates that state.
+- **Revising a `READY` application (D-035 investigation, 2026-09-06)**: generating a new version
+  from an application already at `READY` needs no new schema. `job_applications.services.
+  begin_new_version_from_ready` is the canonical, explicit-authorization entry point — a
+  precondition checkpoint (raises `RevisionNotAuthorizedError` unless `pipeline_phase == READY`,
+  mutates nothing itself) a caller must invoke before re-entering Gate 1 for a `READY` application.
+  Every actual state change afterward reuses the existing, already-hardened machinery unchanged:
+  `reviews.services.run_agent_candidate`/`submit_gate1_feedback` (new append-only `FitAssessment`
+  version), `JobApplication.approve_gate1` (D-006 freshness, idempotent no-op if already `READY`
+  and non-stale — `pipeline_phase` never regresses on its own), `reviews.services.
+  run_agent_builder`/`submit_gate2_feedback` (new append-only `ResumeDraft` version), and
+  `JobApplication.approve_gate2` (D-006 freshness against the *new* `FitAssessment`, refusing to
+  reconfirm a stale draft). No function anywhere sets `pipeline_phase` directly outside these
+  guarded methods. See `docs/DECISIONS.md` D-035 and `job_applications/tests/
+  test_revision_workflow.py` for the full synthetic-data proof (never `JobApplication` 9).
 
 ## 5. What is explicitly NOT built (and why)
 
@@ -870,7 +884,9 @@ important as the schema above — a correct schema with an unbounded retrieval p
   `MemoryClaim`s (via the same retrieval service described in §2.4), and applicable
   `CandidateRule`s (e.g. wording cautions relevant to the requirements at hand).
 - **Agent Builder** receives the approved `FitAssessment` and only the supporting claims/rules
-  required for the draft — not a memory dump, not the source documents, not the snapshot.
+  required for the draft — not a memory dump, not the source documents, not the snapshot. Since
+  D-035 (§9c below), this is a hybrid of the `FitAssessment`'s own job-relevant selection plus a
+  deterministic, zero-LLM baseline chronology layer computed independently of that selection.
 - **`docs/CANDIDATE_MEMORY_SNAPSHOT.md` is never automatically included in runtime prompts.** It
   is a human-readable export for operator review (see D-015 and the snapshot document itself), not
   default LLM context; including it in a prompt would require a deliberate, separate design
@@ -904,3 +920,63 @@ important as the schema above — a correct schema with an unbounded retrieval p
   evidence for each concept, not all of it. See D-021's acceptance review for a worked example
   comparing three excluded claims against the pool content that made their underlying capability,
   scope, and engagement redundant rather than lost.
+
+## 9c. Hybrid evidence context for Agent Builder (D-035, 2026-09-06)
+
+Root cause (full detail in `docs/DECISIONS.md` D-035): §9's bounded-retrieval guarantee is
+requirement-level evidence coverage for *this job posting*, computed by AC_RANK (D-015/D-021).
+Every `APPROVED` `CareerEngagement` already reaches `FitAssessment.retrieved_engagement_ids`
+unconditionally (`CareerEngagement` eligibility was never relevance-filtered), but the *narrative
+claims* that populate an engagement's bullets were entirely subject to AC_RANK's job-specific
+selection, with no engagement-balance guarantee anywhere in the path. A posting that never phrases
+a requirement in a way that scores a given engagement's (or language evidence's) claims into the
+selected set reliably omitted them — proven against the real `JobApplication` 9 / `FitAssessment` 9
+(Continental/Maruti/German evidence reached the candidate pool but were never selected).
+
+**Correction implemented**: `resume_builder/services/context.py::build_builder_context` (M6's own
+context builder, unchanged in shape — it still re-verifies everything fresh against the database,
+never trusting a stored ID list blindly) now merges three claim sources, each tagged with *why* it
+is present (`candidate_matching.services.retrieve.RETRIEVAL_REASON_*`, a claim may carry more than
+one reason):
+
+1. **Job-relevant** — exactly `FitAssessment.retrieved_claim_ids`, re-verified (unchanged from
+   before D-035).
+2. **Engagement anchor claims** (new, `resume_builder/services/baseline_chronology.py`) — for every
+   currently `APPROVED` `CareerEngagement` (queried live, not from `FitAssessment.
+   retrieved_engagement_ids` — this is what actually decouples chronology completeness from a
+   stored, potentially-stale snapshot), a small fixed number
+   (`MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT = 3`) of that engagement's own confirmed, resume-eligible,
+   narrative claims (only claims with an `APPROVED` `ClaimEngagementMapping` to that specific
+   engagement — a global claim is never promoted into an anchor). Selection is deterministic:
+   ranked by `experience_level` (ownership/leadership ranks above mere awareness), tie-broken by
+   `claim_id` ascending — documented, not incidental.
+3. **Confirmed language evidence** (new, same module) — every confirmed, resume-eligible
+   `claim_type == "language_proficiency"` claim, included unconditionally, since D-035's own
+   diagnosis showed language claims are almost always global and structurally unlikely to be
+   selected by relevance ranking at all.
+
+An engagement with zero eligible anchor claims is recorded (`RetrievalContext.
+engagements_without_eligible_evidence`) as an explicit diagnostic, never papered over: the Agent
+Builder prompt (`resume_builder/services/generate.py`) tells the model outright not to invent a
+bullet for it, and the deterministic renderer (`resume_builder/rendering/markdown.py`) shows the
+engagement's header (from the baseline chronology — every retrieved engagement is now rendered
+unconditionally, not only one a bullet happened to cite) with an explicit italic diagnostic line
+instead of either fabricating content or silently omitting the section.
+
+**What did not change**: `FitAssessment`'s own schema, versioning, and freshness semantics; AC_RANK
+itself; the no-fabrication validator's eligibility/attachment rules (a merged-in anchor/language
+claim must pass the exact same confirmed/resume-eligible/engagement-mapping checks as any AC_RANK-
+selected claim — this is additive coverage, never a relaxed eligibility rule); provenance (every
+claim, from any source, still carries its real `claim_id`). No migration was required — the merge
+happens in memory at M6 context-construction time, using existing model/field shapes.
+
+**Bounded, predictable size**: unchanged `MAX_ESTIMATED_REQUEST_TOKENS` budget (§ D-015/D-021),
+now also enforced at the M6 context-construction step (previously only M5's own bounded-retrieval
+pipeline checked it) — the merged context (job-relevant + capped per-engagement anchors + language
+claims) still fails closed (`RetrievalBudgetExceededError`) rather than truncating if it somehow
+exceeds budget after every cap.
+
+**Scope note**: this is a deterministic architecture correction only. Applying it to regenerate the
+real `JobApplication` 9's deliverable requires a separately authorized, versioned M5/M6 rerun (a new
+`FitAssessment` and `ResumeDraft` version) — this correction does not itself touch `JobApplication`
+9, and `ResumeDraft` 4 remains immutable, exactly as D-010 requires.
