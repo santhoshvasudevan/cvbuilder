@@ -140,8 +140,8 @@ def resolve_next_action(application: JobApplication) -> NextAction:
         return NextAction(
             code="FINAL",
             label="View final resume",
-            url_name="job_applications:detail",
-            url_kwargs={"pk": application.pk},
+            url_name="resume_builder:preview",
+            url_kwargs={"application_id": application.pk},
         )
 
     return NextAction(code="NONE", label="No action available")
@@ -232,6 +232,39 @@ def list_dashboard_rows() -> list[DashboardRow]:
         .order_by("-updated_at")
     )
     return [build_dashboard_row(application) for application in applications]
+
+
+@dataclass(frozen=True)
+class DashboardSummary:
+    """Summary counts by meaningful workflow state (M7 UX follow-up), computed from the same rows
+    the table itself renders so the two can never disagree. Buckets are deliberately not mutually
+    exclusive (e.g. an application can be both `needs_review` and counted in `total`) -- each stat
+    answers its own "how many need this kind of attention" question rather than trying to be a
+    single mutually-exclusive partition."""
+
+    total: int
+    not_started: int
+    needs_review: int
+    stale: int
+    ready_deliverable: int
+    outcome_recorded: int
+
+
+def compute_dashboard_summary(rows: list[DashboardRow]) -> DashboardSummary:
+    return DashboardSummary(
+        total=len(rows),
+        not_started=sum(1 for row in rows if not row.jra_exists),
+        needs_review=sum(1 for row in rows if row.review_required),
+        stale=sum(1 for row in rows if row.is_stale),
+        ready_deliverable=sum(
+            1 for row in rows if row.gate2_approved and not row.is_stale
+        ),
+        outcome_recorded=sum(
+            1
+            for row in rows
+            if row.application.application_outcome != JobApplication.ApplicationOutcome.NOT_APPLIED
+        ),
+    )
 
 
 _ALLOWED_OUTCOMES = frozenset(JobApplication.ApplicationOutcome.values)

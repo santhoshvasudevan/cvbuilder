@@ -62,6 +62,27 @@ class DashboardViewTests(TestCase):
         response = self.client.post("/applications/")
         self.assertEqual(response.status_code, 405)
 
+    def test_dashboard_shows_summary_counts(self):
+        _ready_application()
+        response = self.client.get("/applications/")
+        self.assertContains(response, "Total applications")
+        self.assertContains(response, "Final resume ready")
+
+    def test_root_serves_the_real_dashboard_not_a_bare_redirect(self):
+        """M7 UX follow-up: `/` must render the dashboard content itself (status 200), not merely
+        302-redirect to it, per the Product Owner's rejection of a bare-redirect homepage."""
+        app = _ready_application()
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f"/applications/{app.pk}/")
+        self.assertContains(response, "New application")
+
+    def test_empty_state_when_no_applications(self):
+        response = self.client.get("/applications/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No job applications yet")
+        self.assertContains(response, "/job-intake/")
+
 
 class DetailViewTests(TestCase):
     def test_detail_shows_next_action_and_gate_status(self):
@@ -73,6 +94,23 @@ class DetailViewTests(TestCase):
     def test_detail_404_for_unknown_application(self):
         response = self.client.get("/applications/999999/")
         self.assertEqual(response.status_code, 404)
+
+    def test_detail_links_to_every_persisted_artifact(self):
+        """M7 UX follow-up: the detail page must expose direct, readable links to each persisted
+        artifact (JRA, Gate 1/fit assessment, Gate 2/resume draft, final resume preview) rather
+        than only admin pages or raw JSON."""
+        app = _ready_application()
+        response = self.client.get(f"/applications/{app.pk}/")
+        self.assertContains(response, f"/job-intake/{app.pk}/")
+        self.assertContains(response, f"/reviews/gate1/{app.pk}/")
+        self.assertContains(response, f"/reviews/gate2/{app.pk}/")
+        self.assertContains(response, f"/resume/{app.pk}/preview/")
+
+    def test_detail_explains_unavailable_artifacts_before_jra_exists(self):
+        application = JobApplication.objects.create()
+        response = self.client.get(f"/applications/{application.pk}/")
+        self.assertContains(response, "Not started yet")
+        self.assertContains(response, "Unavailable until")
 
 
 class OutcomeActionCsrfTests(TestCase):

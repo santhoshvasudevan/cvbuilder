@@ -1,29 +1,52 @@
 {% extends "base.html" %}
 {% block title %}Final resume -- {{ application }}{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+<a href="{% url 'job_applications:detail' pk=application.pk %}">Application #{{ application.pk }}</a>
+<span class="sep">/</span>
+Final resume
+{% endblock %}
 {% block content %}
-<p><a href="{% url 'job_applications:detail' pk=application.pk %}">&larr; Back to application</a></p>
 
-<h2>Final resume markdown</h2>
+<h1>Final resume</h1>
 
 {% if error %}
-<p class="error">Not available: {{ error }}</p>
+<div class="card" role="alert" style="border-color: var(--color-danger-border); background: var(--color-danger-bg); color: var(--color-danger-text);">
+  <p><strong>Not available:</strong> {{ error }}</p>
+  <p><a href="{% url 'job_applications:detail' pk=application.pk %}">Back to application #{{ application.pk }}</a></p>
+</div>
 {% else %}
 
-<p>
-  <a href="{% url 'resume_builder:download' application_id=application.pk %}">Download .md</a>
-  ({{ final_markdown.filename }})
+<p class="lede">
+  This is the exact, immutable markdown approved at Gate 2 for
+  <strong>{{ final_markdown.draft.recommended_title|default:"this application" }}</strong> --
+  version {{ final_markdown.draft.version }}. It is never regenerated on preview or download.
 </p>
 
-<h3>Preview</h3>
-<pre id="resume-preview">{{ final_markdown.content }}</pre>
-
-<h3>Copy markdown source</h3>
-<textarea id="resume-markdown-source" rows="20" cols="100" readonly>{{ final_markdown.content }}</textarea>
 <p>
-  <button type="button" onclick="document.getElementById('resume-markdown-source').select(); document.execCommand('copy');">
+  <a class="btn" href="{% url 'resume_builder:download' application_id=application.pk %}">
+    Download .md
+  </a>
+  <span class="lede">({{ final_markdown.filename }})</span>
+</p>
+
+<h2>Preview</h2>
+<div class="table-wrap">
+<pre id="resume-preview" style="padding: 1rem; margin: 0; white-space: pre-wrap; word-break: break-word;">{{ final_markdown.content }}</pre>
+</div>
+
+<h2>Copy markdown source</h2>
+<p>
+  <label for="resume-markdown-source">Markdown source (read-only, select all and copy)</label><br>
+  <textarea id="resume-markdown-source" rows="16" style="width: 100%; max-width: 60rem;" readonly>{{ final_markdown.content }}</textarea>
+</p>
+<p>
+  <button type="button" class="btn btn-secondary"
+    onclick="document.getElementById('resume-markdown-source').select(); document.execCommand('copy'); document.getElementById('copy-status').textContent='Copied.';">
     Copy to clipboard
   </button>
-  <span id="copy-status"></span>
+  <span id="copy-status" role="status"></span>
 </p>
 
 {% endif %}

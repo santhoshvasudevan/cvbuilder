@@ -16,10 +16,14 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import include, path
-from django.views.generic import RedirectView
+
+from job_applications.views import dashboard_view
 
 urlpatterns = [
-    path('', RedirectView.as_view(pattern_name='job_applications:dashboard'), name='home'),
+    # `/` renders the real dashboard directly (status 200), not a redirect to it -- the Product
+    # Owner rejected a bare-redirect homepage as insufficient for the M7 UX follow-up. `/applications/`
+    # (job_applications.urls) shares this exact same view/template, so the two can never disagree.
+    path('', dashboard_view, name='home'),
     path('admin/', admin.site.urls),
     path('candidate-memory/', include('candidate_memory.urls')),
     path('job-intake/', include('job_intake.urls')),

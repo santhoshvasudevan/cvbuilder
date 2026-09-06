@@ -1,68 +1,95 @@
 {% extends "base.html" %}
-{% block title %}Job Application Dashboard{% endblock %}
+{% block title %}Dashboard -- Resume Builder{% endblock %}
+{% block breadcrumbs %}Dashboard{% endblock %}
 {% block content %}
-<h2>Job Application Dashboard</h2>
-<p><a href="{% url 'job_intake:intake' %}">Start a new job application</a></p>
 
-<table border="1" cellpadding="4">
+<h1>Job application dashboard</h1>
+<p class="lede">
+  Track every job application from posting intake through to a final, human-approved resume.
+  Each row shows where an application stands and the one next action to move it forward.
+</p>
+
+<p><a class="btn" href="{% url 'job_intake:intake' %}">+ New application</a></p>
+
+<div class="summary-counts">
+  <div class="stat"><span class="num">{{ summary.total }}</span><span class="label">Total applications</span></div>
+  <div class="stat"><span class="num">{{ summary.needs_review }}</span><span class="label">Awaiting your review</span></div>
+  <div class="stat"><span class="num">{{ summary.stale }}</span><span class="label">Stale -- needs re-run</span></div>
+  <div class="stat"><span class="num">{{ summary.ready_deliverable }}</span><span class="label">Final resume ready</span></div>
+  <div class="stat"><span class="num">{{ summary.outcome_recorded }}</span><span class="label">Outcome recorded</span></div>
+</div>
+
+{% if rows %}
+<div class="table-wrap">
+<table>
+  <caption class="sr-only">All job applications, one row per application</caption>
   <thead>
     <tr>
-      <th>ID</th>
-      <th>Employer</th>
-      <th>Role</th>
-      <th>Status</th>
-      <th>Pipeline phase</th>
-      <th>Outcome</th>
-      <th>JRA</th>
-      <th>Fit Assessment</th>
-      <th>Resume Draft</th>
-      <th>Gate 1</th>
-      <th>Gate 2</th>
-      <th>Review required</th>
-      <th>Stale</th>
-      <th>Created</th>
-      <th>Updated</th>
-      <th>Next action</th>
+      <th scope="col">ID</th>
+      <th scope="col">Company</th>
+      <th scope="col">Role</th>
+      <th scope="col">Phase</th>
+      <th scope="col">Gates</th>
+      <th scope="col">Freshness</th>
+      <th scope="col">Outcome</th>
+      <th scope="col">Updated</th>
+      <th scope="col">Next action</th>
     </tr>
   </thead>
   <tbody>
     {% for row in rows %}
     <tr>
-      <td><a href="{% url 'job_applications:detail' pk=row.application.pk %}">{{ row.application.pk }}</a></td>
+      <td><a href="{% url 'job_applications:detail' pk=row.application.pk %}">#{{ row.application.pk }}</a></td>
       <td>{{ row.employer|default:"--" }}</td>
       <td>{{ row.role_title|default:"--" }}</td>
-      <td>{{ row.status }}</td>
-      <td>{{ row.application.get_pipeline_phase_display }}</td>
+      <td>
+        {% if row.gate2_approved %}
+          <span class="badge badge-success">Ready</span>
+        {% elif row.gate1_approved %}
+          <span class="badge badge-warning">Preparation</span>
+        {% elif row.jra_exists %}
+          <span class="badge badge-warning">Analysis</span>
+        {% else %}
+          <span class="badge badge-neutral">New</span>
+        {% endif %}
+        {% if row.review_required %}<br><span class="badge badge-warning">Review needed</span>{% endif %}
+      </td>
+      <td>
+        <span class="badge {% if row.gate1_approved %}badge-success{% else %}badge-neutral{% endif %}">
+          Gate 1: {% if row.gate1_approved %}approved{% else %}pending{% endif %}
+        </span><br>
+        <span class="badge {% if row.gate2_approved %}badge-success{% else %}badge-neutral{% endif %}">
+          Gate 2: {% if row.gate2_approved %}approved{% else %}pending{% endif %}
+        </span>
+      </td>
+      <td>
+        {% if row.is_stale %}
+          <span class="badge badge-danger">Stale</span>
+        {% else %}
+          <span class="badge badge-success">Current</span>
+        {% endif %}
+      </td>
       <td>{{ row.application.get_application_outcome_display }}</td>
-      <td>{% if row.jra_exists %}v{{ row.jra_version }}{% else %}none{% endif %}</td>
-      <td>
-        {% if row.fit_assessment_exists %}
-          {% if row.fit_assessment_current %}current{% else %}stale{% endif %}
-        {% else %}none{% endif %}
-      </td>
-      <td>
-        {% if row.resume_draft_exists %}
-          {% if row.resume_draft_current %}current{% else %}stale{% endif %}
-          {% if row.resume_draft_confirmed %}(confirmed){% endif %}
-        {% else %}none{% endif %}
-      </td>
-      <td>{% if row.gate1_approved %}approved{% else %}pending{% endif %}</td>
-      <td>{% if row.gate2_approved %}approved{% else %}pending{% endif %}</td>
-      <td>{% if row.review_required %}YES{% else %}no{% endif %}</td>
-      <td>{% if row.is_stale %}YES{% else %}no{% endif %}</td>
-      <td>{{ row.application.created_at }}</td>
-      <td>{{ row.application.updated_at }}</td>
+      <td>{{ row.application.updated_at|date:"Y-m-d H:i" }}</td>
       <td>
         {% if row.next_action.url %}
-          <a href="{{ row.next_action.url }}">{{ row.next_action.label }}</a>
+          <a class="btn btn-secondary" href="{{ row.next_action.url }}">{{ row.next_action.label }}</a>
         {% else %}
           {{ row.next_action.label }}
         {% endif %}
       </td>
     </tr>
-    {% empty %}
-    <tr><td colspan="16">No job applications yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>
+</div>
+{% else %}
+<div class="card empty-state">
+  <h2>No job applications yet</h2>
+  <p>Start your first application by pasting or uploading a job posting -- Agent Jobber will
+  analyze it, then the pipeline will guide you through Gate 1 and Gate 2 review to a final resume.</p>
+  <p><a class="btn" href="{% url 'job_intake:intake' %}">+ New application</a></p>
+</div>
+{% endif %}
+
 {% endblock %}

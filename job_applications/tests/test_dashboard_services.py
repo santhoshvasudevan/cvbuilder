@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.test import TestCase
+from django.urls import reverse
 
 from candidate_matching.models import FitAssessment
 from job_intake.models import JobRequirementAnalysis
@@ -10,6 +11,7 @@ from ..models import JobApplication
 from ..services import (
     InvalidOutcomeTransitionError,
     build_dashboard_row,
+    compute_dashboard_summary,
     compute_freshness,
     derive_dashboard_status,
     list_dashboard_rows,
@@ -119,6 +121,10 @@ class DashboardRowByPhaseTests(TestCase):
         self.assertTrue(row.resume_draft_confirmed)
         self.assertFalse(row.review_required)
         self.assertEqual(row.next_action.code, "FINAL")
+        self.assertEqual(
+            row.next_action.url,
+            reverse("resume_builder:preview", kwargs={"application_id": application.pk}),
+        )
 
     def test_ready_phase_applied_status_overrides_phase_label(self):
         application = JobApplication.objects.create()
@@ -301,3 +307,45 @@ class DeriveDashboardStatusTests(TestCase):
             application_outcome=JobApplication.ApplicationOutcome.INTERVIEWING
         )
         self.assertEqual(derive_dashboard_status(application), "Interviewing")
+
+
+class DashboardSummaryTests(TestCase):
+    """compute_dashboard_summary is derived from the same rows the table renders, so its counts
+    can never disagree with what an operator sees in the table (M7 UX follow-up, Phase G)."""
+
+    def test_empty_rows_all_zero(self):
+        summary = compute_dashboard_summary([])
+        self.assertEqual(summary.total, 0)
+        self.assertEqual(summary.not_started, 0)
+        self.assertEqual(summary.needs_review, 0)
+        self.assertEqual(summary.stale, 0)
+        self.assertEqual(summary.ready_deliverable, 0)
+        self.assertEqual(summary.outcome_recorded, 0)
+
+    def test_counts_reflect_mixed_pipeline_states(self):
+        JobApplication.objects.create()
+
+        needs_review = JobApplication.objects.create()
+        jra = _make_jra(needs_review, employer="NeedsReview")
+        needs_review.advance_to_analysis(jra=jra)
+        _make_fit_assessment(needs_review, jra)
+
+        ready = JobApplication.objects.create()
+        ready_jra = _make_jra(ready, employer="ReadyCo")
+        ready.advance_to_analysis(jra=ready_jra)
+        ready_fa = _make_fit_assessment(ready, ready_jra)
+        ready.approve_gate1()
+        _make_resume_draft(ready, ready_fa)
+        ready.approve_gate2()
+        ready.refresh_from_db()
+        set_application_outcome(ready, JobApplication.ApplicationOutcome.APPLIED)
+        ready.refresh_from_db()
+
+        rows = list_dashboard_rows()
+        summary = compute_dashboard_summary(rows)
+
+        self.assertEqual(summary.total, 3)
+        self.assertEqual(summary.not_started, 1)
+        self.assertEqual(summary.needs_review, 1)
+        self.assertEqual(summary.ready_deliverable, 1)
+        self.assertEqual(summary.outcome_recorded, 1)

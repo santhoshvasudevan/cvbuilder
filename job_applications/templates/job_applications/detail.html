@@ -1,79 +1,138 @@
 {% extends "base.html" %}
-{% block title %}Application {{ application.pk }}{% endblock %}
+{% block title %}Application #{{ application.pk }} -- Resume Builder{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+Application #{{ application.pk }}
+{% endblock %}
 {% block content %}
-<p><a href="{% url 'job_applications:dashboard' %}">&larr; Dashboard</a></p>
 
-<h2>Job Application {{ application.pk }}</h2>
+<h1>Application #{{ application.pk }}{% if row.employer %}: {{ row.employer }}{% endif %}</h1>
+<p class="lede">{{ row.role_title|default:"No role title on record yet." }}</p>
+
 {% if error %}
-<p class="error">{{ error }}</p>
+<div class="card" role="alert" style="border-color: var(--color-danger-border); background: var(--color-danger-bg); color: var(--color-danger-text);">
+  {{ error }}
+</div>
 {% endif %}
 
-<table border="1" cellpadding="4">
-  <tr><th>Employer</th><td>{{ row.employer|default:"--" }}</td></tr>
-  <tr><th>Role</th><td>{{ row.role_title|default:"--" }}</td></tr>
-  <tr><th>Status</th><td>{{ row.status }}</td></tr>
-  <tr><th>Pipeline phase</th><td>{{ application.get_pipeline_phase_display }}</td></tr>
-  <tr><th>Application outcome</th><td>{{ application.get_application_outcome_display }}</td></tr>
-  <tr><th>Created</th><td>{{ application.created_at }}</td></tr>
-  <tr><th>Updated</th><td>{{ application.updated_at }}</td></tr>
-</table>
+<div class="card">
+  <dl class="kv">
+    <dt>Status</dt><dd>{{ row.status }}</dd>
+    <dt>Pipeline phase</dt><dd>{{ application.get_pipeline_phase_display }}</dd>
+    <dt>Application outcome</dt><dd>{{ application.get_application_outcome_display }}</dd>
+    <dt>Created</dt><dd>{{ application.created_at|date:"Y-m-d H:i" }}</dd>
+    <dt>Last updated</dt><dd>{{ application.updated_at|date:"Y-m-d H:i" }}</dd>
+  </dl>
+</div>
 
-<h3>Pipeline artifacts</h3>
-<table border="1" cellpadding="4">
-  <tr>
-    <th>Job Requirement Analysis</th>
-    <td>
+<h2>Pipeline progress</h2>
+<div class="stepper">
+
+  <div class="step {% if row.jra_exists %}is-done{% else %}is-current{% endif %}">
+    <div class="marker" aria-hidden="true">{% if row.jra_exists %}&check;{% else %}1{% endif %}</div>
+    <div>
+      <h3>1. Job posting analysis</h3>
       {% if row.jra_exists %}
-        v{{ row.jra_version }}
-        <a href="{% url 'job_intake:analysis_detail' application_id=application.pk %}">view</a>
-      {% else %}none{% endif %}
-    </td>
-  </tr>
-  <tr>
-    <th>Fit Assessment (Gate 1)</th>
-    <td>
-      {% if row.fit_assessment_exists %}
-        {% if row.fit_assessment_current %}current{% else %}<strong>stale</strong>{% endif %}
-      {% else %}none{% endif %}
-      -- {% if row.gate1_approved %}approved{% else %}pending{% endif %}
-      <a href="{% url 'reviews:gate1' application_id=application.pk %}">view Gate 1</a>
-    </td>
-  </tr>
-  <tr>
-    <th>Resume Draft (Gate 2)</th>
-    <td>
-      {% if row.resume_draft_exists %}
-        {% if row.resume_draft_current %}current{% else %}<strong>stale</strong>{% endif %}
-        {% if row.resume_draft_confirmed %}(confirmed){% endif %}
-      {% else %}none{% endif %}
-      -- {% if row.gate2_approved %}approved{% else %}pending{% endif %}
-      <a href="{% url 'reviews:gate2' application_id=application.pk %}">view Gate 2</a>
-    </td>
-  </tr>
-</table>
+        <p>
+          <span class="badge badge-success">v{{ row.jra_version }} complete</span>
+          <a href="{% url 'job_intake:analysis_detail' application_id=application.pk %}">View job requirement analysis</a>
+        </p>
+      {% else %}
+        <p>Not started yet. <a href="{% url 'job_intake:intake' %}">Start a new job intake</a> to analyze
+        a posting for this application.</p>
+      {% endif %}
+    </div>
+  </div>
 
-<h3>Next action</h3>
+  <div class="step {% if row.gate1_approved %}is-done{% elif row.jra_exists %}is-current{% else %}is-blocked{% endif %}">
+    <div class="marker" aria-hidden="true">{% if row.gate1_approved %}&check;{% else %}2{% endif %}</div>
+    <div>
+      <h3>2. Gate 1 -- Fit assessment review</h3>
+      {% if not row.jra_exists %}
+        <p>Unavailable until a job requirement analysis exists (step 1).</p>
+      {% elif not row.fit_assessment_exists %}
+        <p>No fit assessment yet.
+        <a href="{% url 'reviews:gate1' application_id=application.pk %}">Run Agent Candidate at Gate 1</a></p>
+      {% else %}
+        <p>
+          {% if row.fit_assessment_current %}<span class="badge badge-success">Current</span>
+          {% else %}<span class="badge badge-danger">Stale -- based on a superseded analysis</span>{% endif %}
+          <span class="badge {% if row.gate1_approved %}badge-success{% else %}badge-warning{% endif %}">
+            {% if row.gate1_approved %}approved{% else %}awaiting your review{% endif %}
+          </span>
+          <a href="{% url 'reviews:gate1' application_id=application.pk %}">View Gate 1 / fit assessment</a>
+        </p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="step {% if row.gate2_approved %}is-done{% elif row.gate1_approved %}is-current{% else %}is-blocked{% endif %}">
+    <div class="marker" aria-hidden="true">{% if row.gate2_approved %}&check;{% else %}3{% endif %}</div>
+    <div>
+      <h3>3. Gate 2 -- Resume draft review</h3>
+      {% if not row.gate1_approved %}
+        <p>Unavailable until Gate 1 is approved (step 2).</p>
+      {% elif not row.resume_draft_exists %}
+        <p>No resume draft yet.
+        <a href="{% url 'reviews:gate2' application_id=application.pk %}">Run Agent Builder at Gate 2</a></p>
+      {% else %}
+        <p>
+          {% if row.resume_draft_current %}<span class="badge badge-success">Current</span>
+          {% else %}<span class="badge badge-danger">Stale -- based on a superseded fit assessment</span>{% endif %}
+          {% if row.resume_draft_confirmed %}<span class="badge badge-success">Confirmed</span>{% endif %}
+          <span class="badge {% if row.gate2_approved %}badge-success{% else %}badge-warning{% endif %}">
+            {% if row.gate2_approved %}approved{% else %}awaiting your review{% endif %}
+          </span>
+          <a href="{% url 'reviews:gate2' application_id=application.pk %}">View Gate 2 / resume draft</a>
+        </p>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="step {% if row.gate2_approved and not row.is_stale %}is-done{% else %}is-blocked{% endif %}">
+    <div class="marker" aria-hidden="true">{% if row.gate2_approved and not row.is_stale %}&check;{% else %}4{% endif %}</div>
+    <div>
+      <h3>4. Final resume</h3>
+      {% if row.gate2_approved and not row.is_stale %}
+        <p>
+          <a class="btn" href="{% url 'resume_builder:preview' application_id=application.pk %}">
+            View final resume (preview / copy / download)
+          </a>
+        </p>
+      {% elif row.gate2_approved and row.is_stale %}
+        <p>Gate 2 was approved previously, but an upstream artifact has since changed -- resolve
+        staleness at Gate 1 before the final resume is downloadable again.</p>
+      {% else %}
+        <p>Unavailable until Gate 2 is approved (step 3).</p>
+      {% endif %}
+    </div>
+  </div>
+
+</div>
+
+<h2>Next recommended action</h2>
+<p>
 {% if next_action.url %}
-<p><a href="{{ next_action.url }}">{{ next_action.label }}</a></p>
+  <a class="btn" href="{{ next_action.url }}">{{ next_action.label }}</a>
 {% else %}
-<p>{{ next_action.label }}</p>
+  {{ next_action.label }}
 {% endif %}
+</p>
 
-{% if row.gate2_approved and not row.is_stale %}
-<p><a href="{% url 'resume_builder:preview' application_id=application.pk %}">View final resume (preview / copy / download)</a></p>
-{% endif %}
-
-<h3>Application outcome</h3>
+<h2>Application outcome</h2>
 <p>Current outcome: <strong>{{ application.get_application_outcome_display }}</strong></p>
 {% if row.gate2_approved and not row.is_stale %}
-<form method="post">
+<form method="post" class="inline-form"
+      onsubmit="return confirm('Set application outcome to ' + this.application_outcome.options[this.application_outcome.selectedIndex].text + '?');">
   {% csrf_token %}
-  <select name="application_outcome">
+  <label for="id_application_outcome">Outcome</label>
+  <select id="id_application_outcome" name="application_outcome">
     {% for value, label in outcome_choices %}
     <option value="{{ value }}" {% if value == application.application_outcome %}selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
-  <button type="submit">Set outcome</button>
+  <button type="submit" class="btn">Set outcome</button>
 </form>
 {% else %}
 <p>Application outcome can only be recorded once Gate 2 is approved and the current resume draft

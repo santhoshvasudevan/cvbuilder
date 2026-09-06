@@ -8,6 +8,7 @@ from .models import JobApplication
 from .services import (
     InvalidOutcomeTransitionError,
     build_dashboard_row,
+    compute_dashboard_summary,
     compute_freshness,
     list_dashboard_rows,
     resolve_next_action,
@@ -22,7 +23,10 @@ def dashboard_view(request):
     review is required, staleness, and a link to the correct next screen -- all computed fresh
     from durable DB state on every request, never from an in-memory session."""
     rows = list_dashboard_rows()
-    return render(request, "job_applications/dashboard.html", {"rows": rows})
+    summary = compute_dashboard_summary(rows)
+    return render(
+        request, "job_applications/dashboard.html", {"rows": rows, "summary": summary}
+    )
 
 
 @require_http_methods(["GET", "POST"])
