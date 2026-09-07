@@ -12,8 +12,10 @@ provider response body, or unsanitized exception text -- only already-sanitized 
     <dt>Global default</dt>
     <dd>
       {% if card.default_model %}
-        {{ card.default_model.provider.name }} &ndash; {{ card.default_model.display_name|default:card.default_model.model_id }}
+        {{ card.default_provider_label }} &ndash; {{ card.default_model.display_name|default:card.default_model.model_id }} (<code>{{ card.default_model.model_id }}</code>)
         {% if card.default_is_free %}<span class="badge badge-success">Free</span>{% elif card.default_is_free == False %}<span class="badge badge-warning">Paid</span>{% endif %}
+        <span class="badge badge-neutral">{{ card.default_endpoint_type }}</span>
+        {% if card.default_credential_configured %}<span class="badge badge-success">Credential configured</span>{% elif card.default_credential_configured == False %}<span class="badge badge-danger">Credential missing</span>{% endif %}
         &middot; reasoning: {{ card.default_reasoning_effort|default:"(not set)" }}
       {% else %}
         <span class="badge badge-danger">Not configured</span> &ndash; no StageModelAssignment for this stage.
@@ -23,8 +25,10 @@ provider response body, or unsanitized exception text -- only already-sanitized 
     <dt>Effective this run</dt>
     <dd>
       {% if card.effective_model %}
-        {{ card.effective_model.provider.name }} &ndash; {{ card.effective_model.display_name|default:card.effective_model.model_id }}
+        {{ card.effective_provider_label }} &ndash; {{ card.effective_model.display_name|default:card.effective_model.model_id }} (<code>{{ card.effective_model.model_id }}</code>)
         {% if card.effective_is_free %}<span class="badge badge-success">Free</span>{% elif card.effective_is_free == False %}<span class="badge badge-warning">Paid</span>{% endif %}
+        <span class="badge badge-neutral">{{ card.effective_endpoint_type }}</span>
+        {% if card.effective_credential_configured %}<span class="badge badge-success">Credential configured</span>{% elif card.effective_credential_configured == False %}<span class="badge badge-danger">Credential missing</span>{% endif %}
         &middot; reasoning: {{ card.effective_reasoning_effort|default:"(none)" }}
       {% else %}
         <span class="badge badge-danger">Not configured</span>

@@ -89,6 +89,39 @@ def is_model_eligible_for_stage(model: LLMModel, stage: str) -> bool:
     return eligible_models_for_stage(stage).filter(pk=model.pk).exists()
 
 
+_PROVIDER_TYPE_GROUP_SUFFIX: dict[str, str] = {
+    LLMProvider.ProviderType.OPENAI: "Direct API",
+}
+
+
+def provider_group_label(provider: LLMProvider) -> str:
+    """The operator-facing group heading one model-selection `<optgroup>` uses (2026-09-07,
+    D-039 correction: provider-aware selection) -- distinguishes a direct-API provider (e.g.
+    "OpenAI — Direct API") from a routed one hosting the same underlying model under a different
+    endpoint/credential (e.g. "OpenRouter"), without renaming the operator-editable
+    `LLMProvider.name` field itself. Purely a display-layer formatting rule -- eligibility/routing
+    are always keyed off the model's own provider FK, never this string."""
+    suffix = _PROVIDER_TYPE_GROUP_SUFFIX.get(provider.provider_type)
+    return f"{provider.name} — {suffix}" if suffix else provider.name
+
+
+def grouped_model_choices(
+    stage: str, *, reasoning_effort: str | None = None
+) -> list[tuple[str, list[tuple[int, str]]]]:
+    """The eligible models for `stage`, grouped by provider for a `<optgroup>`-rendering selector
+    (2026-09-07, D-039 correction: provider-aware selection) -- e.g. "OpenAI — Direct API" showing
+    only its own `gpt-5.4-mini`/`gpt-5.4` rows, "OpenRouter" showing its own
+    `openai/gpt-5.4-mini`/`openai/gpt-5.4`/`openrouter/free` rows, distinctly. Each option's value
+    is still the `LLMModel` primary key -- the same server-re-validated, provider-unambiguous
+    selection `resolve_stage_model` already expects; grouping is presentation only, never a
+    separate provider input a submission could disagree with the model on."""
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for model in eligible_models_for_stage(stage, reasoning_effort=reasoning_effort):
+        label = provider_group_label(model.provider)
+        groups.setdefault(label, []).append((model.pk, model_display_label(model)))
+    return list(groups.items())
+
+
 def model_display_label(model: LLMModel) -> str:
     """The operator-facing label for one model, used by every AJ/AC/AB selector and by
     `llm_provider.services.model_selection` error messages -- one shared formatting rule so the

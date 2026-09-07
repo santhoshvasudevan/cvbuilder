@@ -1,9 +1,12 @@
 {% comment %}
 Agent Candidate's three independently-configurable LLM calls (2026-09-07, per-run model
-selection; reasoning-effort override, D-039): AC_NORMALIZE, AC_RANK, AC_MATCH. Included from every
-form on gate1.html that (re)runs Agent Candidate (the "Run/Re-run Agent Candidate" buttons and the
-feedback form's AC path) so each stage gets its own model + reasoning selector rather than one
-ambiguous choice covering all three.
+selection; reasoning-effort override, D-039; provider-grouped selection, D-039 correction):
+AC_NORMALIZE, AC_RANK, AC_MATCH. Included from every form on gate1.html that (re)runs Agent
+Candidate (the "Run/Re-run Agent Candidate" buttons and the feedback form's AC path) so each stage
+gets its own model + reasoning selector rather than one ambiguous choice covering all three. Each
+model `<select>` groups its options by provider (`<optgroup>`, e.g. "OpenAI — Direct API" vs.
+"OpenRouter") -- the submitted value is still one unambiguous `LLMModel` primary key, so a
+provider/model mismatch is structurally impossible, never merely validated after the fact.
 {% endcomment %}
 <fieldset>
   <legend>Agent Candidate model &amp; reasoning selection (optional overrides)</legend>
@@ -11,8 +14,12 @@ ambiguous choice covering all three.
     <label for="id_model_ac_normalize">Requirement normalization (AC_NORMALIZE) model</label><br>
     <select name="model_ac_normalize" id="id_model_ac_normalize">
       <option value="" {% if not submitted_models.AC_NORMALIZE %}selected{% endif %}>System default</option>
-      {% for value, label in model_stages.AC_NORMALIZE.choices %}
-      <option value="{{ value }}" {% if submitted_models.AC_NORMALIZE == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% for group_label, options in model_stages.AC_NORMALIZE.groups %}
+      <optgroup label="{{ group_label }}">
+        {% for value, label in options %}
+        <option value="{{ value }}" {% if submitted_models.AC_NORMALIZE == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </optgroup>
       {% endfor %}
     </select>
     <label for="id_reasoning_ac_normalize">reasoning effort</label>
@@ -27,8 +34,12 @@ ambiguous choice covering all three.
     <label for="id_model_ac_rank">Relevance ranking (AC_RANK) model</label><br>
     <select name="model_ac_rank" id="id_model_ac_rank">
       <option value="" {% if not submitted_models.AC_RANK %}selected{% endif %}>System default</option>
-      {% for value, label in model_stages.AC_RANK.choices %}
-      <option value="{{ value }}" {% if submitted_models.AC_RANK == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% for group_label, options in model_stages.AC_RANK.groups %}
+      <optgroup label="{{ group_label }}">
+        {% for value, label in options %}
+        <option value="{{ value }}" {% if submitted_models.AC_RANK == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </optgroup>
       {% endfor %}
     </select>
     <label for="id_reasoning_ac_rank">reasoning effort</label>
@@ -43,8 +54,12 @@ ambiguous choice covering all three.
     <label for="id_model_ac_match">Fit assessment (AC_MATCH) model</label><br>
     <select name="model_ac_match" id="id_model_ac_match">
       <option value="" {% if not submitted_models.AC_MATCH %}selected{% endif %}>System default</option>
-      {% for value, label in model_stages.AC_MATCH.choices %}
-      <option value="{{ value }}" {% if submitted_models.AC_MATCH == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% for group_label, options in model_stages.AC_MATCH.groups %}
+      <optgroup label="{{ group_label }}">
+        {% for value, label in options %}
+        <option value="{{ value }}" {% if submitted_models.AC_MATCH == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </optgroup>
       {% endfor %}
     </select>
     <label for="id_reasoning_ac_match">reasoning effort</label>

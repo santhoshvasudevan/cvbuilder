@@ -135,3 +135,74 @@ class StageCardTests(TestCase):
         self.assertEqual(card.effective_reasoning_effort, ReasoningEffort.LOW)
         # The stage's own configured default is unaffected by what one run happened to override.
         self.assertEqual(card.default_model.model_id, "openai/gpt-5.4")
+
+
+class ProviderEndpointCredentialDisplayTests(TestCase):
+    """2026-09-07, D-039 correction: the stage card must show provider/endpoint/credential status
+    separately, and "System default" must resolve to Direct OpenAI for the real GPT-5.4 stages."""
+
+    def test_direct_openai_default_shows_direct_api_and_no_openrouter_prefix(self):
+        from unittest import mock
+
+        provider = make_provider(
+            provider_type=LLMProvider.ProviderType.OPENAI,
+            name="OpenAI",
+            credential_env_var="TEST_OPENAI_KEY_FOR_CONSOLE",
+        )
+        model = make_model(
+            provider=provider,
+            model_id="gpt-5.4",
+            supports_structured_output=True,
+            supports_reasoning=True,
+        )
+        make_stage_assignment(stage=StageModelAssignment.Stage.AC_MATCH, model=model)
+
+        with mock.patch.dict("os.environ", {"TEST_OPENAI_KEY_FOR_CONSOLE": "dummy"}):
+            card = build_stage_card(StageModelAssignment.Stage.AC_MATCH)
+
+        self.assertEqual(card.default_provider_label, "OpenAI — Direct API")
+        self.assertEqual(card.default_endpoint_type, "Direct API")
+        self.assertEqual(card.default_model.model_id, "gpt-5.4")
+        self.assertNotIn("openai/", card.default_model.model_id)
+        self.assertTrue(card.default_credential_configured)
+        self.assertFalse(card.default_is_free)
+
+    def test_openrouter_default_shows_routed_endpoint_type(self):
+        provider = make_provider(
+            provider_type=LLMProvider.ProviderType.OPENROUTER,
+            name="OpenRouter",
+            credential_env_var="OPENROUTER_API_KEY",
+        )
+        model = make_model(
+            provider=provider,
+            model_id="openai/gpt-5.4",
+            supports_structured_output=True,
+            supports_reasoning=True,
+        )
+        make_stage_assignment(stage=StageModelAssignment.Stage.AC_RANK, model=model)
+
+        card = build_stage_card(StageModelAssignment.Stage.AC_RANK)
+
+        self.assertEqual(card.default_provider_label, "OpenRouter")
+        self.assertEqual(card.default_endpoint_type, "Routed (OpenRouter)")
+
+    def test_missing_credential_is_reported_without_exposing_any_value(self):
+        provider = make_provider(
+            provider_type=LLMProvider.ProviderType.OPENAI,
+            name="OpenAI",
+            credential_env_var="TEST_DEFINITELY_UNSET_OPENAI_KEY",
+        )
+        model = make_model(
+            provider=provider,
+            model_id="gpt-5.4-mini",
+            supports_structured_output=True,
+            supports_reasoning=True,
+        )
+        make_stage_assignment(stage=StageModelAssignment.Stage.AJ_ANALYZE, model=model)
+
+        import os
+
+        os.environ.pop("TEST_DEFINITELY_UNSET_OPENAI_KEY", None)
+        card = build_stage_card(StageModelAssignment.Stage.AJ_ANALYZE)
+
+        self.assertFalse(card.default_credential_configured)

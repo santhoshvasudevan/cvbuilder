@@ -1,9 +1,11 @@
-"""Wire-payload coverage for the paid GPT-5.4 model defaults (2026-09-07, D-039): proves the exact
-OpenRouter model id and every configured reasoning-effort level in the default matrix reach the
-request body unchanged, alongside the pre-existing structured-output/`provider.require_parameters`
-contract -- CLAUDE.md's "no unnecessary infrastructure" and "provider-specific request translation
-stays inside llm_provider" invariants, exercised against the two real paid model ids this decision
-introduces rather than only the generic/free-tier fixtures other test files already cover.
+"""Wire-payload coverage for the OpenRouter-hosted GPT-5.4 alternative records (2026-09-07, D-039;
+corrected same day to make the *direct* OpenAI API the default -- see
+`test_gpt54_openai_direct_wire_payload.py` for that path). These OpenRouter-hosted records
+(`openai/gpt-5.4-mini`/`openai/gpt-5.4`) are kept as explicit, optional, non-default per-run
+alternatives (requirements Sec 2 of the correction), so their own wire contract still needs its own
+coverage, proving the OpenRouter path remains distinct and unaffected by the correction -- exact
+model id, every configured reasoning-effort level, and the pre-existing structured-output/
+`provider.require_parameters` contract.
 
 All network calls are mocked (`requests.post`) -- deterministic, no live credential/network
 required, matching `test_openrouter_adapter.py`'s own pattern.
@@ -19,7 +21,12 @@ from pydantic import BaseModel
 
 from ..adapters.openrouter import OpenRouterAdapter
 from ..models import LLMProvider, ReasoningEffort, StageModelAssignment
-from ..services.gpt54_defaults import GPT54_MINI_MODEL_ID, GPT54_MODEL_ID
+from ..services.gpt54_defaults import (
+    OPENROUTER_GPT54_MINI_MODEL_ID as GPT54_MINI_MODEL_ID,
+)
+from ..services.gpt54_defaults import (
+    OPENROUTER_GPT54_MODEL_ID as GPT54_MODEL_ID,
+)
 from ..types import NormalizedLLMRequest
 from .factories import make_model, make_provider
 

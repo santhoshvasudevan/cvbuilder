@@ -7,23 +7,29 @@ from __future__ import annotations
 from django import forms
 
 from llm_provider.models import ReasoningEffort, StageModelAssignment
-from llm_provider.services.eligibility import eligible_models_for_stage, model_display_label
+from llm_provider.services.eligibility import grouped_model_choices
 
 SYSTEM_DEFAULT_CHOICE = ("", "System default")
 
 
-def _model_choices(stage: str) -> list[tuple[str, str]]:
+def _model_choices(stage: str) -> list:
+    """Provider-grouped choices (2026-09-07, D-039 correction: provider-aware selection) -- Django's
+    `ChoiceField`/`Select` natively renders a `(group_label, [(value, label), ...])` tuple as an
+    `<optgroup>`, so "OpenAI — Direct API" and "OpenRouter" render as visually distinct groups from
+    one flat, still-server-validated-by-LLMModel-PK selector -- never a separate provider input
+    that could disagree with the model choice."""
     default_assignment = (
         StageModelAssignment.objects.select_related("model").filter(stage=stage).first()
     )
     default_model_id = default_assignment.model_id if default_assignment else None
-    choices = []
-    for model in eligible_models_for_stage(stage):
-        label = model_display_label(model)
-        if model.pk == default_model_id:
-            label = f"{label} [Default]"
-        choices.append((str(model.pk), label))
-    return choices
+    grouped = []
+    for group_label, options in grouped_model_choices(stage):
+        marked = [
+            (str(pk), f"{label} [Default]" if pk == default_model_id else label)
+            for pk, label in options
+        ]
+        grouped.append((group_label, marked))
+    return grouped
 
 
 def reasoning_effort_choices(stage: str) -> list[tuple[str, str]]:

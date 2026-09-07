@@ -21,7 +21,7 @@ from job_intake.services.intake import AnalysisFailedError, IntakeValidationErro
 from job_intake.services.intake import ConcurrentModificationError as JraConcurrentModificationError
 from llm_provider.models import ReasoningEffort, StageModelAssignment
 from llm_provider.services.console import build_stage_card
-from llm_provider.services.eligibility import eligible_models_for_stage, model_display_label
+from llm_provider.services.eligibility import grouped_model_choices
 from llm_provider.services.model_selection import (
     ModelNotEligibleForStageError,
     ReasoningNotEligibleForStageError,
@@ -62,23 +62,26 @@ def _stage_cards(application: JobApplication, stages) -> dict:
 
 
 def _stage_model_choices(stages) -> dict:
-    """Builds the per-stage selector context (`{stage: {"choices": [...], "current_default":
-    model_or_None}}`) both gate templates render one `<select>` from -- one shared helper so
-    Gate 1's four independently-configurable calls (AJ_ANALYZE/AC_NORMALIZE/AC_RANK/AC_MATCH) and
-    Gate 2's one (AB_BUILD) are built the exact same way (2026-09-07, per-run model selection)."""
+    """Builds the per-stage selector context (`{stage: {"groups": [(provider_label, [(pk, label),
+    ...]), ...], "current_default": model_or_None}}`) both gate templates render one
+    provider-grouped `<select>` from (2026-09-07, D-039 correction: provider-aware selection --
+    "OpenAI — Direct API" and "OpenRouter" render as distinct `<optgroup>`s) -- one shared helper
+    so Gate 1's four independently-configurable calls (AJ_ANALYZE/AC_NORMALIZE/AC_RANK/AC_MATCH)
+    and Gate 2's one (AB_BUILD) are built the exact same way."""
     context = {}
     for stage in stages:
         default_assignment = (
             StageModelAssignment.objects.select_related("model__provider").filter(stage=stage).first()
         )
         default_model = default_assignment.model if default_assignment else None
-        choices = []
-        for model in eligible_models_for_stage(stage):
-            label = model_display_label(model)
-            if default_model is not None and model.pk == default_model.pk:
-                label = f"{label} [Default]"
-            choices.append((model.pk, label))
-        context[stage] = {"choices": choices, "current_default": default_model}
+        groups = []
+        for group_label, options in grouped_model_choices(stage):
+            marked = [
+                (pk, f"{label} [Default]" if default_model is not None and pk == default_model.pk else label)
+                for pk, label in options
+            ]
+            groups.append((group_label, marked))
+        context[stage] = {"groups": groups, "current_default": default_model}
     return context
 
 

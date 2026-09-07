@@ -372,9 +372,11 @@ authorized M5/M6 run.
 **Paid GPT-5.4 model defaults, reasoning-effort selection, and the M5/M6 stage console (2026-09-07,
 D-039)**: 71 net new deterministic tests (1229 -> 1300), all against mocked `requests.post`
 asserting the real serialized JSON body, per this project's standing convention.
-`llm_provider/tests/test_gpt54_wire_payload.py` (14) -- the exact OpenRouter model id for both
-`openai/gpt-5.4-mini`/`openai/gpt-5.4` on the wire unchanged (never split/double-prefixed/using the
-direct-OpenAI id), every configured reasoning level (`medium`/`high` from the default matrix, plus
+`llm_provider/tests/test_gpt54_wire_payload.py` (14; renamed in scope by the same-day correction
+below to cover only the OpenRouter-hosted *alternative* records, `openai/gpt-5.4-mini`/
+`openai/gpt-5.4` -- see `test_gpt54_openai_direct_wire_payload.py` for the direct-OpenAI defaults'
+own wire coverage) -- the exact OpenRouter model id on the wire unchanged (never split/
+double-prefixed), every configured reasoning level (`medium`/`high` from the default matrix, plus
 the structurally-supported `low`/`xhigh`) serialized as `{"reasoning": {"effort": <value>}}`, the
 explicit-`NONE`-vs-omitted-key distinction, that `reasoning.effort` and `reasoning.enabled` are
 never sent together, and that no `tools`/NVIDIA/Gemini-specific parameter ever leaks onto an
@@ -408,6 +410,30 @@ call sites now pass, with zero change to what any of them scripts. Full suite af
 1300/1300 passing; `manage.py check`/`makemigrations --check --dry-run` clean; `ruff check .`
 clean. Applied to the real local development database, idempotency proven directly against it.
 Live qualification remains deliberately deferred to the later, separately authorized M5/M6 run.
+
+**Correction, same day (D-039 update): direct OpenAI, not OpenRouter, is the default**. New
+`llm_provider/tests/test_gpt54_openai_direct_wire_payload.py` (20) -- exact unprefixed direct model
+ids (`gpt-5.4-mini`/`gpt-5.4`) on the wire, the direct endpoint (`https://api.openai.com/v1`) and
+`OPENAI_API_KEY`-referenced Bearer credential, `medium`/`high` reasoning effort as OpenAI's own
+flat top-level `reasoning_effort` field (never OpenRouter's nested `reasoning.effort` object), the
+pre-existing `max_completion_tokens`/no-`temperature` reasoning-model shape, and the absence of
+every OpenRouter-only wire artifact (`provider` routing object, attribution headers) and
+NVIDIA/Gemini-specific parameter. `llm_provider/tests/test_gpt54_defaults_config.py` was
+substantially rewritten (25 -> 32) to prove the corrected direct-OpenAI default matrix, that this
+registry's own pre-existing direct-OpenAI provider row (id 11, already serving `gpt-5`) is reused
+rather than duplicated, that an operator's own custom `base_url`/`credential_env_var` on that row
+is never overwritten, and that the OpenRouter-hosted records are preserved as active, non-default
+alternatives (both on a fresh database and simulating the real pre-correction state). New
+`llm_provider/tests/test_provider_grouped_selection.py` (9) proves the `<optgroup>` provider
+grouping (`llm_provider.services.eligibility.provider_group_label`/`grouped_model_choices`) and
+that a provider/model mismatch cannot be constructed (there is no separate provider input; the
+submitted value is always one unambiguous `LLMModel` primary key). `llm_provider/tests/
+test_console.py` gained `ProviderEndpointCredentialDisplayTests` proving "System default" resolves
+to `"OpenAI — Direct API"` for the real GPT-5.4 stages, `"Routed (OpenRouter)"` for the OpenRouter
+alternative, and that credential presence is reported without ever exposing the value. Full suite
+after this correction: 1339/1339 passing (39 net new/rewritten on top of the original pass's 1300);
+`manage.py check`/`makemigrations --check --dry-run`/`ruff check .` all clean. No live call was
+made for this correction either.
 
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").

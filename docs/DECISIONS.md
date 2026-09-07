@@ -2794,3 +2794,94 @@ additive, with a fixed three-step precedence and no hidden fallback --
   `default_reasoning_effort` too, per the interaction fix above) -- both plain, reversible registry
   operations; neither `openai/gpt-5.4-mini` nor `openai/gpt-5.4`'s `LLMModel` row, nor any
   historical `LLMCallLog`, is ever deleted by this decision or its rollback.
+
+## Update (2026-09-07, same day): corrected to route through the direct OpenAI API, not OpenRouter
+
+Recorded verbatim rather than inferred, and applied before this decision's commit was merged to
+`main` (matching D-038's own "correct before merge, append rather than rewrite" precedent). The
+operator's actual requirement was always the direct OpenAI API (`https://api.openai.com/v1`,
+credential `OPENAI_API_KEY`) for both GPT-5.4 models -- the original pass above binding them to
+OpenRouter-hosted records (`openai/gpt-5.4-mini`/`openai/gpt-5.4`) was an implementation
+misunderstanding, not the intended decision. This update corrects the stage defaults; it does not
+reverse the reasoning-effort architecture, the M5/M6 stage console, or the required-review-note/
+paid-call-confirmation UI work above, all of which are provider-agnostic and unaffected.
+
+1. **Corrected default matrix** -- every stage now defaults to a **direct** OpenAI `LLMModel`
+   (`gpt-5.4-mini`/`gpt-5.4`, no `openai/` OpenRouter routing prefix), same reasoning-effort values
+   as originally specified (`medium`/`medium`/`medium`/`high`/`high`/`medium` for
+   `MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_MATCH`/`AC_RANK`/`AB_BUILD`). The OpenRouter-hosted
+   `openai/gpt-5.4-mini`/`openai/gpt-5.4` records from the original pass are **kept**, active, and
+   selectable as explicit, optional, non-default per-run alternatives -- never deleted, per this
+   correction's own explicit instruction to preserve them as separate optional records now that the
+   registry can represent "the same logical model reachable through two different endpoints/
+   credentials" as two distinct `LLMModel` rows sharing nothing but a display name.
+2. **Provider row**: reuses this registry's own pre-existing direct-OpenAI `LLMProvider` row (id
+   11, `name="OpenAI"`, already serving the `gpt-5` model from earlier work) rather than creating a
+   duplicate -- `llm_provider/services/gpt54_defaults.py::_ensure_openai_provider` only fills in
+   `base_url`/`credential_env_var` when genuinely blank, exactly mirroring every other idempotent
+   configuration function in this codebase's fill-in-only-if-blank convention. No change was needed
+   to `OpenAIAdapter` (`llm_provider/adapters/openai.py`) at all -- it already used
+   `provider.base_url or DEFAULT_BASE_URL` (`https://api.openai.com/v1`),
+   `provider.credential_env_var`-driven Bearer auth, and OpenAI's own top-level
+   `reasoning_effort` Chat Completions field (never OpenRouter's nested `reasoning.effort` object,
+   never a `provider`/`require_parameters` routing key, never OpenRouter's attribution headers) --
+   this was purely a registry/configuration correction, never an adapter defect.
+3. **Provider-aware UI selection** (new, requirements Sec 5 of the correction):
+   `llm_provider/services/eligibility.py` gained `provider_group_label` (e.g.
+   `"OpenAI — Direct API"` vs. `"OpenRouter"`, a display-only formatting rule -- never renaming the
+   operator-editable `LLMProvider.name` field itself) and `grouped_model_choices` (the same eligible
+   models `eligible_models_for_stage` already returns, grouped by provider for `<optgroup>`
+   rendering). Every AJ/AC/AB model `<select>` (`job_intake/forms.py`, `reviews/templates/reviews/
+   _ac_model_selectors.html`/`_ab_model_selector.html`/`gate1.html`) now renders one `<optgroup>`
+   per provider. A provider/model mismatch remains structurally impossible, not merely rejected
+   after the fact: there is no separate "provider" input at all -- the one submitted value is
+   always an `LLMModel` primary key, which already carries its own provider unambiguously; grouping
+   is presentation only. No JavaScript is used or required, so there is no non-JavaScript fallback
+   to build -- the grouped `<select>` is the only path, working identically with or without JS.
+4. **Stage-card display** (`llm_provider/services/console.py`): `StageCard` gained
+   `default_provider_label`/`default_endpoint_type`/`default_credential_configured` and the
+   matching `effective_*` trio -- `endpoint_type_label` reports `"Direct API"` for a direct
+   provider type and `"Routed (OpenRouter)"` for a router; `credential_configured` reports whether
+   the provider's referenced environment variable is currently set in this process's own
+   environment, **never** reading, logging, or returning the credential value itself. "System
+   default" on every GPT-5.4 stage's card now visibly resolves to `"OpenAI — Direct API"` with the
+   exact `gpt-5.4`/`gpt-5.4-mini` id (never `openai/gpt-5.4`).
+5. **Environment-variable clarification**: `OPENAI_API_KEY` is checked/used only when a direct
+   OpenAI model is selected (default or override); `OPENROUTER_API_KEY` only when an OpenRouter
+   model is explicitly selected. This was already true by construction (each `LLMModel`'s own
+   `provider.credential_env_var` is the only credential reference any adapter ever reads) and
+   required no code change -- only the stage-card display above makes it visible to the operator.
+   `.env`/`.env.example` were not modified; both variables were already documented and present.
+6. **Tests**: `llm_provider/tests/test_gpt54_wire_payload.py` (14, kept, imports updated to the
+   `OPENROUTER_GPT54_*` constants) now exercises only the OpenRouter-hosted alternative path,
+   proving it remains distinct and unaffected. New
+   `llm_provider/tests/test_gpt54_openai_direct_wire_payload.py` (20) proves the direct endpoint,
+   `OPENAI_API_KEY` credential reference, exact unprefixed model ids, `reasoning_effort` as a flat
+   top-level field (never nested under `reasoning`), the reasoning-model `max_completion_tokens`/
+   no-`temperature` shape, and the absence of every OpenRouter-only wire artifact (`provider`
+   object, attribution headers) and other-provider parameter. `llm_provider/tests/
+   test_gpt54_defaults_config.py` (32, substantially rewritten) proves the corrected direct-OpenAI
+   default matrix, that a pre-existing direct-OpenAI provider row is reused rather than duplicated,
+   that an operator's own custom `base_url`/`credential_env_var` on that row is never overwritten,
+   and that the OpenRouter-hosted records are preserved as active, non-default alternatives -- both
+   fresh and simulating the real state the original (corrected) implementation would have left
+   behind. New `llm_provider/tests/test_provider_grouped_selection.py` (9) proves the `<optgroup>`
+   grouping and that a provider/model mismatch cannot be constructed. `llm_provider/tests/
+   test_console.py` gained `ProviderEndpointCredentialDisplayTests` (3) proving "System default"
+   resolves to "OpenAI — Direct API" for the real GPT-5.4 stages. Full suite: 1300 -> 1339 passing
+   (39 net new this correction: 20 + 9 new files, +7 from the rewritten config suite (25 -> 32),
+   +3 from the console suite (11 -> 14); the wire-payload file's own count (14) is unchanged, only
+   its scope narrowed to the OpenRouter-hosted alternative path); `manage.py check`/
+   `makemigrations --check --dry-run`/`ruff check .` all clean. No live call was made.
+7. **Real database application**: `manage.py configure_gpt54_defaults` re-run against the same real
+   local development database, converging all six stages onto the direct-OpenAI `gpt-5.4-mini`/
+   `gpt-5.4` records (reusing provider id 11) with the same reasoning-effort matrix; the previously-
+   created OpenRouter-hosted `openai/gpt-5.4-mini`/`openai/gpt-5.4` records (created by the original
+   pass, before this update) remain in place, active, and selectable, now correctly never a stage
+   default. Idempotency re-proven directly against this database (a second real run and a
+   subsequent `--dry-run` both reported no further changes).
+8. **Merge**: this correction commit and the original D-039 commit (`00bcd19`) were fast-forward
+   merged into local `main` together, per the operator's explicit authorization -- see this file's
+   own commit history for the exact hashes; nothing was pushed.
+9. **Live qualification**: still `NOT RUN -- intentionally deferred for the operator-driven M5/M6
+   execution`, unchanged by this correction.

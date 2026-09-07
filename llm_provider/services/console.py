@@ -12,10 +12,33 @@ already-sanitized `LLMCallLog` fields every adapter already writes (`llm_provide
 from __future__ import annotations
 
 import dataclasses
+import os
 
 from ..errors import LLMErrorCategory
-from ..models import LLMCallLog, LLMModel, StageModelAssignment
-from .eligibility import eligible_models_for_stage, model_display_label
+from ..models import LLMCallLog, LLMModel, LLMProvider, StageModelAssignment
+from .eligibility import eligible_models_for_stage, model_display_label, provider_group_label
+
+# Provider types this codebase routes to through a virtual/multi-model router rather than a fixed
+# vendor endpoint (2026-09-07, D-039 correction: provider-aware selection) -- used only for the
+# stage card's "endpoint type" display; never for eligibility/routing, which is always keyed off
+# the model's own provider FK.
+_ROUTED_PROVIDER_TYPES = frozenset({LLMProvider.ProviderType.OPENROUTER})
+
+
+def endpoint_type_label(provider: LLMProvider | None) -> str:
+    if provider is None:
+        return ""
+    return "Routed (OpenRouter)" if provider.provider_type in _ROUTED_PROVIDER_TYPES else "Direct API"
+
+
+def credential_configured(provider: LLMProvider | None) -> bool | None:
+    """`True`/`False` when the provider's referenced credential environment variable is
+    set/missing in this process's own environment right now; `None` when there is no provider (or
+    no configured reference) to check. Never reads, logs, or returns the credential *value* --
+    only whether the named environment variable is non-empty."""
+    if provider is None or not provider.credential_env_var:
+        return None
+    return bool(os.environ.get(provider.credential_env_var))
 
 # Exact known free-tier OpenRouter model ids/suffixes actually used by this registry (D-038's
 # `openrouter/free`, and the retired Z.ai/GLM `:free`-suffixed slug) -- the only "free" signal this
@@ -95,9 +118,15 @@ class StageCard:
     default_model: LLMModel | None
     default_reasoning_effort: str
     default_is_free: bool | None
+    default_provider_label: str
+    default_endpoint_type: str
+    default_credential_configured: bool | None
     effective_model: LLMModel | None
     effective_reasoning_effort: str
     effective_is_free: bool | None
+    effective_provider_label: str
+    effective_endpoint_type: str
+    effective_credential_configured: bool | None
     max_output_tokens: int | None
     model_choices: list[tuple[int, str]]
     reasoning_choices: list[tuple[str, str]]
@@ -178,9 +207,23 @@ def build_stage_card(stage: str, *, correlation_id: str | None = None) -> StageC
         default_model=default_model,
         default_reasoning_effort=default_reasoning_effort,
         default_is_free=is_free_model(default_model),
+        default_provider_label=provider_group_label(default_model.provider) if default_model else "",
+        default_endpoint_type=endpoint_type_label(default_model.provider if default_model else None),
+        default_credential_configured=credential_configured(
+            default_model.provider if default_model else None
+        ),
         effective_model=effective_model,
         effective_reasoning_effort=effective_reasoning_effort,
         effective_is_free=is_free_model(effective_model),
+        effective_provider_label=(
+            provider_group_label(effective_model.provider) if effective_model else ""
+        ),
+        effective_endpoint_type=endpoint_type_label(
+            effective_model.provider if effective_model else None
+        ),
+        effective_credential_configured=credential_configured(
+            effective_model.provider if effective_model else None
+        ),
         max_output_tokens=(assignment.max_output_tokens if assignment else None)
         or (default_model.max_output_tokens if default_model else None),
         model_choices=model_choices,

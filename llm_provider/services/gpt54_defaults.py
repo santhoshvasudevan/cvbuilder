@@ -1,26 +1,24 @@
-"""Idempotent registry configuration: register OpenRouter's paid GPT-5.4 Mini/GPT-5.4 models and
-make them the global default for every currently implemented LLM pipeline stage (2026-09-07,
-D-039 paid GPT-5.4 model defaults -- operator-approved, superseding D-038's `openrouter/free`
-default-for-every-stage matrix with a real, paid, per-stage-tuned matrix).
+"""Idempotent registry configuration: register GPT-5.4 Mini/GPT-5.4 as **direct OpenAI** models
+and make them the global default for every currently implemented LLM pipeline stage (2026-09-07,
+D-039 paid GPT-5.4 model defaults, corrected same day -- the operator's actual requirement was the
+direct OpenAI API, not OpenRouter; the OpenRouter-hosted `openai/gpt-5.4-mini`/`openai/gpt-5.4`
+records from the original pass were an implementation misunderstanding, not the intended decision,
+and are kept only as explicit, optional, non-default alternatives).
 
 This is the one, deliberate, operator-invoked mechanism for this migration -- never ad hoc shell
 SQL, never a data migration silently mutating operational rows. Mirrors
 `llm_provider.services.openrouter_free_router.configure_openrouter_free_router`'s shape (same
 report/dry-run/idempotency pattern) but is otherwise fully independent of it: this function never
-touches `openrouter/free`, the retired Z.ai/GLM row, or any NVIDIA/Gemini/OpenAI model -- those
-stay exactly as they are, remaining selectable per-run alternatives
-(`llm_provider.services.eligibility.eligible_models_for_stage`). Running
-`configure_openrouter_free_router` first (recommended, documented in the operator guide) is not a
-prerequisite this function enforces -- it creates its own OpenRouter `LLMProvider` row if none
-exists yet, exactly like that command does.
+touches `openrouter/free`, the retired Z.ai/GLM row, or any NVIDIA/Gemini model -- those stay
+exactly as they are, remaining selectable per-run alternatives
+(`llm_provider.services.eligibility.eligible_models_for_stage`).
 
 Historical referential integrity is preserved by construction: nothing is ever deleted, only
-created or updated in place (`LLMModel.objects.get_or_create`-style upsert,
-`StageModelAssignment.objects.update_or_create`-style upsert) -- `LLMCallLog`/`StageModelAssignment`
-both use `on_delete=models.PROTECT` on their `model` FK, so a superseded model row could not be
-deleted while referenced even if this command tried. Rollback for any one stage is a plain registry
-edit: reassign it back to whichever model/reasoning it previously used via the existing admin -- no
-re-creation, no data loss.
+created or updated in place -- `LLMCallLog`/`StageModelAssignment` both use `on_delete=models.
+PROTECT` on their `model` FK, so a superseded model row could not be deleted while referenced even
+if this command tried. Rollback for any one stage is a plain registry edit: reassign it back to
+whichever model/reasoning it previously used via the existing admin -- no re-creation, no data
+loss.
 """
 
 from __future__ import annotations
@@ -31,35 +29,47 @@ from django.db import transaction
 
 from ..models import LLMModel, LLMProvider, ReasoningEffort, StageModelAssignment
 
-# Exact OpenRouter-routed model identifiers (requirements Sec 1) -- opaque, sent to OpenRouter
-# exactly as written, never combined with any prefix/vendor segment, never the direct-OpenAI
-# identifiers ("gpt-5.4-mini"/"gpt-5.4") which this codebase must never send through the
-# OpenRouter adapter.
-GPT54_MINI_MODEL_ID = "openai/gpt-5.4-mini"
-GPT54_MODEL_ID = "openai/gpt-5.4"
+# Exact direct-OpenAI model identifiers (requirements Sec 1/Sec 2 of the correction) -- opaque,
+# sent to OpenAI's own API exactly as written, and **never** carrying the `openai/` OpenRouter
+# routing prefix (that prefix belongs only to the OpenRouter-hosted alternative records below --
+# sending it to the direct OpenAI endpoint would be an invalid/unknown model id there).
+GPT54_MINI_MODEL_ID = "gpt-5.4-mini"
+GPT54_MODEL_ID = "gpt-5.4"
+
+# The OpenRouter-hosted equivalents from the original (corrected) implementation -- kept active and
+# selectable as explicit, optional per-run alternatives (never deleted, never a stage default) per
+# the operator's explicit instruction to preserve them as separate optional records.
+OPENROUTER_GPT54_MINI_MODEL_ID = "openai/gpt-5.4-mini"
+OPENROUTER_GPT54_MODEL_ID = "openai/gpt-5.4"
 
 GPT54_MINI_DISPLAY_NAME = "GPT-5.4 Mini"
 GPT54_DISPLAY_NAME = "GPT-5.4"
 
-OPENROUTER_PROVIDER_NAME = "OpenRouter"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+OPENAI_PROVIDER_NAME = "OpenAI"
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_CREDENTIAL_ENV_VAR = "OPENAI_API_KEY"
 
-# Conservative output-token ceiling for both GPT-5.4 models (requirements Sec 4: "without
-# unnecessarily increasing the application's current per-call output budget"). Matches the exact
-# value `openrouter_free_router.FREE_ROUTER_MAX_OUTPUT_TOKENS` already uses -- the smallest
-# known-good stage budget already exercised live in this codebase (AC_NORMALIZE/AC_MATCH, D-027) --
-# rather than a larger number assumed from GPT-5.4's own theoretical maximum. A model that cannot
-# sustain even this budget still fails safely: `finish_reason=length` is classified CONFIGURATION
-# and never silently accepted (`llm_provider/adapters/openai.py`'s shared parser, D-026). Intended
-# to be verified/adjusted via `manage.py smoke_test_openrouter --model openai/gpt-5.4`, never raised
-# speculatively ahead of an actual live call.
+OPENROUTER_PROVIDER_NAME = "OpenRouter"
+OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Conservative output-token ceiling for both GPT-5.4 models, direct and OpenRouter-hosted alike
+# (requirements Sec 4: "without unnecessarily increasing the application's current per-call output
+# budget"). Matches the exact value `openrouter_free_router.FREE_ROUTER_MAX_OUTPUT_TOKENS` already
+# uses -- the smallest known-good stage budget already exercised live in this codebase
+# (AC_NORMALIZE/AC_MATCH, D-027) -- rather than a larger number assumed from GPT-5.4's own
+# theoretical maximum (the pre-existing direct-OpenAI `gpt-5` row's own 128000 is a different,
+# separately-verified model's capability, not a precedent this decision inherits). A model that
+# cannot sustain even this budget still fails safely: `finish_reason=length` is classified
+# CONFIGURATION and never silently accepted (`llm_provider/adapters/openai.py`'s shared parser,
+# D-026). Intended to be verified/adjusted via `manage.py smoke_test_openai --model gpt-5.4`, never
+# raised speculatively ahead of an actual live call.
 GPT54_MAX_OUTPUT_TOKENS = 8192
 
-# The operator-approved default stage matrix (requirements Sec 1): extraction/analysis stages use
-# the cheaper Mini model at medium reasoning; matching/ranking/writing stages -- where getting the
-# judgment right matters more than raw throughput -- use the full model, with AC_MATCH/AC_RANK at
-# high reasoning (judgment-heavy) and AB_BUILD at medium (structured writing, not open-ended
-# judgment).
+# The operator-approved default stage matrix (requirements Sec 1, corrected to the direct-OpenAI
+# ids): extraction/analysis stages use the cheaper Mini model at medium reasoning; matching/
+# ranking/writing stages -- where getting the judgment right matters more than raw throughput --
+# use the full model, with AC_MATCH/AC_RANK at high reasoning (judgment-heavy) and AB_BUILD at
+# medium (structured writing, not open-ended judgment).
 STAGE_DEFAULT_MATRIX: dict[str, tuple[str, str]] = {
     StageModelAssignment.Stage.MEMORY_BUILD: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
     StageModelAssignment.Stage.AJ_ANALYZE: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
@@ -84,25 +94,41 @@ class StageReassignment:
 
 @dataclasses.dataclass
 class ConfigurationReport:
-    provider_id: int | None
-    provider_created: bool
+    openai_provider_id: int | None
+    openai_provider_created: bool
+    openrouter_provider_id: int | None
+    openrouter_provider_created: bool
     mini_model_id: int | None
     mini_model_created: bool
     full_model_id: int | None
     full_model_created: bool
+    openrouter_mini_model_id: int | None
+    openrouter_mini_model_created: bool
+    openrouter_full_model_id: int | None
+    openrouter_full_model_created: bool
     reassigned_stages: list[StageReassignment]
     dry_run: bool
 
     def describe(self) -> str:
         lines = [
-            f"{'[dry-run] ' if self.dry_run else ''}OpenRouter provider: "
-            f"{'created' if self.provider_created else 'existing'} (id={self.provider_id})",
-            f"LLMModel {GPT54_MINI_MODEL_ID!r}: "
+            f"{'[dry-run] ' if self.dry_run else ''}OpenAI (direct) provider: "
+            f"{'created' if self.openai_provider_created else 'existing'} "
+            f"(id={self.openai_provider_id})",
+            f"LLMModel {GPT54_MINI_MODEL_ID!r} (direct OpenAI): "
             f"{'created' if self.mini_model_created else 'existing/updated'} "
             f"(id={self.mini_model_id}, max_output_tokens={GPT54_MAX_OUTPUT_TOKENS})",
-            f"LLMModel {GPT54_MODEL_ID!r}: "
+            f"LLMModel {GPT54_MODEL_ID!r} (direct OpenAI): "
             f"{'created' if self.full_model_created else 'existing/updated'} "
             f"(id={self.full_model_id}, max_output_tokens={GPT54_MAX_OUTPUT_TOKENS})",
+            f"OpenRouter provider (optional alternative): "
+            f"{'created' if self.openrouter_provider_created else 'existing'} "
+            f"(id={self.openrouter_provider_id})",
+            f"LLMModel {OPENROUTER_GPT54_MINI_MODEL_ID!r} (OpenRouter, optional alternative): "
+            f"{'created' if self.openrouter_mini_model_created else 'existing/updated'} "
+            f"(id={self.openrouter_mini_model_id})",
+            f"LLMModel {OPENROUTER_GPT54_MODEL_ID!r} (OpenRouter, optional alternative): "
+            f"{'created' if self.openrouter_full_model_created else 'existing/updated'} "
+            f"(id={self.openrouter_full_model_id})",
         ]
         if self.reassigned_stages:
             for r in self.reassigned_stages:
@@ -112,13 +138,15 @@ class ConfigurationReport:
                 )
         else:
             lines.append(
-                "Every implemented stage's StageModelAssignment already matches the GPT-5.4 "
-                "default matrix -- no reassignment needed."
+                "Every implemented stage's StageModelAssignment already matches the direct-OpenAI "
+                "GPT-5.4 default matrix -- no reassignment needed."
             )
         return "\n".join(lines)
 
 
-def _ensure_model(provider: LLMProvider, model_id: str, display_name: str) -> tuple[LLMModel, bool]:
+def _ensure_model(
+    provider: LLMProvider, model_id: str, display_name: str
+) -> tuple[LLMModel, bool]:
     model = LLMModel.objects.select_for_update().filter(provider=provider, model_id=model_id).first()
     created = model is None
     if model is None:
@@ -126,9 +154,9 @@ def _ensure_model(provider: LLMProvider, model_id: str, display_name: str) -> tu
     # Truthful, conservative capability flags (requirements Sec 4): both GPT-5.4 models are
     # structured-output- and reasoning-capable paid models; `supports_streaming` stays False
     # because this codebase never streams a response regardless of a model's own streaming
-    # capability (every adapter, including OpenRouterAdapter, sends `stream: false`
-    # unconditionally) -- `False` is the truthful statement of what this application actually
-    # exercises, not a claim about the upstream model's own capability.
+    # capability (every adapter sends a non-streaming request unconditionally) -- `False` is the
+    # truthful statement of what this application actually exercises, not a claim about the
+    # upstream model's own capability.
     model.supports_structured_output = True
     model.supports_reasoning = True
     model.supports_streaming = False
@@ -144,20 +172,84 @@ def _ensure_model(provider: LLMProvider, model_id: str, display_name: str) -> tu
     return model, created
 
 
+def _ensure_openai_provider() -> tuple[LLMProvider, bool]:
+    """Finds-or-creates the **direct** OpenAI `LLMProvider` row -- reused, never duplicated, if one
+    already exists (this registry already has a real direct-OpenAI provider row from earlier work,
+    id 11, serving the pre-existing `gpt-5` model). Only fills in `base_url`/`credential_env_var`
+    when genuinely blank -- never overwrites an operator's own configuration, mirroring every other
+    idempotent configuration function in this module/`openrouter_free_router.py`."""
+    provider = (
+        LLMProvider.objects.select_for_update()
+        .filter(provider_type=LLMProvider.ProviderType.OPENAI)
+        .order_by("id")
+        .first()
+    )
+    created = provider is None
+    if provider is None:
+        provider = LLMProvider(
+            name=OPENAI_PROVIDER_NAME,
+            provider_type=LLMProvider.ProviderType.OPENAI,
+            base_url=OPENAI_DEFAULT_BASE_URL,
+            credential_env_var=OPENAI_CREDENTIAL_ENV_VAR,
+            data_collection_policy=LLMProvider.DataCollectionPolicy.DENY,
+        )
+        provider.full_clean()
+        provider.save()
+        return provider, created
+    changed_fields = []
+    if not provider.base_url:
+        provider.base_url = OPENAI_DEFAULT_BASE_URL
+        changed_fields.append("base_url")
+    if not provider.credential_env_var:
+        provider.credential_env_var = OPENAI_CREDENTIAL_ENV_VAR
+        changed_fields.append("credential_env_var")
+    if changed_fields:
+        provider.full_clean()
+        provider.save(update_fields=changed_fields)
+    return provider, created
+
+
+def _ensure_openrouter_provider() -> tuple[LLMProvider, bool]:
+    provider = (
+        LLMProvider.objects.select_for_update()
+        .filter(provider_type=LLMProvider.ProviderType.OPENROUTER)
+        .order_by("id")
+        .first()
+    )
+    created = provider is None
+    if provider is None:
+        provider = LLMProvider(
+            name=OPENROUTER_PROVIDER_NAME,
+            provider_type=LLMProvider.ProviderType.OPENROUTER,
+            base_url=OPENROUTER_DEFAULT_BASE_URL,
+            credential_env_var="OPENROUTER_API_KEY",
+            data_collection_policy=LLMProvider.DataCollectionPolicy.DENY,
+        )
+        provider.full_clean()
+        provider.save()
+    elif not provider.base_url:
+        provider.base_url = OPENROUTER_DEFAULT_BASE_URL
+        provider.full_clean()
+        provider.save(update_fields=["base_url"])
+    return provider, created
+
+
 def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
-    """Converge the registry to: an OpenRouter provider row with the documented base URL, active
-    `openai/gpt-5.4-mini`/`openai/gpt-5.4` `LLMModel` rows with truthful capability flags, and
-    every currently implemented `StageModelAssignment` pointed at `STAGE_DEFAULT_MATRIX`'s
-    model+reasoning pair for that stage -- whatever it was previously assigned to (`openrouter/free`,
-    NVIDIA, a stale GPT-5 row, or nothing at all). Safe to call repeatedly -- a second call with no
-    intervening registry change reports the same converged state (`reassigned_stages == []`) and
-    makes no further writes beyond re-affirming it.
+    """Converge the registry to: a direct OpenAI `LLMProvider` row (reused if one already exists),
+    active `gpt-5.4-mini`/`gpt-5.4` `LLMModel` rows under it with truthful capability flags, every
+    currently implemented `StageModelAssignment` pointed at `STAGE_DEFAULT_MATRIX`'s direct-OpenAI
+    model+reasoning pair for that stage -- and, kept as explicit optional alternatives (never a
+    stage default), the OpenRouter-hosted `openai/gpt-5.4-mini`/`openai/gpt-5.4` records under the
+    OpenRouter provider. Safe to call repeatedly -- a second call with no intervening registry
+    change reports the same converged state (`reassigned_stages == []`) and makes no further
+    writes beyond re-affirming it.
 
     Only the *default* (`StageModelAssignment`) changes for the 6 stages in the matrix. No other
-    provider/model row is ever modified: `openrouter/free`, every NVIDIA/Gemini/OpenAI model, and
-    the retired Z.ai/GLM row are left exactly as they are -- remaining selectable per-run
-    alternatives (`llm_provider.services.eligibility.eligible_models_for_stage`) even though they
-    are no longer any of these 6 stages' default.
+    provider/model row is ever modified: `openrouter/free`, every NVIDIA/Gemini model, the
+    pre-existing direct-OpenAI `gpt-5` row, the OpenRouter-hosted GPT-5.4 records, and the retired
+    Z.ai/GLM row are left exactly as they are -- remaining selectable per-run alternatives
+    (`llm_provider.services.eligibility.eligible_models_for_stage`) even though none of them is any
+    of these 6 stages' default.
 
     `dry_run=True` performs every write inside this function's own transaction (so
     `full_clean()`-validated, realistic before/after state can be computed and reported) and then
@@ -165,31 +257,23 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
     unchanged, and the caller only ever sees the report.
     """
     with transaction.atomic():
-        provider = (
-            LLMProvider.objects.select_for_update()
-            .filter(provider_type=LLMProvider.ProviderType.OPENROUTER)
-            .order_by("id")
-            .first()
-        )
-        provider_created = provider is None
-        if provider is None:
-            provider = LLMProvider(
-                name=OPENROUTER_PROVIDER_NAME,
-                provider_type=LLMProvider.ProviderType.OPENROUTER,
-                base_url=DEFAULT_BASE_URL,
-                credential_env_var="OPENROUTER_API_KEY",
-                data_collection_policy=LLMProvider.DataCollectionPolicy.DENY,
-            )
-            provider.full_clean()
-            provider.save()
-        elif not provider.base_url:
-            provider.base_url = DEFAULT_BASE_URL
-            provider.full_clean()
-            provider.save(update_fields=["base_url"])
+        openai_provider, openai_provider_created = _ensure_openai_provider()
+        openrouter_provider, openrouter_provider_created = _ensure_openrouter_provider()
 
-        mini_model, mini_created = _ensure_model(provider, GPT54_MINI_MODEL_ID, GPT54_MINI_DISPLAY_NAME)
-        full_model, full_created = _ensure_model(provider, GPT54_MODEL_ID, GPT54_DISPLAY_NAME)
+        mini_model, mini_created = _ensure_model(
+            openai_provider, GPT54_MINI_MODEL_ID, GPT54_MINI_DISPLAY_NAME
+        )
+        full_model, full_created = _ensure_model(openai_provider, GPT54_MODEL_ID, GPT54_DISPLAY_NAME)
         models_by_id = {GPT54_MINI_MODEL_ID: mini_model, GPT54_MODEL_ID: full_model}
+
+        # Optional, explicitly-preserved OpenRouter-hosted alternatives -- never the default,
+        # never removed if already present from the original (corrected) implementation.
+        openrouter_mini_model, openrouter_mini_created = _ensure_model(
+            openrouter_provider, OPENROUTER_GPT54_MINI_MODEL_ID, GPT54_MINI_DISPLAY_NAME
+        )
+        openrouter_full_model, openrouter_full_created = _ensure_model(
+            openrouter_provider, OPENROUTER_GPT54_MODEL_ID, GPT54_DISPLAY_NAME
+        )
 
         reassigned: list[StageReassignment] = []
         existing_assignments = {
@@ -248,12 +332,18 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
             assignment.save()
 
         report = ConfigurationReport(
-            provider_id=provider.id,
-            provider_created=provider_created,
+            openai_provider_id=openai_provider.id,
+            openai_provider_created=openai_provider_created,
+            openrouter_provider_id=openrouter_provider.id,
+            openrouter_provider_created=openrouter_provider_created,
             mini_model_id=mini_model.id,
             mini_model_created=mini_created,
             full_model_id=full_model.id,
             full_model_created=full_created,
+            openrouter_mini_model_id=openrouter_mini_model.id,
+            openrouter_mini_model_created=openrouter_mini_created,
+            openrouter_full_model_id=openrouter_full_model.id,
+            openrouter_full_model_created=openrouter_full_created,
             reassigned_stages=reassigned,
             dry_run=dry_run,
         )
