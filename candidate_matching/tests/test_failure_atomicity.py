@@ -66,7 +66,7 @@ def _ready_application():
 def _patch_assess_adapter(results: list[NormalizedLLMResult]):
     model = make_fake_stage_assignment()
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return _ScriptedResultsAdapter(model, results)
 
     return mock.patch("candidate_matching.services.assess.get_adapter_for_stage", _get_adapter_for_stage)
@@ -159,7 +159,7 @@ class NonRetryableFailureTests(TestCase):
         application, _claim = _ready_application()
         model = make_fake_stage_assignment()
 
-        def _get_adapter_for_stage(stage, *, requested_model_id=None):
+        def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
             class _BadSchemaAdapter(BaseLLMAdapter):
                 def _call_once(self, request):
                     return NormalizedLLMResult(content={"totally": "wrong shape"})

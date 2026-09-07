@@ -33,7 +33,7 @@ class _ScriptedResultsAdapter(BaseLLMAdapter):
 def _patch_generate_adapter(results: list[NormalizedLLMResult]):
     model = make_fake_stage_assignment()
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return _ScriptedResultsAdapter(model, results)
 
     return mock.patch("resume_builder.services.generate.get_adapter_for_stage", _get_adapter_for_stage)
@@ -107,7 +107,7 @@ class NonRetryableFailureTests(TestCase):
         application, _claim_id, _engagement_id = make_ready_for_gate2_application()
         model = make_fake_stage_assignment()
 
-        def _get_adapter_for_stage(stage, *, requested_model_id=None):
+        def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
             class _BadSchemaAdapter(BaseLLMAdapter):
                 def _call_once(self, request):
                     return NormalizedLLMResult(content={"totally": "wrong shape"})

@@ -642,6 +642,12 @@ semantics and invariants come first.
   the `LLMModel` currently handling it.
 - **Invariants (LLM-001/006)**: changing this mapping is the *only* action needed to move a stage
   to a different provider/model — no pipeline code reads provider identity any other way.
+- **(2026-09-07, D-039) `default_reasoning_effort`**: a blank-or-`ReasoningEffort` `CharField`
+  alongside `model` — the stage's default reasoning effort, resolved by the same
+  `get_adapter_for_stage` call that resolves the model, with the same override/default/no-fallback
+  precedence. Blank means "send no reasoning request"; `ReasoningEffort.NONE` is a different, real
+  value that explicitly disables reasoning on a reasoning-capable model. `clean()` rejects a
+  non-blank, non-`NONE` value unless `model.supports_reasoning` is `True`.
 
 ### `LLMCallLog`
 - **Responsibility**: one row per LLM call — the audit ledger (not a cache; never read from to
@@ -659,10 +665,13 @@ semantics and invariants come first.
   record what the provider's own response reported for a given call — relevant for a virtual
   router (e.g. `openrouter/free`) whose selected underlying model can vary call to call and is
   otherwise unobservable. Populated only when the response reports them, never guessed, and never
-  substituted for `model` (the requested `LLMModel` FK, which always stays exact). `correlation_id`
-  is additive plumbing for a future caller-supplied workflow identifier — the field and its
-  `NormalizedLLMRequest.correlation_id` counterpart exist, but no pipeline call site sets one yet,
-  so it stays blank in practice today.
+  substituted for `model` (the requested `LLMModel` FK, which always stays exact).
+  **(2026-09-07, D-039)** `correlation_id` is now populated by every pipeline call site as
+  `str(job_application.pk)` once a `JobApplication` exists (every call except the very first Agent
+  Jobber analysis for a brand-new application, which has no id yet) — the M5/M6 stage console
+  (§9a.4a) uses it to scope attempt history to one application. `reasoning_effort` (also new)
+  records the resolved `ReasoningEffort` value actually sent for that call, mirroring
+  `selection_source`'s audit role for the model; blank means no `reasoning` key was sent at all.
 
 ### Per-run model selection (2026-09-07, D-038 update)
 
@@ -710,6 +719,13 @@ with a fixed precedence and no hidden fallback of any kind:
   request, marking the current default `[Default]`. Model selection is orthogonal to, and never
   bypasses, the approval/evidence/no-fabrication/staleness gates those views already enforce — it
   controls routing only, never authorizes generation or approval.
+- **(2026-09-07, D-039) Reasoning effort uses this identical mechanism**: every selector above
+  gained a parallel reasoning-effort `<select>`, `resolve_stage_model`/`get_adapter_for_stage`
+  gained a `requested_reasoning_effort` parameter with the same three-step precedence, and
+  `ReasoningNotEligibleForStageError` is the reasoning-specific typed failure (raised when the
+  resolved effort is incompatible with whichever model actually resolved, whether that
+  incompatibility came from an explicit override or from the stage's own configured default paired
+  with an overridden model). See §9a.4/§9a.4a for the full runtime picture.
 
 ### `JobApplication` (D-012, **APPROVED** 2026-09-02)
 - **Responsibility**: the aggregate/root entity for one tracked vacancy/application — groups the
@@ -922,6 +938,35 @@ identity anywhere — reassigning a stage to a different provider/model is purel
 (NFR-005), never a code change. The same function is also where a stage's effective output-token
 budget (D-024) and, from this session's timeout work (§9a.5), its effective request timeout are
 resolved — one resolution path for every per-stage operational override, not two parallel ones.
+
+Reasoning effort (2026-09-07, D-039) is a second, independent per-stage/per-run dimension resolved
+by the exact same function through the exact same precedence — `get_adapter_for_stage`'s optional
+`requested_reasoning_effort` argument, else `StageModelAssignment.default_reasoning_effort`, else
+"say nothing about reasoning." The resolved value is exposed on the returned adapter as
+`effective_reasoning_effort` (mirroring `effective_max_output_tokens`), which every pipeline
+service reads into its `NormalizedLLMRequest.reasoning_effort` — no pipeline app hardcodes a
+reasoning level any more than it hardcodes a provider. `llm_provider.models.ReasoningEffort`
+(`none`/`low`/`medium`/`high`/`xhigh`, OpenRouter's own wire vocabulary) is the one centrally-
+validated set every default and every override draws from; `OpenRouterAdapter` is the only place
+that translates it into a wire payload (`{"reasoning": {"effort": <value>}}`).
+
+### 9a.4a The M5/M6 stage console
+
+`llm_provider.services.console.build_stage_card(stage, correlation_id=None)` is the one read-only
+service that assembles everything an operator needs to execute and inspect one stage from the UI:
+the stage's configured default (model + reasoning), what will actually run this request (an
+in-flight per-run override, or the default when none was given), truthfully-known paid/free status,
+the effective output-token budget, and — scoped strictly to one `JobApplication` via
+`LLMCallLog.correlation_id` — the latest attempt's full audit trail (attempt number, timing,
+latency, retry count, requested vs. OpenRouter-resolved model, reasoning effort actually sent,
+finish reason, token usage, or a sanitized error category with short operator guidance). It never
+touches the registry and never issues a provider call itself. `reviews` (Gate 1, Gate 2) and
+`job_intake` (the AJ analysis-detail page) render one card per stage via a shared partial
+(`llm_provider/templates/llm_provider/_stage_card.html`) rather than each re-deriving this
+information independently — the same "one shared service, many callers" pattern §9a.4's model
+resolution already uses. `correlation_id` is populated as `str(job_application.pk)` at every
+pipeline call site once a `JobApplication` exists (every call except the very first Agent Jobber
+analysis for a brand-new application, which has no id yet).
 
 ### 9a.5 Diagram
 

@@ -162,6 +162,7 @@ def build_request(
     temperature: float = 0.0,
     top_p: float | None = None,
     reasoning_enabled: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> NormalizedLLMRequest:
     numbered_excerpt = render_chunk_for_prompt(chunk)
     return NormalizedLLMRequest(
@@ -183,6 +184,7 @@ def build_request(
         max_output_tokens=max_output_tokens,
         top_p=top_p,
         reasoning_enabled=reasoning_enabled,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -206,17 +208,24 @@ def extract_chunk(
     max_output_tokens = max_output_tokens_override or llm_model.max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
 
     # Scoped exactly to this one provider+model (see the constants' docstring above) -- any other
-    # stage/model combination keeps the plain defaults (temperature=0.0, no top_p/reasoning key).
+    # stage/model combination keeps the plain defaults (temperature=0.0, no top_p/reasoning key,
+    # whatever reasoning effort the registry resolved for MEMORY_BUILD -- see `effective_
+    # reasoning_effort` below, 2026-09-07 paid GPT-5.4 model defaults).
     temperature = 0.0
     top_p = None
     reasoning_enabled = None
+    reasoning_effort = adapter.effective_reasoning_effort
     if (
         llm_model.provider.provider_type == LLMProvider.ProviderType.NVIDIA_NIM
         and llm_model.model_id == _NVIDIA_NEMOTRON_MODEL_ID
     ):
+        # A registry-configured MEMORY_BUILD reasoning default is still overridden here for this
+        # one specific known-problematic model -- see the constants' docstring above for why (it
+        # consumed its entire output budget on internal "thinking" and never emitted visible JSON).
         temperature = _NVIDIA_NEMOTRON_TEMPERATURE
         top_p = _NVIDIA_NEMOTRON_TOP_P
         reasoning_enabled = False
+        reasoning_effort = None
 
     request = build_request(
         chunk,
@@ -226,5 +235,6 @@ def extract_chunk(
         temperature=temperature,
         top_p=top_p,
         reasoning_enabled=reasoning_enabled,
+        reasoning_effort=reasoning_effort,
     )
     return adapter.generate(request)

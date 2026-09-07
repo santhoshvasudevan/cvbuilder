@@ -55,6 +55,8 @@ def build_request(
     requirements: list[dict],
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMRequest:
     context_lines = ["Candidate narrative claims:"]
     for claim in retrieval.claims:
@@ -93,20 +95,36 @@ def build_request(
         output_schema=AgentCandidateAssessment,
         temperature=0.0,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        correlation_id=correlation_id,
     )
 
 
 def assess_requirements(
-    retrieval: RetrievalContext, requirements: list[dict], *, requested_model_id: int | None = None
+    retrieval: RetrievalContext,
+    requirements: list[dict],
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMResult:
-    """`requested_model_id`, when given, is a per-run operator override for this one call
-    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
+    """`requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for this one call (2026-09-07, per-run model selection; paid GPT-5.4 model
+    defaults) -- never persisted as a new stage default. `correlation_id`, when given (typically
+    the `JobApplication` id as a string), is carried through to `LLMCallLog.correlation_id`
+    unchanged, so the M5/M6 stage console can scope attempt history to one application."""
     if not requirements:
         return NormalizedLLMResult(content=AgentCandidateAssessment(requirement_assessments=[]))
     adapter = get_adapter_for_stage(
-        StageModelAssignment.Stage.AC_MATCH, requested_model_id=requested_model_id
+        StageModelAssignment.Stage.AC_MATCH,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
     )
     request = build_request(
-        retrieval, requirements, max_output_tokens=adapter.effective_max_output_tokens
+        retrieval,
+        requirements,
+        max_output_tokens=adapter.effective_max_output_tokens,
+        reasoning_effort=adapter.effective_reasoning_effort,
+        correlation_id=correlation_id,
     )
     return adapter.generate(request)

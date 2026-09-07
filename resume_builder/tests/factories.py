@@ -51,7 +51,7 @@ def scripted_generation(fixed_response: dict):
     the wrapped block returns `fixed_response`, via the real `FakeAdapter`."""
     model = make_fake_stage_assignment()
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with mock.patch("resume_builder.services.generate.get_adapter_for_stage", _get_adapter_for_stage):

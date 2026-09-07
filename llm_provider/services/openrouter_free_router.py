@@ -206,16 +206,17 @@ def configure_openrouter_free_router(*, dry_run: bool = False) -> ConfigurationR
                     )
                 )
                 continue
-            if assignment.model_id == free_router_model.id:
+            if assignment.model_id == free_router_model.id and not assignment.default_reasoning_effort:
                 # Already converged -- idempotency requires making no further write here.
                 continue
-            reassigned.append(
-                StageReassignment(
-                    stage=stage,
-                    previous_model_id=assignment.model.model_id,
-                    new_model_id=FREE_ROUTER_MODEL_ID,
+            if assignment.model_id != free_router_model.id:
+                reassigned.append(
+                    StageReassignment(
+                        stage=stage,
+                        previous_model_id=assignment.model.model_id,
+                        new_model_id=FREE_ROUTER_MODEL_ID,
+                    )
                 )
-            )
             assignment.model = free_router_model
             if (
                 assignment.max_output_tokens is not None
@@ -224,6 +225,15 @@ def configure_openrouter_free_router(*, dry_run: bool = False) -> ConfigurationR
                 # Never silently exceed the new model's declared capability -- clamp down and
                 # let full_clean() re-verify rather than saving an inconsistent row.
                 assignment.max_output_tokens = FREE_ROUTER_MAX_OUTPUT_TOKENS
+            if assignment.default_reasoning_effort:
+                # 2026-09-07, paid GPT-5.4 model defaults (D-039): `openrouter/free` is never
+                # registered `supports_reasoning=True` (module docstring above) -- a stage
+                # reassigned onto it (whether freshly here, or previously by
+                # `configure_gpt54_defaults` and now being reverted) can never keep a non-blank
+                # `default_reasoning_effort`, or `StageModelAssignment.clean()` would reject this
+                # row outright. Clearing it is exactly this command's own job: converge the stage
+                # fully onto the free router, reasoning setting included.
+                assignment.default_reasoning_effort = ""
             assignment.full_clean()
             assignment.save()
 

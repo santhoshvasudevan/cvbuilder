@@ -10,7 +10,7 @@ from resume_builder.tests.factories import (
 )
 
 from ..models import ReviewFeedback
-from ..services import approve_gate2, run_agent_builder, submit_gate2_feedback
+from ..services import FeedbackTargetError, approve_gate2, run_agent_builder, submit_gate2_feedback
 
 
 class RunAgentBuilderTests(TestCase):
@@ -34,6 +34,22 @@ class SubmitGate2FeedbackTests(TestCase):
         self.assertEqual(feedback.target, ReviewFeedback.Target.AB)
         application.refresh_from_db()
         self.assertEqual(application.current_resume_draft.version, 2)
+
+    def test_blank_comments_are_rejected_before_any_rerun(self):
+        application, claim_id, engagement_id = make_ready_for_gate2_application()
+        with scripted_generation(valid_generation_response(engagement_id, claim_id)):
+            run_agent_builder(application)
+            with self.assertRaises(FeedbackTargetError):
+                submit_gate2_feedback(application, comments="")
+        application.refresh_from_db()
+        self.assertEqual(application.current_resume_draft.version, 1)
+
+    def test_whitespace_only_comments_are_also_rejected(self):
+        application, claim_id, engagement_id = make_ready_for_gate2_application()
+        with scripted_generation(valid_generation_response(engagement_id, claim_id)):
+            run_agent_builder(application)
+            with self.assertRaises(FeedbackTargetError):
+                submit_gate2_feedback(application, comments="   ")
 
 
 class ApproveGate2Tests(TestCase):

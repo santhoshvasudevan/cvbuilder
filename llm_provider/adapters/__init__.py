@@ -12,6 +12,7 @@ from ..models import MAX_READ_TIMEOUT_SECONDS, MIN_READ_TIMEOUT_SECONDS, LLMCall
 from ..services.model_selection import (
     ModelNotEligibleForStageError,
     NoStageDefaultConfiguredError,
+    ReasoningNotEligibleForStageError,
     resolve_stage_model,
 )
 from .base import (
@@ -76,7 +77,12 @@ class InvalidStageTimeoutError(Exception):
     provider or silently clamped."""
 
 
-def get_adapter_for_stage(stage: str, *, requested_model_id: int | None = None) -> BaseLLMAdapter:
+def get_adapter_for_stage(
+    stage: str,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+) -> BaseLLMAdapter:
     """Resolve which `LLMModel` handles this call and return a bound adapter instance for it.
     This is the *only* place pipeline code needs to call to route a stage to whichever
     provider/model should handle one specific invocation.
@@ -90,6 +96,15 @@ def get_adapter_for_stage(stage: str, *, requested_model_id: int | None = None) 
     2. otherwise the stage's configured `StageModelAssignment` (the global default);
     3. otherwise `NoStageDefaultConfiguredError` -- there is no hidden hard-coded fallback.
 
+    `requested_reasoning_effort` (2026-09-07, paid GPT-5.4 model defaults) follows the exact same
+    per-field precedence, independent of the model precedence above: an explicit per-run value,
+    else the stage's own `StageModelAssignment.default_reasoning_effort`, else `None` ("say
+    nothing about reasoning"). The resolved value is re-validated against whichever model was
+    actually resolved (`ReasoningNotEligibleForStageError` if incompatible) and exposed on the
+    returned adapter as `effective_reasoning_effort` -- every pipeline service must read that
+    attribute into its `NormalizedLLMRequest.reasoning_effort`, exactly like
+    `effective_max_output_tokens` below.
+
     The returned adapter's `effective_max_output_tokens` (2026-09-04) is the one value every
     pipeline service must use as its request budget: for the DEFAULT path, the stage's own
     `StageModelAssignment.max_output_tokens` when configured, otherwise the model's own capability
@@ -100,7 +115,11 @@ def get_adapter_for_stage(stage: str, *, requested_model_id: int | None = None) 
     capability (via that same `BaseLLMAdapter.__init__` fallback) is used unmodified, never a
     budget number tuned for a different model.
     """
-    selection = resolve_stage_model(stage, requested_model_id=requested_model_id)
+    selection = resolve_stage_model(
+        stage,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
+    )
     llm_model = selection.model
     assignment = selection.assignment
     if not llm_model.is_active:
@@ -120,6 +139,7 @@ def get_adapter_for_stage(stage: str, *, requested_model_id: int | None = None) 
     adapter_cls = ADAPTER_CLASSES[provider_type]
     adapter = adapter_cls(llm_model)
     adapter.selection_source = selection.source
+    adapter.effective_reasoning_effort = selection.reasoning_effort
     if selection.source == LLMCallLog.SelectionSource.DEFAULT and assignment is not None:
         if assignment.max_output_tokens is not None:
             model_capability = llm_model.max_output_tokens
@@ -162,5 +182,6 @@ __all__ = [
     "NvidiaNimAdapter",
     "OpenAIAdapter",
     "OpenRouterAdapter",
+    "ReasoningNotEligibleForStageError",
     "get_adapter_for_stage",
 ]

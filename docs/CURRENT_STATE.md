@@ -1,6 +1,29 @@
 # Current State
 
-Last updated: 2026-09-07 (D-038 update: the product owner approved D-038 -- status now
+Last updated: 2026-09-07 (D-039, **ACCEPTED**: paid GPT-5.4 model defaults via OpenRouter,
+per-stage reasoning-effort configuration, and a complete M5/M6 stage-console UI. Supersedes D-038's
+`openrouter/free`-for-every-stage *default* (never the free router itself, which stays active and
+selectable) with a real, paid, per-stage-tuned matrix: `MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`
+now default to `openai/gpt-5.4-mini` at `medium` reasoning; `AC_MATCH`/`AC_RANK`/`AB_BUILD` now
+default to `openai/gpt-5.4` at `high`/`high`/`medium` reasoning respectively -- both paid OpenRouter
+models, never described as free. Adds reasoning effort as a second, independent per-run/per-stage
+selection dimension (`ReasoningEffort` enum, `StageModelAssignment.default_reasoning_effort`,
+`LLMCallLog.reasoning_effort`, migration `llm_provider.0010_default_reasoning_effort`), mirroring
+D-038's own model-selection precedence exactly. Adds a real operator-facing M5/M6 stage console:
+a shared read-only stage-card service (`llm_provider/services/console.py`) showing global-default
+vs. effective model/reasoning, paid/free status, attempt history scoped to one application via
+`correlation_id` (now finally wired into all six pipeline call sites), and sanitized error
+guidance, rendered on Gate 1, Gate 2, and the AJ analysis-detail page; reasoning-effort selectors
+alongside every existing model selector; a required review note enforced before any Gate 1/Gate 2
+rework re-run; and a paid-call confirmation before every state-changing AJ/AC/AB action. A
+cross-command interaction bug between `configure_gpt54_defaults` and `configure_openrouter_free_router`
+(reverting a stage to the free router left a stale, now-invalid `default_reasoning_effort`) was
+found and fixed. Implemented, deterministically tested (1300/1300 passing, 71 net new tests),
+applied to the real local development database (idempotency proven directly against it), and
+documented in one session. Live OpenRouter qualification remains `NOT RUN -- intentionally deferred
+for the operator-driven M5/M6 execution`. See "Paid GPT-5.4 model defaults, reasoning-effort
+configuration, and M5/M6 stage console (2026-09-07, D-039)" below for full detail.
+Previously, also 2026-09-07 (D-038 update: the product owner approved D-038 -- status now
 **ACCEPTED** -- and broadened its scope to make OpenRouter's Free Models Router (`openrouter/free`)
 the global default for **every** currently implemented LLM pipeline stage
 (`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD`), not only
@@ -99,6 +122,75 @@ matches; 9 static-type mappings `REJECTED`; 944 global claims intentionally unma
 per-job workflow, freshness enforcement across the whole chain, and the dashboard) remains **not
 implemented** -- confirmed: no `job_applications` dashboard list/detail view exists, and no
 cross-app integration beyond the pointer-based freshness checks M5/M6 already enforce individually.
+
+## Paid GPT-5.4 model defaults, reasoning-effort configuration, and M5/M6 stage console (2026-09-07, D-039) -- IMPLEMENTED, deterministically tested, APPLIED to the real development database
+
+Full detail: `docs/DECISIONS.md`'s D-039 entry. Summary:
+
+- **Stage default matrix changed** from D-038's `openrouter/free`-for-every-stage to a real, paid,
+  per-stage-tuned matrix: `MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE` -> `openai/gpt-5.4-mini` at
+  `medium` reasoning; `AC_MATCH`/`AC_RANK` -> `openai/gpt-5.4` at `high` reasoning; `AB_BUILD` ->
+  `openai/gpt-5.4` at `medium` reasoning. Both are paid OpenRouter models. `openrouter/free`, every
+  eligible NVIDIA model, and the retired (inactive) Z.ai model are all untouched and remain exactly
+  where D-038 left them — `openrouter/free` and NVIDIA stay active, selectable per-run
+  alternatives; Z.ai stays inactive and unassigned. No automatic fallback of any kind exists.
+- **New idempotent command**: `manage.py configure_gpt54_defaults [--dry-run]`
+  (`llm_provider/services/gpt54_defaults.py`) — registers both `LLMModel` rows (truthful
+  `supports_structured_output=True`/`supports_reasoning=True`/`supports_streaming=False`,
+  `max_output_tokens=8192`, matching D-038's own conservative ceiling) and converges all six
+  `StageModelAssignment` rows to the matrix above. Safe to run repeatedly; never touches
+  `openrouter/free`/NVIDIA/Z.ai. A real interaction bug between this command and
+  `configure_openrouter_free_router` (running the free-router command afterward left a stage's
+  `default_reasoning_effort` pointed at a value the newly-reassigned, non-reasoning free-router
+  model couldn't satisfy, raising a `ValidationError`) was found and fixed: the free-router command
+  now also clears `default_reasoning_effort` whenever it reassigns a stage onto `openrouter/free`.
+- **Reasoning effort is now a first-class, independently-selectable dimension**, mirroring D-038's
+  own per-run model-selection architecture exactly (same three-step precedence, same
+  never-mutates-the-global-default guarantee, same server-side re-validation): new
+  `ReasoningEffort` enum (`none`/`low`/`medium`/`high`/`xhigh` — OpenRouter's own wire vocabulary),
+  `StageModelAssignment.default_reasoning_effort`, `LLMCallLog.reasoning_effort` (migration
+  `llm_provider.0010_default_reasoning_effort`); `resolve_stage_model`/`get_adapter_for_stage`
+  resolve it the same way they resolve the model; `OpenRouterAdapter` translates it to
+  `{"reasoning": {"effort": <value>}}` (taking precedence over the pre-existing plain
+  `reasoning.enabled` boolean form when both would apply, never sent together). Wired into all six
+  pipeline call sites (`candidate_memory` MEMORY_BUILD, `job_intake` AJ_ANALYZE,
+  `candidate_matching` AC_NORMALIZE/AC_RANK/AC_MATCH, `resume_builder` AB_BUILD).
+- **`correlation_id` finally wired in** (plumbing that existed since D-038 but was never used by
+  any pipeline call site): every call except the very first Agent Jobber analysis for a brand-new
+  application (which has no `JobApplication` id yet) now carries `str(job_application.pk)`, so
+  `LLMCallLog` rows can be scoped to one specific application's own attempt history.
+- **New M5/M6 stage console**: `llm_provider/services/console.py`'s `build_stage_card` is the one
+  read-only service every AJ/AC/AB inspection page calls — global default vs. effective
+  model/reasoning, truthfully-known paid/free status, output-token budget, and (scoped to the
+  current application via `correlation_id`) the latest attempt's number, timing, latency,
+  requested/OpenRouter-resolved model, reasoning effort used, finish reason, token usage, and a
+  sanitized error category with short operator guidance. Rendered via a shared partial on Gate 1,
+  Gate 2, and the AJ analysis-detail page (which also now groups AJ's output into separate
+  Mandatory/Preferred/Responsibilities/ATS-keyword/Implied-expectation sections). Every AJ/AC/AB
+  model selector gained a parallel reasoning-effort selector. Rejecting a stage now requires a
+  review-note comment (`FeedbackTargetError` if blank). A paid-call confirmation precedes every
+  state-changing AJ/AC/AB action. No new app, no new route namespace, no new CSS framework — built
+  entirely on the existing `job_intake`/`reviews` routes and `templates/base.html` design system.
+- **Tests**: 71 net new (1229 -> 1300, all passing) — exact wire model id/reasoning payload for
+  both GPT-5.4 models across every reasoning level, the full default matrix, idempotency (including
+  the interaction-bug fix above), no stale Z.ai/legacy-GPT-5 default, no automatic fallback,
+  reasoning-selection precedence/override/incompatibility, the stage-console service (paid/free
+  detection, `correlation_id` attempt scoping, sanitized error guidance), and required-comments
+  enforcement. `manage.py check`/`makemigrations --check --dry-run`/`ruff check .` all clean.
+- **Real database application**: confirmed local dev (`.env`'s `POSTGRES_HOST=localhost`). Migration
+  applied; `configure_gpt54_defaults` run and its idempotency proven directly against this database
+  (a second run and a subsequent `--dry-run` both reported no further changes). All six stages
+  confirmed on the new matrix via the ORM; `openrouter/free`/NVIDIA/Z.ai state confirmed unchanged.
+  A temporary synthetic `JobApplication` fixture (zero LLM calls) was used to visually verify every
+  enriched page renders correctly against this real configuration, then deleted — zero net rows
+  added by the verification pass.
+- **Live qualification**: `NOT RUN — intentionally deferred for the operator-driven M5/M6
+  execution`.
+- **Known limitations**: the first-ever AJ call for a brand-new application still can't carry a
+  `correlation_id` (pre-existing, unchanged); `_ac_model_selectors.html`/`_ab_model_selector.html`
+  repeat `<select id="...">` values across the two forms that include them on the same page
+  (pre-existing since D-038, not fixed here); paid/free detection is a naming-convention heuristic,
+  not a provider-verified pricing fact.
 
 ## OpenRouter Free Router migration (2026-09-07, D-038) -- original narrower entry, superseded in scope by the update below
 
@@ -267,6 +359,28 @@ Same-day follow-up to the entry immediately above. Full detail is in D-038's own
   nothing needs undoing), or, if the *global default itself* was deliberately changed, edit
   `Stage model assignments` back via the admin — the same one-field edit as setting it in the
   first place.
+- **Choose a reasoning effort for one run** (2026-09-07, D-039): next to every model selector is a
+  reasoning-effort selector — "System default" uses the stage's `default_reasoning_effort`;
+  picking `none`/`low`/`medium`/`high`/`xhigh` overrides it for that run only, exactly like the
+  model selector. Choosing a reasoning effort against a model not registered
+  `supports_reasoning=True` (e.g. `openrouter/free`) is rejected server-side with an actionable
+  error before any provider call — pick a reasoning-capable model first, or leave it on default.
+- **Set a stage's default reasoning effort**: Django admin → `llm_provider` → `Stage model
+  assignments` → edit the row → `Default reasoning effort`. `manage.py configure_gpt54_defaults`
+  is the one scripted way to set both the model *and* reasoning effort for all six stages to the
+  operator-approved GPT-5.4/mini matrix in one idempotent action — `--dry-run` to preview first.
+  Reverting a stage to `openrouter/free` via `configure_openrouter_free_router` also clears that
+  stage's `default_reasoning_effort` automatically (openrouter/free is never reasoning-capable).
+- **Execute and inspect an M5/M6 stage**: open Gate 1 (`/reviews/gate1/<application_id>/`) for
+  AJ/AC (job analysis, requirement normalization, relevance ranking, fit assessment) or Gate 2
+  (`/reviews/gate2/<application_id>/`) for AB (application build), or the AJ analysis-detail page
+  (`/job-intake/<application_id>/`) for AJ alone. Each stage's card shows the global default,
+  what will actually run this time, whether it's paid or free, the output-token budget, and —
+  once something has run for this application — the latest attempt's number, timestamp, latency,
+  requested/OpenRouter-resolved model, reasoning effort used, finish reason, token usage, and a
+  sanitized error category with guidance if it failed. Nothing runs until you click a button, and
+  every state-changing button asks for confirmation first since it may be a paid call. Rejecting a
+  stage's output (the "feedback" form) now requires a comment explaining why.
 
 ## What exists (M3 — new)
 
@@ -1731,7 +1845,12 @@ the M7 section above) is **PROPOSED**, not yet product-owner-approved -- an hone
 implementation-level interpretation of DASH-003 made while building the M7 dashboard, not assumed
 settled; it remains PROPOSED and was not touched by this correction. Neither D-016 nor D-034 nor
 anything else is blocking for the M7 work already completed above; D-034 would only need
-revisiting if the product owner later wants an outcome recordable before `READY`.
+revisiting if the product owner later wants an outcome recordable before `READY`. D-035 through
+D-038 are recorded and implemented per their own sections above/`docs/DECISIONS.md`. D-039 (paid
+GPT-5.4 model defaults via OpenRouter, per-stage reasoning-effort configuration, and the M5/M6
+stage console -- see "Paid GPT-5.4 model defaults..." above) is **ACCEPTED AND IMPLEMENTED**,
+applied to the real local development database; live OpenRouter qualification under the new
+defaults remains deliberately deferred to the operator-driven M5/M6 run.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 
@@ -1784,6 +1903,14 @@ not change which provider currently serves `AC_MATCH`/`AB_BUILD` and does not al
 steps above in any way. A known parser bug the first live smoke test surfaced (D-026) has been
 fixed; a fresh, separately authorized smoke re-run against the real registry rows is the remaining
 step before OpenRouter could be considered for any stage assignment.
+
+**GPT-5.4/reasoning-effort addendum (2026-09-07, D-039)**: every stage's default is now a paid
+OpenRouter model (`openai/gpt-5.4-mini` or `openai/gpt-5.4`, see "Paid GPT-5.4 model defaults..."
+above) with a configured default reasoning effort, applied to the real local development database.
+The one remaining step before any further live M5/M6 run is exactly what D-038's addendum already
+named: a real `OPENROUTER_API_KEY` credential in `.env`, plus operator authorization for that
+specific live run -- `manage.py smoke_test_openrouter --model openai/gpt-5.4` (or `--model
+openai/gpt-5.4-mini`) is the correct first live-qualification step once that credential exists.
 
 ## D-035 hybrid baseline-chronology correction (2026-09-06, D-036)
 

@@ -13,7 +13,7 @@
   {% endif %}
 {% endif %}
 
-<form method="post" action="{% url 'job_intake:intake' %}">
+<form method="post" action="{% url 'job_intake:intake' %}" onsubmit="return confirm('This runs Agent Jobber now -- a live LLM call, which may use a paid provider depending on the model selected below. Continue?');">
   {% csrf_token %}
   {{ form.non_field_errors }}
   <p>
@@ -32,6 +32,12 @@
     {{ form.model_aj.errors }}
     <br><small>{{ form.model_aj.help_text }}</small>
   </p>
-  <button type="submit">Analyze</button>
+  <p>
+    {{ form.reasoning_aj.label_tag }}<br>
+    {{ form.reasoning_aj }}
+    {{ form.reasoning_aj.errors }}
+    <br><small>{{ form.reasoning_aj.help_text }}</small>
+  </p>
+  <button type="submit" class="btn">Analyze</button>
 </form>
 {% endblock %}

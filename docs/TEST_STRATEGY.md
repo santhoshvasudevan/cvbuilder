@@ -369,6 +369,46 @@ tests total for D-038, 28 + 42); `manage.py check`/`makemigrations --check --dry
 `ruff check .` clean. Live qualification remains deliberately deferred to the later, separately
 authorized M5/M6 run.
 
+**Paid GPT-5.4 model defaults, reasoning-effort selection, and the M5/M6 stage console (2026-09-07,
+D-039)**: 71 net new deterministic tests (1229 -> 1300), all against mocked `requests.post`
+asserting the real serialized JSON body, per this project's standing convention.
+`llm_provider/tests/test_gpt54_wire_payload.py` (14) -- the exact OpenRouter model id for both
+`openai/gpt-5.4-mini`/`openai/gpt-5.4` on the wire unchanged (never split/double-prefixed/using the
+direct-OpenAI id), every configured reasoning level (`medium`/`high` from the default matrix, plus
+the structurally-supported `low`/`xhigh`) serialized as `{"reasoning": {"effort": <value>}}`, the
+explicit-`NONE`-vs-omitted-key distinction, that `reasoning.effort` and `reasoning.enabled` are
+never sent together, and that no `tools`/NVIDIA/Gemini-specific parameter ever leaks onto an
+OpenRouter body. `llm_provider/tests/test_gpt54_defaults_config.py` (25) -- exact model ids, the
+complete 6-stage default matrix, idempotency (including a real cross-command interaction bug this
+work found: running `configure_openrouter_free_router` after `configure_gpt54_defaults` raised a
+`ValidationError` over a stale `default_reasoning_effort`, fixed in
+`openrouter_free_router.py` and proven not to regress under either invocation order), no stale
+Z.ai/legacy-GPT-5 default, no automatic fallback, historical `LLMCallLog` preservation, and the
+management command's `--dry-run`/real-run output. `llm_provider/tests/test_reasoning_selection.py`
+(15) -- the same three-step precedence `test_model_selection.py` proves for the model, now for
+reasoning effort: stage default used absent an override, explicit override (including explicit
+`NONE`) takes precedence and never mutates the stored default, an explicit reasoning request
+incompatible with the resolved model is rejected (both when the *model* was explicitly overridden
+and when only the stage's own configured default reasoning was left in place against an overridden
+model), `adapter.effective_reasoning_effort` exposure, and persistence to
+`LLMCallLog.reasoning_effort`. `llm_provider/tests/test_console.py` (11) -- the M5/M6 stage-console
+service (`llm_provider.services.console.build_stage_card`): truthfully-known paid/free detection
+(`openrouter/free`/`:free`-suffixed ids are free, both GPT-5.4 models are never described as free,
+an unknown model reports `None` rather than guessing), `correlation_id`-scoped attempt history
+(one application's card never shows another application's attempt, and shows none at all when no
+`correlation_id` is given rather than falling back to "the global latest call for this stage"),
+attempt numbering, and sanitized error category + actionable guidance on a failed attempt. Plus
+required-review-note-on-rejection coverage added to `reviews/tests/test_gate1_services.py`,
+`test_gate2_services.py`, `test_views.py`, `test_gate2_views.py` (blank/whitespace-only feedback
+`comments` rejected before any re-run, at both the service and view layer). Every pre-existing
+test-only stub that replaces `get_adapter_for_stage`/`expand_requirements_for_search`/
+`rank_relevance` across `candidate_matching`/`job_intake`/`resume_builder`'s test factories was
+updated to accept the new `requested_reasoning_effort`/`correlation_id` keyword arguments the real
+call sites now pass, with zero change to what any of them scripts. Full suite after this decision:
+1300/1300 passing; `manage.py check`/`makemigrations --check --dry-run` clean; `ruff check .`
+clean. Applied to the real local development database, idempotency proven directly against it.
+Live qualification remains deliberately deferred to the later, separately authorized M5/M6 run.
+
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").
 That is a manual review activity at each milestone's acceptance walkthrough, not a unit test —

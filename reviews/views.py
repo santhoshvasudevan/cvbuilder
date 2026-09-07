@@ -19,9 +19,15 @@ from job_applications.models import (
 from job_intake.services.fetch import FetchError
 from job_intake.services.intake import AnalysisFailedError, IntakeValidationError
 from job_intake.services.intake import ConcurrentModificationError as JraConcurrentModificationError
-from llm_provider.models import StageModelAssignment
+from llm_provider.models import ReasoningEffort, StageModelAssignment
+from llm_provider.services.console import build_stage_card
 from llm_provider.services.eligibility import eligible_models_for_stage, model_display_label
-from llm_provider.services.model_selection import ModelNotEligibleForStageError, parse_requested_model_id
+from llm_provider.services.model_selection import (
+    ModelNotEligibleForStageError,
+    ReasoningNotEligibleForStageError,
+    parse_requested_model_id,
+    parse_requested_reasoning_effort,
+)
 from resume_builder.services.build import (
     ConcurrentModificationError as ResumeDraftConcurrentModificationError,
 )
@@ -47,6 +53,14 @@ GATE1_MODEL_STAGES = (
 GATE2_MODEL_STAGES = (StageModelAssignment.Stage.AB_BUILD,)
 
 
+def _stage_cards(application: JobApplication, stages) -> dict:
+    """Builds the operator-facing stage-card context (attempt history, tokens, latency, paid/free,
+    sanitized error guidance -- CLAUDE.md's M5/M6 stage-console requirement) for every stage in
+    `stages`, scoped to this one `application`'s own attempts."""
+    correlation_id = str(application.pk)
+    return {stage: build_stage_card(stage, correlation_id=correlation_id) for stage in stages}
+
+
 def _stage_model_choices(stages) -> dict:
     """Builds the per-stage selector context (`{stage: {"choices": [...], "current_default":
     model_or_None}}`) both gate templates render one `<select>` from -- one shared helper so
@@ -68,6 +82,26 @@ def _stage_model_choices(stages) -> dict:
     return context
 
 
+def _stage_reasoning_choices(stages) -> dict:
+    """Mirrors `_stage_model_choices` for the reasoning-effort selector (2026-09-07, paid GPT-5.4
+    model defaults): one `<select>` per stage, always offering the complete `ReasoningEffort` enum
+    (the resolved model may not support reasoning at all, but that is enforced server-side at
+    execution time -- `llm_provider.services.model_selection.resolve_stage_model` -- never by
+    hiding the selector, since the model itself may also be about to be overridden in the same
+    submission)."""
+    context = {}
+    for stage in stages:
+        default_assignment = StageModelAssignment.objects.filter(stage=stage).first()
+        default_effort = default_assignment.default_reasoning_effort if default_assignment else ""
+        choices = []
+        for value, label in ReasoningEffort.choices:
+            if value == default_effort:
+                label = f"{label} [Default]"
+            choices.append((value, label))
+        context[stage] = {"choices": choices, "current_default": default_effort}
+    return context
+
+
 @require_http_methods(["GET", "POST"])
 def gate1_view(request, application_id: int):
     application = get_object_or_404(JobApplication, pk=application_id)
@@ -78,6 +112,12 @@ def gate1_view(request, application_id: int):
         StageModelAssignment.Stage.AC_RANK: request.POST.get("model_ac_rank", ""),
         StageModelAssignment.Stage.AC_MATCH: request.POST.get("model_ac_match", ""),
         StageModelAssignment.Stage.AJ_ANALYZE: request.POST.get("model_aj", ""),
+    }
+    submitted_reasoning = {
+        StageModelAssignment.Stage.AC_NORMALIZE: request.POST.get("reasoning_ac_normalize", ""),
+        StageModelAssignment.Stage.AC_RANK: request.POST.get("reasoning_ac_rank", ""),
+        StageModelAssignment.Stage.AC_MATCH: request.POST.get("reasoning_ac_match", ""),
+        StageModelAssignment.Stage.AJ_ANALYZE: request.POST.get("reasoning_aj", ""),
     }
 
     if request.method == "POST":
@@ -91,8 +131,20 @@ def gate1_view(request, application_id: int):
                     StageModelAssignment.Stage.AC_MATCH,
                 )
             }
+            ac_requested_reasoning = {
+                stage: parse_requested_reasoning_effort(submitted_reasoning[stage])
+                for stage in (
+                    StageModelAssignment.Stage.AC_NORMALIZE,
+                    StageModelAssignment.Stage.AC_RANK,
+                    StageModelAssignment.Stage.AC_MATCH,
+                )
+            }
             if action == "run_ac":
-                run_agent_candidate(application, requested_models=ac_requested_models)
+                run_agent_candidate(
+                    application,
+                    requested_models=ac_requested_models,
+                    requested_reasoning_efforts=ac_requested_reasoning,
+                )
                 messages.success(request, "Agent Candidate assessment produced.")
             elif action == "feedback":
                 target = request.POST.get("target", "")
@@ -106,7 +158,11 @@ def gate1_view(request, application_id: int):
                     requested_model_id=parse_requested_model_id(
                         submitted_models[StageModelAssignment.Stage.AJ_ANALYZE]
                     ),
+                    requested_reasoning_effort=parse_requested_reasoning_effort(
+                        submitted_reasoning[StageModelAssignment.Stage.AJ_ANALYZE]
+                    ),
                     requested_models=ac_requested_models,
+                    requested_reasoning_efforts=ac_requested_reasoning,
                 )
                 messages.success(request, f"Feedback recorded and {target} re-run.")
             elif action == "approve":
@@ -126,6 +182,7 @@ def gate1_view(request, application_id: int):
             FitAssessmentConcurrentModificationError,
             JraConcurrentModificationError,
             ModelNotEligibleForStageError,
+            ReasoningNotEligibleForStageError,
         ) as exc:
             error = str(exc)
         except FetchError as exc:
@@ -170,6 +227,9 @@ def gate1_view(request, application_id: int):
             "error": error,
             "model_stages": _stage_model_choices(GATE1_MODEL_STAGES),
             "submitted_models": submitted_models,
+            "reasoning_stages": _stage_reasoning_choices(GATE1_MODEL_STAGES),
+            "submitted_reasoning": submitted_reasoning,
+            "stage_cards": _stage_cards(application, GATE1_MODEL_STAGES),
         },
     )
 
@@ -179,19 +239,26 @@ def gate2_view(request, application_id: int):
     application = get_object_or_404(JobApplication, pk=application_id)
     error = None
     submitted_model_ab = request.POST.get("model_ab", "")
+    submitted_reasoning_ab = request.POST.get("reasoning_ab", "")
 
     if request.method == "POST":
         action = request.POST.get("action")
         try:
             requested_model_id = parse_requested_model_id(submitted_model_ab)
+            requested_reasoning_effort = parse_requested_reasoning_effort(submitted_reasoning_ab)
             if action == "run_ab":
-                run_agent_builder(application, requested_model_id=requested_model_id)
+                run_agent_builder(
+                    application,
+                    requested_model_id=requested_model_id,
+                    requested_reasoning_effort=requested_reasoning_effort,
+                )
                 messages.success(request, "Agent Builder draft produced.")
             elif action == "feedback":
                 submit_gate2_feedback(
                     application,
                     comments=request.POST.get("comments", ""),
                     requested_model_id=requested_model_id,
+                    requested_reasoning_effort=requested_reasoning_effort,
                 )
                 messages.success(request, "Feedback recorded and Agent Builder re-run.")
             elif action == "approve":
@@ -207,6 +274,8 @@ def gate2_view(request, application_id: int):
             StaleAssessmentError,
             ResumeDraftConcurrentModificationError,
             ModelNotEligibleForStageError,
+            ReasoningNotEligibleForStageError,
+            FeedbackTargetError,
         ) as exc:
             error = str(exc)
 
@@ -274,5 +343,8 @@ def gate2_view(request, application_id: int):
             "error": error,
             "model_stages": _stage_model_choices(GATE2_MODEL_STAGES),
             "submitted_model_ab": submitted_model_ab,
+            "reasoning_stages": _stage_reasoning_choices(GATE2_MODEL_STAGES),
+            "submitted_reasoning_ab": submitted_reasoning_ab,
+            "stage_cards": _stage_cards(application, GATE2_MODEL_STAGES),
         },
     )

@@ -5,7 +5,14 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from job_applications.models import JobApplication
-from llm_provider.services.model_selection import ModelNotEligibleForStageError, parse_requested_model_id
+from llm_provider.models import StageModelAssignment
+from llm_provider.services.console import build_stage_card
+from llm_provider.services.model_selection import (
+    ModelNotEligibleForStageError,
+    ReasoningNotEligibleForStageError,
+    parse_requested_model_id,
+    parse_requested_reasoning_effort,
+)
 
 from .forms import JobPostingIntakeForm
 from .models import JobRequirement
@@ -26,7 +33,8 @@ def intake_view(request):
 
     try:
         requested_model_id = parse_requested_model_id(form.cleaned_data["model_aj"])
-    except ModelNotEligibleForStageError as exc:
+        requested_reasoning_effort = parse_requested_reasoning_effort(form.cleaned_data["reasoning_aj"])
+    except (ModelNotEligibleForStageError, ReasoningNotEligibleForStageError) as exc:
         return render(
             request, "job_intake/intake.html",
             {"form": form, "error": str(exc)},
@@ -47,7 +55,11 @@ def intake_view(request):
             request, "job_intake/intake.html",
             {
                 "form": JobPostingIntakeForm(
-                    initial={"url": submitted_url, "model_aj": form.cleaned_data["model_aj"]}
+                    initial={
+                        "url": submitted_url,
+                        "model_aj": form.cleaned_data["model_aj"],
+                        "reasoning_aj": form.cleaned_data["reasoning_aj"],
+                    }
                 ),
                 "fetch_error": exc.safe_message,
                 "offer_paste_fallback": True,
@@ -55,13 +67,21 @@ def intake_view(request):
         )
 
     try:
-        application = run_intake(resolved, requested_model_id=requested_model_id)
-    except (AnalysisFailedError, ModelNotEligibleForStageError) as exc:
+        application = run_intake(
+            resolved,
+            requested_model_id=requested_model_id,
+            requested_reasoning_effort=requested_reasoning_effort,
+        )
+    except (AnalysisFailedError, ModelNotEligibleForStageError, ReasoningNotEligibleForStageError) as exc:
         return render(
             request, "job_intake/intake.html",
             {
                 "form": JobPostingIntakeForm(
-                    initial={"url": submitted_url, "model_aj": form.cleaned_data["model_aj"]}
+                    initial={
+                        "url": submitted_url,
+                        "model_aj": form.cleaned_data["model_aj"],
+                        "reasoning_aj": form.cleaned_data["reasoning_aj"],
+                    }
                 ),
                 "error": f"Analysis failed: {exc}",
             },
@@ -81,12 +101,24 @@ def analysis_detail_view(request, application_id: int):
     # id=9): a JRA with no requirements has nothing for Gate 1/Agent Candidate to assess and is
     # flagged here rather than only failing later when M5 is attempted.
     is_incomplete = jra is not None and not requirements.exists()
+    stage_card = build_stage_card(
+        StageModelAssignment.Stage.AJ_ANALYZE, correlation_id=str(application.pk)
+    )
+    requirements_by_category = {category: [] for category in JobRequirement.Category.values}
+    for requirement in requirements:
+        requirements_by_category[requirement.category].append(requirement)
     return render(
         request, "job_intake/analysis_detail.html",
         {
             "application": application,
             "jra": jra,
             "requirements": requirements,
+            "mandatory_requirements": requirements_by_category[JobRequirement.Category.MANDATORY],
+            "preferred_requirements": requirements_by_category[JobRequirement.Category.PREFERRED],
+            "responsibilities": requirements_by_category[JobRequirement.Category.RESPONSIBILITY],
+            "ats_signals": requirements_by_category[JobRequirement.Category.ATS_SIGNAL],
+            "implied_expectations": requirements_by_category[JobRequirement.Category.IMPLIED_EXPECTATION],
             "is_incomplete": is_incomplete,
+            "stage_card": stage_card,
         },
     )

@@ -103,7 +103,12 @@ def resolve_posting_source(*, url: str, pasted_text: str) -> ResolvedSource:
     )
 
 
-def run_intake(resolved: ResolvedSource, *, requested_model_id: int | None = None) -> JobApplication:
+def run_intake(
+    resolved: ResolvedSource,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+) -> JobApplication:
     """Runs the AJ analysis call first, entirely outside any transaction, so its `LLMCallLog`
     audit row (written inside `BaseLLMAdapter.generate()`) commits independently of whatever
     happens afterward -- every provider call must be logged regardless of whether the surrounding
@@ -117,7 +122,11 @@ def run_intake(resolved: ResolvedSource, *, requested_model_id: int | None = Non
     behind, because nothing in this block is visible to any other transaction until it all
     succeeds.
     """
-    result = analyze_posting(resolved.extracted_text, requested_model_id=requested_model_id)
+    result = analyze_posting(
+        resolved.extracted_text,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
+    )
     if result.is_error:
         raise AnalysisFailedError(result.error.message)
     analysis = result.content
@@ -173,6 +182,7 @@ def rerun_analysis(
     url: str = "",
     pasted_text: str = "",
     requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
 ) -> JobRequirementAnalysis:
     """Gate-1 feedback re-run targeting Agent Jobber (M5): creates a new, append-only
     JobRequirementAnalysis version for an application that already has one, and repoints
@@ -196,7 +206,12 @@ def rerun_analysis(
     else:
         resolved = resolve_posting_source(url="", pasted_text=current.original_input)
 
-    result = analyze_posting(resolved.extracted_text, requested_model_id=requested_model_id)
+    result = analyze_posting(
+        resolved.extracted_text,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
+        correlation_id=str(application.pk),
+    )
     if result.is_error:
         raise AnalysisFailedError(result.error.message)
     analysis = result.content

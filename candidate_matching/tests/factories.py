@@ -118,7 +118,7 @@ def scripted_assessment(fixed_response: dict):
     in the wrapped block returns `fixed_response`, via the real `FakeAdapter`."""
     model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_MATCH)
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with mock.patch("candidate_matching.services.assess.get_adapter_for_stage", _get_adapter_for_stage):
@@ -135,7 +135,14 @@ def stub_identity_normalization():
     use `scripted_normalization` instead, which routes through the real adapter/schema."""
     from candidate_matching.schemas import RequirementNormalizationItem
 
-    def _identity(requirements, *, posting_language, requested_model_id=None):
+    def _identity(
+        requirements,
+        *,
+        posting_language,
+        requested_model_id=None,
+        requested_reasoning_effort=None,
+        correlation_id=None,
+    ):
         return {
             requirement["requirement_id"]: RequirementNormalizationItem(
                 requirement_id=requirement["requirement_id"],
@@ -163,7 +170,7 @@ def scripted_normalization(fixed_response: dict):
     `stub_identity_normalization`'s bypass."""
     model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_NORMALIZE)
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with mock.patch("candidate_matching.services.normalize.get_adapter_for_stage", _get_adapter_for_stage):
@@ -178,7 +185,7 @@ def scripted_ranking(fixed_response: dict):
     to prove a fabricated or missing-requirement ranking result is handled correctly)."""
     model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_RANK)
 
-    def _get_adapter_for_stage(stage, *, requested_model_id=None):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None, requested_reasoning_effort=None):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with stub_identity_normalization():
@@ -199,7 +206,14 @@ def scripted_ranking_selecting_all():
     test."""
     model = make_fake_stage_assignment(stage=StageModelAssignment.Stage.AC_RANK)
 
-    def _fake_rank_relevance(candidate_pool, requirements, *, requested_model_id=None):
+    def _fake_rank_relevance(
+        candidate_pool,
+        requirements,
+        *,
+        requested_model_id=None,
+        requested_reasoning_effort=None,
+        correlation_id=None,
+    ):
         from candidate_matching.services.rank import build_request
 
         fixed_response = {

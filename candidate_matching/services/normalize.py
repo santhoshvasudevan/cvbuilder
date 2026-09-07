@@ -84,6 +84,8 @@ def build_request(
     *,
     posting_language: str,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMRequest:
     """`requirements` items must supply only `requirement_id`/`text` -- callers (`bounded_
     retrieval.py`) are responsible for never passing a dict with any other key (category,
@@ -101,30 +103,42 @@ def build_request(
         output_schema=RequirementNormalizationOutput,
         temperature=0.0,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        correlation_id=correlation_id,
     )
 
 
 def expand_requirements_for_search(
-    requirements: list[dict], *, posting_language: str, requested_model_id: int | None = None
+    requirements: list[dict],
+    *,
+    posting_language: str,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> dict[str, RequirementNormalizationItem]:
     """The orchestration entry point `bounded_retrieval.py` calls. Returns one
     `RequirementNormalizationItem` per input requirement, keyed by `requirement_id`. Raises
     `NormalizationFailedError` rather than ever returning a partial or degraded result.
 
-    `requested_model_id`, when given, is a per-run operator override for this one call
-    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
+    `requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for this one call (2026-09-07, per-run model selection; paid GPT-5.4 model
+    defaults) -- never persisted as a new stage default."""
     if not requirements:
         return {}
 
     input_ids = [requirement["requirement_id"] for requirement in requirements]
 
     adapter = get_adapter_for_stage(
-        StageModelAssignment.Stage.AC_NORMALIZE, requested_model_id=requested_model_id
+        StageModelAssignment.Stage.AC_NORMALIZE,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
     )
     request = build_request(
         requirements,
         posting_language=posting_language,
         max_output_tokens=adapter.effective_max_output_tokens,
+        reasoning_effort=adapter.effective_reasoning_effort,
+        correlation_id=correlation_id,
     )
     result: NormalizedLLMResult = adapter.generate(request)
 

@@ -49,11 +49,25 @@ from ..models import LLMModel, LLMProvider, StageModelAssignment
 STRUCTURED_OUTPUT_STAGES: frozenset[str] = frozenset(StageModelAssignment.Stage.values)
 
 
-def eligible_models_for_stage(stage: str) -> QuerySet[LLMModel]:
+def eligible_models_for_stage(
+    stage: str, *, reasoning_effort: str | None = None
+) -> QuerySet[LLMModel]:
     """Returns the queryset of `LLMModel` rows selectable for `stage` -- by an operator in the
     AJ/AC/AB UI, and by `llm_provider.services.model_selection.resolve_stage_model` when
     validating an explicit per-run override. Ordered deterministically (provider name, then model
-    id) so the UI and any test asserting on order stay stable."""
+    id) so the UI and any test asserting on order stay stable.
+
+    `reasoning_effort`, when given as any truthy value -- including `ReasoningEffort.NONE`
+    ("none"), which is itself a real reasoning request (2026-09-07, paid GPT-5.4 model defaults) --
+    additionally requires `supports_reasoning=True`, mirroring exactly the guard every adapter
+    applies (`request.reasoning_effort is not None` is enough to trigger the "not registered as
+    supporting reasoning" CONFIGURATION error in `llm_provider/adapters/openai.py`/`openrouter.py`,
+    regardless of which of the five `ReasoningEffort` values was requested). A model that cannot
+    honor the requested reasoning level is excluded from the result entirely, never merely flagged,
+    so the same filter that decides what a selector offers also decides what
+    `resolve_stage_model`'s per-run validation will accept. Only a blank/`None` value (the default
+    -- "say nothing about reasoning at all") applies no reasoning-capability filter, since that is
+    the one case no adapter guard fires for regardless of `supports_reasoning`."""
     queryset = (
         LLMModel.objects.select_related("provider")
         .filter(is_active=True, provider__is_active=True)
@@ -62,6 +76,8 @@ def eligible_models_for_stage(stage: str) -> QuerySet[LLMModel]:
     if stage in STRUCTURED_OUTPUT_STAGES:
         queryset = queryset.filter(supports_structured_output=True)
     queryset = queryset.exclude(provider__credential_env_var="")
+    if reasoning_effort:
+        queryset = queryset.filter(supports_reasoning=True)
     return queryset.order_by("provider__name", "model_id")
 
 

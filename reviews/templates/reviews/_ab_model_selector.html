@@ -1,6 +1,6 @@
 {% comment %}
-Agent Builder's single LLM call (AB_BUILD, 2026-09-07 per-run model selection). Included from
-every form on gate2.html that (re)runs Agent Builder.
+Agent Builder's single LLM call (AB_BUILD, 2026-09-07 per-run model selection; reasoning-effort
+override, D-039). Included from every form on gate2.html that (re)runs Agent Builder.
 {% endcomment %}
 <p>
   <label for="id_model_ab">Agent Builder model (optional override)</label><br>
@@ -8,6 +8,13 @@ every form on gate2.html that (re)runs Agent Builder.
     <option value="" {% if not submitted_model_ab %}selected{% endif %}>System default</option>
     {% for value, label in model_stages.AB_BUILD.choices %}
     <option value="{{ value }}" {% if submitted_model_ab == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <label for="id_reasoning_ab">reasoning effort</label>
+  <select name="reasoning_ab" id="id_reasoning_ab">
+    <option value="" {% if not submitted_reasoning_ab %}selected{% endif %}>System default</option>
+    {% for value, label in reasoning_stages.AB_BUILD.choices %}
+    <option value="{{ value }}" {% if submitted_reasoning_ab == value %}selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
 </p>

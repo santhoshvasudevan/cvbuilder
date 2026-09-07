@@ -42,9 +42,15 @@ class ConcurrentModificationError(Exception):
     rationale, same (effectively unreachable given the `select_for_update()` lock) safety net."""
 
 
-def build_resume_draft(job_application, *, requested_model_id: int | None = None) -> ResumeDraft:
-    """`requested_model_id`, when given, is a per-run operator override for AB_BUILD (2026-09-07,
-    per-run model selection) -- never persisted as a new stage default."""
+def build_resume_draft(
+    job_application,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+) -> ResumeDraft:
+    """`requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for AB_BUILD (2026-09-07, per-run model selection; paid GPT-5.4 model defaults) --
+    never persisted as a new stage default."""
     fit_assessment = job_application.current_fit_assessment
     if fit_assessment is None:
         raise ResumeBuilderError(
@@ -70,7 +76,12 @@ def build_resume_draft(job_application, *, requested_model_id: int | None = None
 
     try:
         llm_result = generate_resume_content(
-            jra, requirement_assessments, retrieval, requested_model_id=requested_model_id
+            jra,
+            requirement_assessments,
+            retrieval,
+            requested_model_id=requested_model_id,
+            requested_reasoning_effort=requested_reasoning_effort,
+            correlation_id=str(job_application.pk),
         )
     except RetrievalBudgetExceededError as exc:
         raise ResumeBuilderError(str(exc)) from exc

@@ -38,6 +38,17 @@ class SubmitGate1FeedbackTests(TestCase):
         with self.assertRaises(FeedbackTargetError):
             submit_gate1_feedback(self.application, target="AB", comments="wrong gate")
 
+    def test_blank_comments_are_rejected_before_any_rerun(self):
+        """CLAUDE.md: rejecting a stage's output must require a review note -- proven here by
+        checking no new FitAssessment version is created when the required comment is missing."""
+        with self.assertRaises(FeedbackTargetError):
+            submit_gate1_feedback(self.application, target=ReviewFeedback.Target.AC, comments="")
+        self.assertEqual(self.application.fit_assessments.count(), 0)
+
+    def test_whitespace_only_comments_are_also_rejected(self):
+        with self.assertRaises(FeedbackTargetError):
+            submit_gate1_feedback(self.application, target=ReviewFeedback.Target.AC, comments="   ")
+
     def test_ac_feedback_records_row_and_creates_new_fit_assessment_version(self):
         with scripted_agent_candidate(valid_assessment_response()):
             submit_gate1_feedback(self.application, target=ReviewFeedback.Target.AC, comments="please redo")

@@ -2565,3 +2565,232 @@ additive, with a fixed three-step precedence and no hidden fallback --
 - **Live qualification**: still **not attempted** -- explicitly and deliberately deferred by the
   operator to the later, separately authorized M5/M6 run (see point 6 above). Not a completion
   criterion for this update.
+
+## D-039: Paid GPT-5.4 model defaults via OpenRouter, per-stage reasoning-effort configuration, and a complete M5/M6 stage-console UI
+
+- **Status**: **ACCEPTED** (2026-09-07) -- operator-directed from the outset (the task explicitly
+  authorized implementation, real-database application, and documentation in one session; live
+  provider execution was explicitly and deliberately excluded from this decision's scope). No
+  `JobApplication`, `JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`, `CandidateMemory`, or
+  Gate state was touched -- this decision is scoped to the `llm_provider` registry/adapter layer,
+  the reasoning-effort selection architecture, the AJ/AC/AB stage-console UI, and documentation.
+- **Context**: D-038 made `openrouter/free` the default for every currently implemented stage
+  (`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD`) and introduced
+  per-run *model* selection with a fixed precedence (explicit override -> stage default -> typed
+  failure) and a shared eligibility service. This decision supersedes the free-router *default*
+  (never the free router itself, which stays active and selectable) with a real, paid,
+  per-stage-tuned model+reasoning matrix, and extends the same architecture (never a parallel one)
+  to cover reasoning effort as a first-class, independently-selectable dimension alongside model.
+- **Why GPT-5.4 Mini for extraction/analysis, GPT-5.4 for matching/ranking/writing**: `MEMORY_BUILD`
+  (Candidate Memory chunk extraction), `AJ_ANALYZE` (job-posting analysis), and `AC_NORMALIZE`
+  (bounded requirement normalization) are structured-extraction tasks over a bounded, well-scoped
+  input -- classification and faithful restatement, not open-ended judgment -- so the cheaper Mini
+  model at medium reasoning is the operator-approved choice. `AC_MATCH` (fit-disposition judgment)
+  and `AC_RANK` (relevance judgment) are the two stages where getting a nuanced judgment right
+  matters most (a wrong disposition either fabricates a match or wrongly conceals a real one, both
+  invariants CLAUDE.md treats as non-negotiable) -- both get the full model at high reasoning.
+  `AB_BUILD` (resume content generation) is structured writing constrained by an already-judged
+  fit assessment, not open-ended judgment itself, so it gets the full model at medium reasoning --
+  strong enough for faithful, well-positioned prose, without paying for maximal reasoning depth on
+  a task that is fundamentally about assembling and phrasing already-vetted evidence.
+- **Exact stage defaults** (`llm_provider/services/gpt54_defaults.py::STAGE_DEFAULT_MATRIX`):
+
+  | Stage | Model (OpenRouter id) | Reasoning |
+  | --- | --- | --- |
+  | `MEMORY_BUILD` | `openai/gpt-5.4-mini` | `medium` |
+  | `AJ_ANALYZE` | `openai/gpt-5.4-mini` | `medium` |
+  | `AC_NORMALIZE` | `openai/gpt-5.4-mini` | `medium` |
+  | `AC_MATCH` | `openai/gpt-5.4` | `high` |
+  | `AC_RANK` | `openai/gpt-5.4` | `high` |
+  | `AB_BUILD` | `openai/gpt-5.4` | `medium` |
+
+  Both are **paid** OpenRouter models -- never described as free anywhere in code, admin, or UI.
+  The exact OpenRouter-routed identifiers (never the direct-OpenAI identifiers `gpt-5.4-mini`/
+  `gpt-5.4`, and never split/reconstructed/double-prefixed -- `LLMModel.model_id` remains an opaque
+  string placed directly into the request body, unchanged since D-038) are `openai/gpt-5.4-mini`
+  and `openai/gpt-5.4`.
+- **Alternatives remain explicit, never an automatic fallback**: `openrouter/free` stays active and
+  selectable (its `LLMModel`/`StageModelAssignment` rows are never touched by this decision's own
+  configuration command -- only which model each stage's assignment *points at* changes); every
+  eligible NVIDIA/Gemini/direct-OpenAI model stays active and selectable; the retired Z.ai/GLM
+  model stays inactive (D-038) and unassigned. A model changes only when an operator explicitly
+  selects it for one run or reassigns a stage default via the registry admin -- there is no
+  provider/model fallback chain anywhere in this codebase (proven by
+  `NoAutomaticFallbackTests`/`NoStaleOrLegacyDefaultTests`,
+  `llm_provider/tests/test_gpt54_defaults_config.py`).
+- **Reasoning-effort architecture (new)**: a second, independent selection dimension alongside the
+  existing per-run model selection, with the identical three-step precedence (explicit per-run
+  override -> stage default -> no reasoning requested) and no hidden default:
+  - `llm_provider.models.ReasoningEffort` (new `TextChoices`, migration
+    `llm_provider.0010_default_reasoning_effort`): `NONE`/`LOW`/`MEDIUM`/`HIGH`/`XHIGH` -- the
+    exact vocabulary OpenRouter's own unified `reasoning.effort` wire parameter uses
+    (openrouter.ai/docs/use-cases/reasoning-tokens), so the registry, the UI selector, and the wire
+    payload never need a separate translation table for level names.
+  - `StageModelAssignment.default_reasoning_effort` (new, blank `CharField`, same migration):
+    blank means "send no `reasoning` key at all" (the model/provider's own default behavior);
+    `ReasoningEffort.NONE` ("none") is a *different*, real value -- explicitly disables reasoning on
+    a reasoning-capable model, matching OpenRouter's own documented distinction between omitting
+    the `reasoning` key and sending `{"effort": "none"}`. `StageModelAssignment.clean()` rejects a
+    non-blank, non-`NONE` value unless the assigned model is registered `supports_reasoning=True`.
+  - `LLMCallLog.reasoning_effort` (new, same migration): the resolved value actually sent for that
+    call, mirroring `selection_source`'s audit role for the model -- set by
+    `BaseLLMAdapter._write_call_log` from `NormalizedLLMRequest.reasoning_effort`, never guessed.
+  - `llm_provider.services.model_selection.resolve_stage_model` gained `requested_reasoning_effort`
+    (mirroring `requested_model_id`) and `parse_requested_reasoning_effort` (mirroring
+    `parse_requested_model_id`); `StageModelSelection` gained a `reasoning_effort` field. Resolution
+    is re-validated against whichever *model* actually resolved (`ReasoningNotEligibleForStageError`
+    if incompatible) -- this can fire even when neither value was individually invalid (e.g. an
+    operator overrides only the model to a non-reasoning one while the stage's own configured
+    reasoning default is still a real effort level): a typed, actionable failure, never a silent
+    reasoning drop and a call sent anyway.
+  - `llm_provider.services.eligibility.eligible_models_for_stage` gained an optional
+    `reasoning_effort` parameter: any truthy value (including `ReasoningEffort.NONE`, itself a real
+    reasoning request) additionally requires `supports_reasoning=True`, mirroring exactly the guard
+    every adapter applies -- the same filter that decides what a selector offers also decides what
+    server-side resolution will accept.
+  - `llm_provider.adapters.get_adapter_for_stage` gained `requested_reasoning_effort` and exposes
+    the resolved value as `adapter.effective_reasoning_effort` (mirroring
+    `effective_max_output_tokens`'s existing pattern) -- every pipeline service reads this into its
+    `NormalizedLLMRequest.reasoning_effort` rather than hard-coding one.
+  - `llm_provider.adapters.openrouter.OpenRouterAdapter` translates `request.reasoning_effort`
+    (when set) to `{"reasoning": {"effort": <value>}}` -- taking precedence over the pre-existing,
+    still-supported plain `request.reasoning_enabled` boolean form (`{"reasoning": {"enabled":
+    true}}`, used by a model with no graduated effort levels); the two are never sent together. A
+    reasoning request (effort or `enabled`) against a model not registered `supports_reasoning=True`
+    is still rejected before any HTTP call, exactly as before this decision.
+- **Idempotent configuration mechanism** (`llm_provider/services/gpt54_defaults.py`, thin wrapper
+  `manage.py configure_gpt54_defaults [--dry-run]`, same pattern as D-038's
+  `configure_openrouter_free_router`): finds-or-creates the OpenRouter `LLMProvider` row (shared
+  with, never duplicated from, `configure_openrouter_free_router`'s own row);
+  finds-or-creates active `openai/gpt-5.4-mini`/`openai/gpt-5.4` `LLMModel` rows with
+  `supports_structured_output=True`, `supports_reasoning=True`, `supports_streaming=False` (this
+  codebase never streams a response regardless of a model's own streaming capability -- every
+  adapter, including `OpenRouterAdapter`, sends `stream: false` unconditionally), and a
+  conservative `max_output_tokens=8192` (the exact same value D-038's free-router migration already
+  established as this codebase's known-good ceiling -- "without unnecessarily increasing the
+  application's current per-call output budget"); converges all six `StageModelAssignment` rows to
+  `STAGE_DEFAULT_MATRIX`'s model+reasoning pair, whatever they previously pointed at. Never touches
+  `openrouter/free`, any NVIDIA/Gemini/direct-OpenAI model, or the retired Z.ai row. One
+  `transaction.atomic()` block; `--dry-run` performs the same writes and unconditionally rolls
+  back; safe to run repeatedly (a second run reports no further changes).
+  - **Cross-command interaction bug found and fixed during this work**: running
+    `configure_openrouter_free_router` *after* `configure_gpt54_defaults` (e.g. an operator
+    temporarily reverting a stage to the free tier for cost reasons) raised a `ValidationError` --
+    the free-router command reassigned a stage's *model* to `openrouter/free` without clearing the
+    now-incompatible `default_reasoning_effort` a prior `configure_gpt54_defaults` run had set,
+    and the new `StageModelAssignment.clean()` rule (`default_reasoning_effort` requires
+    `supports_reasoning=True`) correctly rejected the inconsistent row.
+    `configure_openrouter_free_router` now also clears `default_reasoning_effort` whenever it
+    reassigns (or re-affirms) a stage onto the free router, since `openrouter/free` is never
+    reasoning-capable -- proven by
+    `InteractionWithFreeRouterMigrationTests.test_reverse_order_last_command_wins_cleanly_with_no_stale_reasoning_default`.
+    Running the two commands in either order, any number of times, now always converges cleanly.
+- **M5/M6 stage-console UI** (operator-facing execution/inspection, on the existing
+  `job_intake`/`reviews` workflow routes -- no new app, no disconnected demonstration UI):
+  - `llm_provider/services/console.py` (new): `build_stage_card(stage, correlation_id=None)` is the
+    one read-only function every AJ/AC/AB inspection view calls for a stage's card -- global
+    default model+reasoning, effective model+reasoning (what the latest attempt for *this specific
+    application* actually used, via `LLMCallLog.correlation_id`, falling back to the configured
+    default when nothing has run yet), truthfully-known paid/free status (`is_free_model`, based on
+    this codebase's own free-tier naming convention -- `openrouter/free` and any `:free`-suffixed
+    id -- never a guess about real provider pricing), output-token budget, attempt count, and the
+    latest attempt's full audit trail (attempt number, completion time, latency, retry count,
+    requested-model label, OpenRouter-resolved model, reasoning effort used, finish reason, token
+    usage, or a sanitized error category with short actionable operator guidance). Never renders a
+    raw prompt, a raw provider response body, or unsanitized exception text -- only already-
+    sanitized `LLMCallLog` fields. Rendered via a shared partial
+    (`llm_provider/templates/llm_provider/_stage_card.html`) included from `reviews/templates/
+    reviews/gate1.html`, `gate2.html`, and `job_intake/templates/job_intake/analysis_detail.html`.
+  - `correlation_id` (pre-existing plumbing from D-038, never wired until now) is threaded through
+    all six pipeline call sites (`candidate_memory/services/extraction.py`,
+    `job_intake/services/analyze.py`+`intake.py`, `candidate_matching/services/{normalize,rank,
+    assess,bounded_retrieval,fit_assessment}.py`, `resume_builder/services/{generate,build}.py`) as
+    `str(job_application.pk)` wherever a `JobApplication` already exists at call time (every call
+    except the very first Agent Jobber analysis for a brand-new application, which has no id yet --
+    that one `LLMCallLog` row stays blank in this field, exactly as it already did before this
+    decision, and is a pre-existing, documented, non-blocking limitation, not a regression).
+  - Every AJ/AC/AB model selector (`job_intake/forms.py`'s `JobPostingIntakeForm`,
+    `reviews/templates/reviews/_ac_model_selectors.html`, `_ab_model_selector.html`) gained a
+    parallel reasoning-effort `<select>` (System default + the five `ReasoningEffort` choices,
+    current stage default marked `[Default]`), submitted and server-re-validated exactly like the
+    existing model selector -- an explicit selection applies only to that one run, is never
+    persisted as a new stage default, and is recorded on `LLMCallLog.reasoning_effort`.
+  - Rejecting a stage's output now requires a review note: `reviews.services.submit_gate1_feedback`/
+    `submit_gate2_feedback` raise `FeedbackTargetError` for blank/whitespace-only `comments` before
+    any re-run, and the view surfaces this as a form-level error (CLAUDE.md's "rejecting a stage
+    must require a review note where current rules require one").
+  - A clear paid-call warning (a native `confirm()` dialog naming what will run and that it may be
+    paid, keyboard-accessible by default) precedes every state-changing AJ/AC/AB form submission
+    (`job_intake/templates/job_intake/intake.html`, `reviews/templates/reviews/gate1.html`,
+    `gate2.html`) -- no stage runs merely because a page opens, and completing one stage never
+    auto-triggers the next paid stage; every existing POST-then-redirect-on-success pattern (D-038
+    and earlier) is unchanged, so a page refresh still cannot repeat a provider call.
+  - `job_intake/templates/job_intake/analysis_detail.html` now groups AJ's structured output into
+    separate Mandatory/Preferred/Responsibilities/ATS-keywords/Implied-expectations sections (all
+    backed by the same `JobRequirement.category` discriminator the schema already produces) plus a
+    schema/integrity-validation status line, on top of the pre-existing full source-view table and
+    screening-risks section -- every category CLAUDE.md's console requirement names is now visually
+    distinguishable, not merely present in one flat table.
+  - Every enrichment reuses `templates/base.html`'s existing design system (`.card`, `.badge-*`,
+    `dl.kv`, the responsive `.table-wrap`) -- no new CSS framework, no new component library.
+- **Tests**: 65 new deterministic tests --
+  `llm_provider/tests/test_gpt54_wire_payload.py` (14: exact model id on the wire for both models,
+  every configured/structurally-supported reasoning level including the explicit-`NONE`-vs-omitted
+  distinction, the effort/enabled mutual-exclusion guarantee, structured-output/
+  `require_parameters`/no-`tools`/no-cross-provider-parameter-leakage contract);
+  `llm_provider/tests/test_gpt54_defaults_config.py` (25: exact model ids, the complete default
+  matrix, idempotency, the free-router interaction/order-independence fix above, no stale Z.ai/
+  legacy-GPT-5 default, no automatic fallback, historical `LLMCallLog` preservation, the management
+  command); `llm_provider/tests/test_reasoning_selection.py` (15: precedence, override validation
+  including the default-reasoning-vs-overridden-model incompatibility case,
+  `effective_reasoning_effort` on the adapter, persistence to `LLMCallLog`);
+  `llm_provider/tests/test_console.py` (11: paid/free detection, `correlation_id` attempt scoping
+  including that one application's card never shows another's attempt, sanitized error guidance);
+  plus required-comments coverage in `reviews/tests/test_gate1_services.py`,
+  `test_gate2_services.py`, `test_views.py`, `test_gate2_views.py`. All mock at the `requests.post`
+  HTTP boundary and assert the actual serialized JSON body, per this project's standing convention.
+  Full suite: 1300/1300 passing (up from 1229 before this decision's work began -- 71 net new,
+  reflecting the 65 above plus incidental additions); every existing test-only stub/fixture
+  (`FakeAdapter`-returning `get_adapter_for_stage` replacements, `expand_requirements_for_search`/
+  `rank_relevance` replacements across `candidate_matching`/`job_intake`/`resume_builder`'s test
+  factories) updated to accept the new `requested_reasoning_effort`/`correlation_id` keyword
+  arguments the real call sites now pass, with zero behavior change to what they scripted.
+  `manage.py check`/`makemigrations --check --dry-run` clean; `ruff check .` clean.
+- **Real database application**: confirmed genuinely local dev (`.env`'s `POSTGRES_HOST=localhost`,
+  `POSTGRES_DB=cvbuilder`) before any write. Migration `llm_provider.0010_default_reasoning_effort`
+  applied. `manage.py configure_gpt54_defaults` run (idempotency proven directly: a second real run
+  and a subsequent `--dry-run` both reported no further changes). Before: all six stages on
+  `openrouter/free` (D-038's real-database state, `LLMModel` id 14). After: `MEMORY_BUILD`/
+  `AJ_ANALYZE`/`AC_NORMALIZE` on `openai/gpt-5.4-mini` (new `LLMModel` id 17) at `medium` reasoning;
+  `AC_MATCH`/`AC_RANK`/`AB_BUILD` on `openai/gpt-5.4` (new `LLMModel` id 18) at `high`/`high`/
+  `medium` reasoning respectively -- verified via the Django ORM (never ad hoc SQL). `openrouter/
+  free` (id 14) confirmed still active and selectable; both Z.ai rows (ids 10, 11, one under the
+  orphaned "dbg" provider) confirmed still inactive and assigned to no stage; the NVIDIA (ids 2, 3)
+  and legacy OpenAI `gpt-5` (id 12) rows confirmed untouched, still active, still selectable
+  per-run alternatives, and assigned to zero stages by default. A temporary, synthetic
+  `JobApplication`/`JobRequirementAnalysis` fixture (no LLM call of any kind) was created to
+  visually verify the dashboard, application-detail, AJ analysis-detail, Gate 1, and Gate 2 pages
+  render correctly against this real configuration (paid badges, reasoning defaults, populated
+  model/reasoning selectors) via the local dev server, then deleted -- zero net rows added to the
+  real database by this verification pass.
+- **Live qualification**: stated exactly as `NOT RUN -- intentionally deferred for the
+  operator-driven M5/M6 execution`, per this decision's explicit scope boundary. Not a completion
+  criterion for this decision.
+- **Known limitations**: (1) the very first Agent Jobber call for a brand-new application (before
+  its `JobApplication` row exists) cannot carry a `correlation_id` -- a pre-existing limitation,
+  unchanged by this decision. (2) `reviews/templates/reviews/_ac_model_selectors.html`/
+  `_ab_model_selector.html` are `{% include %}`-d into more than one form on the same page (the
+  "run/re-run" form and the "feedback" form), so their `<select id="...">` values repeat on the
+  rendered page -- a pre-existing condition from D-038, not introduced by this decision, and not
+  fixed here; each `<label for=...>` still visually and functionally associates with its adjacent
+  control in every tested browser, but this is not strictly valid HTML and would be worth a follow-
+  up unique-id-per-inclusion fix. (3) `is_free_model`'s paid/free signal is a naming-convention
+  heuristic over this codebase's own two known free-tier constructs (`openrouter/free`, a
+  `:free`-suffixed id), never a provider-verified pricing fact -- truthful for every model this
+  codebase currently registers, but not a guarantee for a differently-named future free-tier row.
+- **Rollback**: reassign any stage back to `openrouter/free` (or any other still-active model) via
+  the existing registry admin, or run `manage.py configure_openrouter_free_router` to converge
+  every stage back to the free router in one action (now correctly clearing
+  `default_reasoning_effort` too, per the interaction fix above) -- both plain, reversible registry
+  operations; neither `openai/gpt-5.4-mini` nor `openai/gpt-5.4`'s `LLMModel` row, nor any
+  historical `LLMCallLog`, is ever deleted by this decision or its rollback.

@@ -91,6 +91,8 @@ def build_request(
     retrieval: RetrievalContext,
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMRequest:
     lines = [f"Target job: {jra.role_title or '(unstated role)'} at {jra.employer or '(unstated employer)'}"]
 
@@ -154,6 +156,8 @@ def build_request(
         output_schema=AgentBuilderOutput,
         temperature=0.0,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        correlation_id=correlation_id,
     )
 
 
@@ -172,18 +176,30 @@ def _estimate_full_request_tokens(request: NormalizedLLMRequest) -> int:
 
 
 def generate_resume_content(
-    jra, requirement_assessments: list, retrieval: RetrievalContext, *, requested_model_id: int | None = None
+    jra,
+    requirement_assessments: list,
+    retrieval: RetrievalContext,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMResult:
-    """`requested_model_id`, when given, is a per-run operator override for this one call
-    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
+    """`requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for this one call (2026-09-07, per-run model selection; paid GPT-5.4 model
+    defaults) -- never persisted as a new stage default. `correlation_id`, when given, is carried
+    through to `LLMCallLog.correlation_id` unchanged."""
     adapter = get_adapter_for_stage(
-        StageModelAssignment.Stage.AB_BUILD, requested_model_id=requested_model_id
+        StageModelAssignment.Stage.AB_BUILD,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
     )
     request = build_request(
         jra,
         requirement_assessments,
         retrieval,
         max_output_tokens=adapter.effective_max_output_tokens,
+        reasoning_effort=adapter.effective_reasoning_effort,
+        correlation_id=correlation_id,
     )
 
     # D-037 Phase F: run after the final request is fully assembled, before the adapter performs

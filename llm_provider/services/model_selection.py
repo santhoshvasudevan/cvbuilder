@@ -19,14 +19,14 @@ from __future__ import annotations
 
 import dataclasses
 
-from ..models import LLMModel, StageModelAssignment
+from ..models import LLMModel, ReasoningEffort, StageModelAssignment
 from .eligibility import eligible_models_for_stage, model_display_label
 
 
 class NoStageDefaultConfiguredError(Exception):
     """Raised when no explicit per-run selection was given and the stage has no
     `StageModelAssignment` row at all -- a genuine configuration gap, never silently routed
-    anywhere. Fix via `manage.py configure_openrouter_free_router` or the registry admin."""
+    anywhere. Fix via `manage.py configure_gpt54_defaults` or the registry admin."""
 
 
 class ModelNotEligibleForStageError(Exception):
@@ -37,24 +37,52 @@ class ModelNotEligibleForStageError(Exception):
     Always raised before any provider call."""
 
 
+class ReasoningNotEligibleForStageError(Exception):
+    """Raised when a resolved reasoning-effort request (an explicit per-run override, or the
+    stage's own configured `default_reasoning_effort`) is not one this run's resolved model can
+    honor -- i.e. the model is not registered `supports_reasoning=True` (2026-09-07, paid GPT-5.4
+    model defaults). Always raised before any provider call, mirroring
+    `ModelNotEligibleForStageError`'s own timing guarantee."""
+
+
 @dataclasses.dataclass(frozen=True)
 class StageModelSelection:
     model: LLMModel
     source: str  # LLMCallLog.SelectionSource.DEFAULT or .OVERRIDE
     assignment: StageModelAssignment | None
+    reasoning_effort: str | None  # a `ReasoningEffort` value, or None ("say nothing")
 
 
 def resolve_stage_model(
-    stage: str, *, requested_model_id: int | None = None
+    stage: str,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
 ) -> StageModelSelection:
-    """Implements the three-step precedence documented in this module's docstring.
+    """Implements the three-step precedence documented in this module's docstring, for both the
+    model and the reasoning effort independently: an explicit per-run value wins for whichever of
+    the two was actually submitted; whichever was left unsubmitted falls back to the stage's own
+    configured default (`StageModelAssignment.model`/`.default_reasoning_effort`) -- an operator
+    may override just the model, just the reasoning effort, or both, in one run. The resolved
+    reasoning effort is always re-validated against whichever model was actually resolved (never
+    the model the stage's default assumed), raising `ReasoningNotEligibleForStageError` if that
+    model cannot honor it -- this can happen even when neither value was itself invalid on its own
+    (e.g. an operator overrides the model to a non-reasoning one while a reasoning stage default is
+    still configured).
 
     `requested_model_id` is an `LLMModel` primary key (not a provider `model_id` string) -- the
     AJ/AC/AB forms submit the eligible model's numeric id, matching how the selector's `<option
     value>` is rendered, so a value that was valid when the page was rendered but has since become
     ineligible (e.g. deactivated) is still validated fresh here, not trusted from the form.
+    `requested_reasoning_effort`, when given, must be one of the five `ReasoningEffort` values (use
+    `parse_requested_reasoning_effort` to turn a raw form value into this, exactly like
+    `parse_requested_model_id` does for the model).
     """
     from ..models import LLMCallLog  # local import: avoids a module-level circular import with models
+
+    assignment = (
+        StageModelAssignment.objects.select_related("model__provider").filter(stage=stage).first()
+    )
 
     if requested_model_id is not None:
         model = eligible_models_for_stage(stage).filter(pk=requested_model_id).first()
@@ -65,25 +93,54 @@ def resolve_stage_model(
                 "lack a capability this stage requires. Choose a currently-eligible model, or "
                 "leave the selector on the system default."
             )
-        assignment = (
-            StageModelAssignment.objects.select_related("model__provider").filter(stage=stage).first()
-        )
-        return StageModelSelection(
-            model=model, source=LLMCallLog.SelectionSource.OVERRIDE, assignment=assignment
+        source = LLMCallLog.SelectionSource.OVERRIDE
+    else:
+        if assignment is None:
+            raise NoStageDefaultConfiguredError(
+                f"Stage {stage!r} has no StageModelAssignment configured and no explicit model was "
+                "selected for this run -- there is no implicit fallback. Run `manage.py "
+                "configure_gpt54_defaults` (sets every stage's default model/reasoning) or assign "
+                "a model to this stage via the registry admin."
+            )
+        model = assignment.model
+        source = LLMCallLog.SelectionSource.DEFAULT
+
+    if requested_reasoning_effort is not None:
+        reasoning_effort = requested_reasoning_effort or None
+    else:
+        reasoning_effort = (assignment.default_reasoning_effort or None) if assignment else None
+
+    if reasoning_effort is not None and not model.supports_reasoning:
+        raise ReasoningNotEligibleForStageError(
+            f"Reasoning effort {reasoning_effort!r} was requested for stage {stage!r}, but the "
+            f"resolved model ({model_display_label(model)}) is not registered as supporting "
+            "reasoning. Choose a reasoning-capable model, or leave reasoning on the system default."
         )
 
-    try:
-        assignment = StageModelAssignment.objects.select_related("model__provider").get(stage=stage)
-    except StageModelAssignment.DoesNotExist as exc:
-        raise NoStageDefaultConfiguredError(
-            f"Stage {stage!r} has no StageModelAssignment configured and no explicit model was "
-            "selected for this run -- there is no implicit fallback. Run `manage.py "
-            "configure_openrouter_free_router` (sets every stage's default to OpenRouter's Free "
-            "Models Router) or assign a model to this stage via the registry admin."
-        ) from exc
     return StageModelSelection(
-        model=assignment.model, source=LLMCallLog.SelectionSource.DEFAULT, assignment=assignment
+        model=model, source=source, assignment=assignment, reasoning_effort=reasoning_effort
     )
+
+
+_VALID_REASONING_EFFORTS = frozenset(ReasoningEffort.values)
+
+
+def parse_requested_reasoning_effort(raw: str | None) -> str | None:
+    """Parses one AJ/AC/AB reasoning-effort selector's raw POSTed value into the value
+    `resolve_stage_model`/`get_adapter_for_stage` expect: `None` for "system default" (an empty/
+    missing selection), or one of the five `ReasoningEffort` values. Every view that accepts a
+    per-run reasoning override uses this one function -- mirroring `parse_requested_model_id` --
+    so a garbled or tampered form value always produces the same actionable
+    `ReasoningNotEligibleForStageError`-adjacent failure rather than an unhandled value reaching an
+    adapter."""
+    if raw is None or raw.strip() == "":
+        return None
+    if raw not in _VALID_REASONING_EFFORTS:
+        raise ReasoningNotEligibleForStageError(
+            f"{raw!r} is not a valid reasoning-effort selection -- choose an option from the "
+            f"list ({sorted(_VALID_REASONING_EFFORTS)}), or leave it on the system default."
+        )
+    return raw
 
 
 def parse_requested_model_id(raw: str | None) -> int | None:

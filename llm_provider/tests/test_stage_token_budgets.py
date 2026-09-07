@@ -267,6 +267,7 @@ class ProviderRequestReceivesEffectiveBudgetTests(TestCase):
         class _CapturingAdapter:
             llm_model = model
             effective_max_output_tokens = 8_192
+            effective_reasoning_effort = None
 
             def generate(self, request):
                 captured["request"] = request

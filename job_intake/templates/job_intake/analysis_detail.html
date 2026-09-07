@@ -1,29 +1,43 @@
 {% extends "base.html" %}
 {% block title %}Job Analysis{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+<a href="{% url 'job_applications:detail' pk=application.pk %}">Application {{ application.pk }}</a>
+<span class="sep">/</span>
+Job analysis (AJ)
+{% endblock %}
 {% block content %}
 <p><a href="{% url 'job_intake:intake' %}">&larr; New intake</a></p>
 
 <h2>{{ jra.role_title|default:"(role title not stated)" }} at {{ jra.employer|default:"(employer not stated)" }}</h2>
 
-<p>
-  Source: {{ jra.source_type }}
-  {% if jra.source_url %} -- <a href="{{ jra.source_url }}">{{ jra.source_url }}</a>{% endif %}
-  <br>
-  Posting language: {{ jra.posting_language }}
-  <br>
-  JRA version: {{ jra.version }}
-  <br>
-  Pipeline phase: {{ application.pipeline_phase }}
-</p>
+<dl class="kv">
+  <dt>Source</dt>
+  <dd>{{ jra.source_type }}{% if jra.source_url %} -- <a href="{{ jra.source_url }}">{{ jra.source_url }}</a>{% endif %}</dd>
+  <dt>Posting language</dt>
+  <dd>{{ jra.posting_language }}</dd>
+  <dt>JRA version</dt>
+  <dd>{{ jra.version }}</dd>
+  <dt>Pipeline phase</dt>
+  <dd><span class="badge {% if application.pipeline_phase == 'NEW' %}badge-neutral{% else %}badge-success{% endif %}">{{ application.get_pipeline_phase_display }}</span></dd>
+  <dt>Schema/integrity validation</dt>
+  <dd><span class="badge badge-success">Passed</span> -- a JobRequirementAnalysis is only ever persisted after it passes structured-output schema validation and the deterministic integrity check (D-022/D-023).</dd>
+</dl>
 
 {% if is_incomplete %}
-<p style="color: #b00020; font-weight: bold;">
-  INCOMPLETE ANALYSIS: this JobRequirementAnalysis produced no requirements and is not eligible
-  for Gate 1 -- Agent Candidate will refuse to run against it. Use Gate 1's "re-run Agent Jobber"
-  feedback action to retry.
+<p class="error" role="alert">
+  <strong>INCOMPLETE ANALYSIS:</strong> this JobRequirementAnalysis produced no requirements and is
+  not eligible for Gate 1 -- Agent Candidate will refuse to run against it. Use Gate 1's "re-run
+  Agent Jobber" feedback action to retry.
 </p>
 {% endif %}
-<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">Go to Gate 1 (Candidate Matching)</a></p>
+
+<div class="table-wrap" style="overflow-x:auto; display:flex; gap:16px; padding:16px; border:none;">
+  {% include "llm_provider/_stage_card.html" with card=stage_card %}
+</div>
+
+<p><a href="{% url 'reviews:gate1' application_id=application.pk %}" class="btn">Go to Gate 1 (Candidate Matching) &rarr;</a></p>
 
 {% if jra.location or jra.work_arrangement %}
 <p>
@@ -32,7 +46,67 @@
 </p>
 {% endif %}
 
-<h3>Requirements</h3>
+<h3>Mandatory requirements</h3>
+{% if mandatory_requirements %}
+<div class="table-wrap"><table>
+  <thead><tr><th>ID</th><th>Text</th><th>Source context</th></tr></thead>
+  <tbody>
+    {% for requirement in mandatory_requirements %}
+    <tr><td>{{ requirement.requirement_id }}</td><td>{{ requirement.text }}</td><td>{% if requirement.source_context %}&ldquo;{{ requirement.source_context }}&rdquo;{% endif %}</td></tr>
+    {% endfor %}
+  </tbody>
+</table></div>
+{% else %}<p class="empty-state">None extracted.</p>{% endif %}
+
+<h3>Preferred requirements</h3>
+{% if preferred_requirements %}
+<div class="table-wrap"><table>
+  <thead><tr><th>ID</th><th>Text</th><th>Source context</th></tr></thead>
+  <tbody>
+    {% for requirement in preferred_requirements %}
+    <tr><td>{{ requirement.requirement_id }}</td><td>{{ requirement.text }}</td><td>{% if requirement.source_context %}&ldquo;{{ requirement.source_context }}&rdquo;{% endif %}</td></tr>
+    {% endfor %}
+  </tbody>
+</table></div>
+{% else %}<p class="empty-state">None extracted.</p>{% endif %}
+
+<h3>Responsibilities</h3>
+{% if responsibilities %}
+<div class="table-wrap"><table>
+  <thead><tr><th>ID</th><th>Text</th><th>Source context</th></tr></thead>
+  <tbody>
+    {% for requirement in responsibilities %}
+    <tr><td>{{ requirement.requirement_id }}</td><td>{{ requirement.text }}</td><td>{% if requirement.source_context %}&ldquo;{{ requirement.source_context }}&rdquo;{% endif %}</td></tr>
+    {% endfor %}
+  </tbody>
+</table></div>
+{% else %}<p class="empty-state">None extracted.</p>{% endif %}
+
+<h3>ATS keywords/signals</h3>
+{% if ats_signals %}
+<ul>{% for requirement in ats_signals %}<li>{{ requirement.text }}</li>{% endfor %}</ul>
+{% else %}<p class="empty-state">None extracted.</p>{% endif %}
+
+<h3>Implied expectations <small>(inferred, not explicitly stated by the posting)</small></h3>
+{% if implied_expectations %}
+<ul>{% for requirement in implied_expectations %}<li>{{ requirement.text }}</li>{% endfor %}</ul>
+{% else %}<p class="empty-state">None inferred.</p>{% endif %}
+
+<h3>Screening risks</h3>
+{% if jra.screening_risks %}
+<ul>
+  {% for risk in jra.screening_risks %}
+  {# risk.text falls back to risk itself for a pre-D-022 JRA, whose screening_risks were plain
+     strings rather than {text, source_context} objects -- legacy display only, never rewritten. #}
+  <li>{{ risk.text|default:risk }} {% if risk.source_context %}&ndash; &ldquo;{{ risk.source_context }}&rdquo;{% endif %}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty-state">None identified.</p>
+{% endif %}
+
+<h3>All requirements (source view)</h3>
+<div class="table-wrap">
 <table>
   <thead>
     <tr><th>ID</th><th>Category</th><th>Text</th><th>Source context</th></tr>
@@ -53,17 +127,5 @@
     {% endfor %}
   </tbody>
 </table>
-
-<h3>Screening risks</h3>
-{% if jra.screening_risks %}
-<ul>
-  {% for risk in jra.screening_risks %}
-  {# risk.text falls back to risk itself for a pre-D-022 JRA, whose screening_risks were plain
-     strings rather than {text, source_context} objects -- legacy display only, never rewritten. #}
-  <li>{{ risk.text|default:risk }} {% if risk.source_context %}&ndash; &ldquo;{{ risk.source_context }}&rdquo;{% endif %}</li>
-  {% endfor %}
-</ul>
-{% else %}
-<p>None identified.</p>
-{% endif %}
+</div>
 {% endblock %}

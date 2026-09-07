@@ -90,7 +90,11 @@ the posting does not state -- leave the field blank rather than guessing.
 
 
 def build_request(
-    posting_text: str, *, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
+    posting_text: str,
+    *,
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMRequest:
     return NormalizedLLMRequest(
         stage=StageModelAssignment.Stage.AJ_ANALYZE,
@@ -107,16 +111,34 @@ def build_request(
         output_schema=AgentJobberAnalysis,
         temperature=0.0,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        correlation_id=correlation_id,
     )
 
 
-def analyze_posting(posting_text: str, *, requested_model_id: int | None = None) -> NormalizedLLMResult:
-    """`requested_model_id`, when given, is a per-run operator override for this one call
-    (2026-09-07, per-run model selection) -- an `LLMModel` primary key, never persisted as a new
-    stage default. `None` (the default) resolves through the stage's configured
-    `StageModelAssignment`, exactly as before."""
+def analyze_posting(
+    posting_text: str,
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
+) -> NormalizedLLMResult:
+    """`requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for this one call (2026-09-07, per-run model selection; paid GPT-5.4 model defaults)
+    -- `requested_model_id` is an `LLMModel` primary key, `requested_reasoning_effort` a
+    `llm_provider.models.ReasoningEffort` value; neither is ever persisted as a new stage default.
+    `None` (the default) for either resolves through the stage's configured
+    `StageModelAssignment` (model and `default_reasoning_effort` respectively), exactly as
+    before."""
     adapter = get_adapter_for_stage(
-        StageModelAssignment.Stage.AJ_ANALYZE, requested_model_id=requested_model_id
+        StageModelAssignment.Stage.AJ_ANALYZE,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
     )
-    request = build_request(posting_text, max_output_tokens=adapter.effective_max_output_tokens)
+    request = build_request(
+        posting_text,
+        max_output_tokens=adapter.effective_max_output_tokens,
+        reasoning_effort=adapter.effective_reasoning_effort,
+        correlation_id=correlation_id,
+    )
     return adapter.generate(request)

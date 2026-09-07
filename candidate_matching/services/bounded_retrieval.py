@@ -105,13 +105,17 @@ def build_bounded_context(
     *,
     posting_language: str = "en",
     requested_models: dict[str, int] | None = None,
+    requested_reasoning_efforts: dict[str, str] | None = None,
+    correlation_id: str | None = None,
 ) -> tuple[RetrievalContext, RetrievalManifest]:
-    """`requested_models`, when given, is a per-run operator override map keyed by
-    `StageModelAssignment.Stage` value (2026-09-07, per-run model selection) -- only
-    `AC_NORMALIZE`/`AC_RANK` keys are consulted here (the two LLM-backed stages this function
-    itself calls); an absent or `None` key resolves through that stage's configured
-    `StageModelAssignment`, exactly as before. Never persisted as a new stage default."""
+    """`requested_models`/`requested_reasoning_efforts`, when given, are per-run operator override
+    maps keyed by `StageModelAssignment.Stage` value (2026-09-07, per-run model selection; paid
+    GPT-5.4 model defaults) -- only `AC_NORMALIZE`/`AC_RANK` keys are consulted here (the two
+    LLM-backed stages this function itself calls); an absent or `None` key resolves through that
+    stage's configured `StageModelAssignment` (model and `default_reasoning_effort` respectively),
+    exactly as before. Never persisted as a new stage default."""
     requested_models = requested_models or {}
+    requested_reasoning_efforts = requested_reasoning_efforts or {}
     eligible = retrieve_eligible_pool(candidate_memory)
     deduped = deduplicate_claims(eligible.claims)
     duplicate_count = len(eligible.claims) - len(deduped)
@@ -134,6 +138,10 @@ def build_bounded_context(
             normalization_requirements,
             posting_language=posting_language,
             requested_model_id=requested_models.get(StageModelAssignment.Stage.AC_NORMALIZE),
+            requested_reasoning_effort=requested_reasoning_efforts.get(
+                StageModelAssignment.Stage.AC_NORMALIZE
+            ),
+            correlation_id=correlation_id,
         )
 
         search_requirements = []
@@ -166,6 +174,8 @@ def build_bounded_context(
             candidate_pool,
             requirements,
             requested_model_id=requested_models.get(StageModelAssignment.Stage.AC_RANK),
+            requested_reasoning_effort=requested_reasoning_efforts.get(StageModelAssignment.Stage.AC_RANK),
+            correlation_id=correlation_id,
         )
         if ranking_result.is_error:
             raise RankingFailedError(

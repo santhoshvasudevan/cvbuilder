@@ -1,0 +1,78 @@
+{% comment %}
+Read-only stage-execution card (2026-09-07, D-039 paid GPT-5.4 model defaults): shared by every
+AJ/AC/AB inspection page so "global default model/reasoning", "effective model/reasoning this
+run", paid/free, output-token budget, and the latest attempt's audit fields (requested/resolved
+model, finish reason, tokens, latency, sanitized error+guidance) render identically everywhere.
+Context: `card` (an `llm_provider.services.console.StageCard`). Never renders a raw prompt, a raw
+provider response body, or unsanitized exception text -- only already-sanitized LLMCallLog fields.
+{% endcomment %}
+<div class="card">
+  <h4>{{ card.stage_label }}</h4>
+  <dl class="kv">
+    <dt>Global default</dt>
+    <dd>
+      {% if card.default_model %}
+        {{ card.default_model.provider.name }} &ndash; {{ card.default_model.display_name|default:card.default_model.model_id }}
+        {% if card.default_is_free %}<span class="badge badge-success">Free</span>{% elif card.default_is_free == False %}<span class="badge badge-warning">Paid</span>{% endif %}
+        &middot; reasoning: {{ card.default_reasoning_effort|default:"(not set)" }}
+      {% else %}
+        <span class="badge badge-danger">Not configured</span> &ndash; no StageModelAssignment for this stage.
+      {% endif %}
+    </dd>
+
+    <dt>Effective this run</dt>
+    <dd>
+      {% if card.effective_model %}
+        {{ card.effective_model.provider.name }} &ndash; {{ card.effective_model.display_name|default:card.effective_model.model_id }}
+        {% if card.effective_is_free %}<span class="badge badge-success">Free</span>{% elif card.effective_is_free == False %}<span class="badge badge-warning">Paid</span>{% endif %}
+        &middot; reasoning: {{ card.effective_reasoning_effort|default:"(none)" }}
+      {% else %}
+        <span class="badge badge-danger">Not configured</span>
+      {% endif %}
+    </dd>
+
+    <dt>Output-token budget</dt>
+    <dd>{{ card.max_output_tokens|default:"model/built-in fallback" }}</dd>
+
+    <dt>Attempts recorded for this application</dt>
+    <dd>{{ card.attempt_count }}</dd>
+  </dl>
+
+  {% if card.latest_attempt %}
+  <h5>Latest attempt &mdash; #{{ card.latest_attempt.attempt_number }}</h5>
+  <dl class="kv">
+    <dt>Completed</dt>
+    <dd>{{ card.latest_attempt.created_at }} ({{ card.latest_attempt.latency_ms|default:"?" }} ms latency{% if card.latest_attempt.retry_count %}, {{ card.latest_attempt.retry_count }} retr{{ card.latest_attempt.retry_count|pluralize:"y,ies" }}{% endif %})</dd>
+    <dt>Requested model</dt>
+    <dd>
+      {{ card.latest_attempt.requested_model_label|default:"?" }}
+      <span class="badge badge-neutral">{{ card.latest_attempt.selection_source|default:"DEFAULT" }}</span>
+    </dd>
+    {% if card.latest_attempt.resolved_model_id %}
+    <dt>OpenRouter-resolved model</dt>
+    <dd>{{ card.latest_attempt.resolved_model_id }}</dd>
+    {% endif %}
+    <dt>Reasoning effort used</dt>
+    <dd>{{ card.latest_attempt.reasoning_effort|default:"(none)" }}</dd>
+    {% if not card.latest_attempt.is_error %}
+    <dt>Finish reason</dt>
+    <dd><span class="badge badge-success">{{ card.latest_attempt.finish_reason|default:"?" }}</span></dd>
+    <dt>Token usage</dt>
+    <dd>
+      input {{ card.latest_attempt.input_tokens|default:"?" }}{% if card.latest_attempt.cached_input_tokens %} (cached {{ card.latest_attempt.cached_input_tokens }}){% endif %}
+      &middot; output {{ card.latest_attempt.output_tokens|default:"?" }}
+      &middot; total {{ card.latest_attempt.total_tokens|default:"?" }}
+    </dd>
+    {% else %}
+    <dt>Sanitized error</dt>
+    <dd>
+      <span class="badge badge-danger">{{ card.latest_attempt.error_category }}</span>
+      {{ card.latest_attempt.error_message }}
+      {% if card.latest_attempt.error_guidance %}<br><small>{{ card.latest_attempt.error_guidance }}</small>{% endif %}
+    </dd>
+    {% endif %}
+  </dl>
+  {% else %}
+  <p class="lede">No attempt recorded yet for this application/stage.</p>
+  {% endif %}
+</div>

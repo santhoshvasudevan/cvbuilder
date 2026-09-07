@@ -64,6 +64,14 @@ class BaseLLMAdapter(ABC):
         # directly, overridden by `get_adapter_for_stage` only when the stage's own
         # `StageModelAssignment.read_timeout_seconds` is explicitly configured.
         self.effective_read_timeout_seconds = DEFAULT_READ_TIMEOUT_SECONDS
+        # Resolved reasoning effort (2026-09-07, paid GPT-5.4 model defaults): `None` by default
+        # (say nothing about reasoning -- correct for an adapter constructed directly, e.g. a test
+        # `FakeAdapter(model)`); `get_adapter_for_stage` overrides this to whatever
+        # `llm_provider.services.model_selection.resolve_stage_model` resolved (an explicit
+        # per-run override, the stage's `default_reasoning_effort`, or still `None`). Every
+        # pipeline service must read this value into its `NormalizedLLMRequest.reasoning_effort`
+        # rather than hard-coding one, mirroring `effective_max_output_tokens` immediately above.
+        self.effective_reasoning_effort: str | None = None
         # Requested-vs-default audit (2026-09-07, per-run model selection): overwritten by
         # `get_adapter_for_stage` to OVERRIDE when this adapter was built from an explicit
         # per-run operator selection rather than the stage's StageModelAssignment.
@@ -127,6 +135,7 @@ class BaseLLMAdapter(ABC):
             finish_reason=result.finish_reason or "",
             correlation_id=request.correlation_id or "",
             selection_source=self.selection_source or "",
+            reasoning_effort=request.reasoning_effort or "",
             input_tokens=usage.input_tokens,
             cached_input_tokens=usage.cached_input_tokens,
             output_tokens=usage.output_tokens,

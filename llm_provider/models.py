@@ -25,6 +25,29 @@ MIN_READ_TIMEOUT_SECONDS = 1
 MAX_READ_TIMEOUT_SECONDS = 300
 
 
+class ReasoningEffort(models.TextChoices):
+    """The one centrally-validated set of reasoning-effort levels this codebase ever offers or
+    sends -- both `StageModelAssignment.default_reasoning_effort` (the stage's configured default)
+    and a per-run operator override (`llm_provider.services.model_selection.
+    parse_requested_reasoning_effort`) draw from exactly this enum, so a UI selector and the
+    server-side value it submits can never drift apart (2026-09-07, paid GPT-5.4 model defaults).
+
+    Every value here is also a literal OpenRouter `reasoning.effort` value
+    (openrouter.ai/docs/use-cases/reasoning-tokens) -- `NONE` explicitly disables reasoning (distinct
+    from sending no `reasoning` key at all, which lets the model use its own default); OpenRouter's
+    adapter (`llm_provider/adapters/openrouter.py`) is the only place this string is translated into
+    a wire payload. OpenRouter also documents `minimal`/`max` effort levels this codebase
+    deliberately does not expose -- every stage default in the current matrix only ever needs
+    `MEDIUM`/`HIGH`, and a narrower, centrally-validated set is easier for an operator to reason
+    about than the provider's full range."""
+
+    NONE = "none", "None (reasoning disabled)"
+    LOW = "low", "Low"
+    MEDIUM = "medium", "Medium"
+    HIGH = "high", "High"
+    XHIGH = "xhigh", "Extra high"
+
+
 class LLMProvider(models.Model):
     """One configured LLM backend (LLM-004). The credential *value* is never stored here --
     only the name of the environment variable that holds it (NFR-003)."""
@@ -196,10 +219,43 @@ class StageModelAssignment(models.Model):
             "Leave blank to use the built-in default."
         ),
     )
+    default_reasoning_effort = models.CharField(
+        max_length=10,
+        choices=ReasoningEffort.choices,
+        blank=True,
+        default="",
+        help_text=(
+            "Optional stage-default reasoning effort (2026-09-07, paid GPT-5.4 model defaults), "
+            "drawn from the one centrally-validated `ReasoningEffort` enum. Blank means 'send no "
+            "reasoning request at all' -- the model/provider's own default behavior -- which is "
+            "distinct from `ReasoningEffort.NONE` ('explicitly disable reasoning'), matching "
+            "OpenRouter's own documented distinction between omitting the `reasoning` key and "
+            "sending `{\"effort\": \"none\"}`. A per-run operator override "
+            "(`llm_provider.services.model_selection.parse_requested_reasoning_effort`) may replace "
+            "this for one call without ever rewriting this stored default. Must be blank/`NONE` "
+            "unless `model.supports_reasoning` is True -- see `clean()`."
+        ),
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
         super().clean()
+        if self.default_reasoning_effort and self.default_reasoning_effort != ReasoningEffort.NONE:
+            try:
+                model_supports_reasoning = self.model.supports_reasoning
+            except LLMModel.DoesNotExist:
+                model_supports_reasoning = True  # nothing to check yet -- let the FK requirement fail first
+            if not model_supports_reasoning:
+                raise ValidationError(
+                    {
+                        "default_reasoning_effort": (
+                            f"default_reasoning_effort ({self.default_reasoning_effort!r}) requires "
+                            f"a model registered with supports_reasoning=True, but {self.model} is "
+                            "not -- leave this blank, set it to NONE, or assign a reasoning-capable "
+                            "model to this stage first."
+                        )
+                    }
+                )
         if self.max_output_tokens is not None:
             try:
                 model_capability = self.model.max_output_tokens
@@ -277,6 +333,21 @@ class LLMCallLog(models.Model):
             "Optional caller-supplied correlation/workflow identifier (e.g. a JobApplication "
             "id), carried through from NormalizedLLMRequest.correlation_id when the caller sets "
             "one. Blank when not supplied -- no pipeline call site is required to set this."
+        ),
+    )
+    reasoning_effort = models.CharField(
+        max_length=10,
+        choices=ReasoningEffort.choices,
+        blank=True,
+        help_text=(
+            "The resolved `ReasoningEffort` value actually sent for this call (2026-09-07, paid "
+            "GPT-5.4 model defaults) -- set by `llm_provider.adapters.get_adapter_for_stage`'s "
+            "resolution, mirroring `selection_source`'s audit role for the model. Blank means no "
+            "`reasoning` key was sent at all (the resolved model does not support reasoning, or "
+            "no effort was configured/requested), never confused with `ReasoningEffort.NONE` "
+            "('none'), which records a deliberate, explicit suppression of a reasoning-capable "
+            "model's own default reasoning behavior. Never a raw reasoning trace/thinking-token "
+            "content -- only the level name."
         ),
     )
 

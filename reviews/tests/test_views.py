@@ -66,6 +66,17 @@ class Gate1ViewTests(TestCase):
         self.application.refresh_from_db()
         self.assertEqual(self.application.current_fit_assessment.version, 2)
 
+    def test_feedback_with_blank_comments_shows_error_and_does_not_rerun(self):
+        with scripted_agent_candidate(valid_assessment_response()):
+            self.client.post(self.url, {"action": "run_ac"})
+            response = self.client.post(
+                self.url, {"action": "feedback", "target": "AC", "comments": ""}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Feedback comments are required")
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.current_fit_assessment.version, 1)
+
     def test_unknown_action_shows_error(self):
         response = self.client.post(self.url, {"action": "bogus"})
         self.assertEqual(response.status_code, 200)

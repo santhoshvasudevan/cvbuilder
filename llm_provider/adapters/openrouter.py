@@ -5,13 +5,31 @@ feature support -- so, like NVIDIA NIM, this adapter checks `LLMModel.supports_s
 that the routed endpoint actually supports whatever was requested via `provider.require_parameters`
 (see below).
 
-Reasoning is OpenRouter's own unified `reasoning` request parameter (`{"enabled": true}`), never
-NVIDIA's `chat_template_kwargs.enable_thinking` or Gemini's `thinkingConfig.thinkingBudget` --
-this adapter is the only place that knows OpenRouter's own representation, mirroring the same
-opt-in, per-request translation pattern `nvidia.py` already established: a request that leaves
-`reasoning_enabled` unset (`None`) or `False` gets no `reasoning` key in its body at all (never a
-blanket per-adapter default), and an explicitly *enabled* request against a model not registered
-as `supports_reasoning` is rejected before any HTTP call, rather than sent and hoped for.
+Reasoning is OpenRouter's own unified `reasoning` request parameter, never NVIDIA's
+`chat_template_kwargs.enable_thinking` or Gemini's `thinkingConfig.thinkingBudget` -- this adapter
+is the only place that knows OpenRouter's own representation, mirroring the same opt-in,
+per-request translation pattern `nvidia.py` already established. Two mutually-exclusive request-
+level knobs map onto it, matching OpenRouter's own documented "one of the following (not both)"
+contract (openrouter.ai/docs/use-cases/reasoning-tokens):
+
+- `request.reasoning_effort` (a `llm_provider.models.ReasoningEffort` value, e.g. `"medium"`/
+  `"high"` -- 2026-09-07, paid GPT-5.4 model defaults): sent as `{"reasoning": {"effort": <value>}}`,
+  OpenRouter's own OpenAI-style effort levels (GPT-5-series reasoning models, routed here exactly
+  as OpenAI's own Chat Completions `reasoning_effort` field is for `openai.py`'s direct-OpenAI
+  adapter, just nested under `reasoning` per OpenRouter's wire contract instead of top-level).
+  `ReasoningEffort.NONE` ("none") is itself a real, valid effort value here -- it explicitly
+  disables reasoning, distinct from omitting the key entirely.
+- `request.reasoning_enabled` (a plain bool, pre-existing): sent as `{"reasoning": {"enabled": true}}`
+  for a model that only supports the coarser enable/disable form (e.g. a free-tier router model
+  with no graduated effort levels).
+
+`request.reasoning_effort` takes precedence when both happen to be set on the same request (a
+caller-authoring error every current call site avoids by construction -- each stage's `build_request`
+only ever populates one of the two) -- the two request-level formats are never sent in the same
+call. A request that leaves both unset gets no `reasoning` key in its body at all (never a blanket
+per-adapter default), and either an explicit effort or an explicit `enabled=True` against a model
+not registered as `supports_reasoning` is rejected before any HTTP call, rather than sent and hoped
+for.
 
 Privacy routing (`provider.data_collection`, `provider.require_parameters=true`) is this adapter's
 own responsibility, never a pipeline-app concern -- `LLMProvider.data_collection_policy` (a
@@ -34,7 +52,7 @@ import re
 import requests
 
 from ..errors import LLMErrorCategory, NormalizedLLMError, sanitize_error_message
-from ..models import LLMProvider
+from ..models import LLMProvider, ReasoningEffort
 from ..schema_translation import OpenAIStrictSchemaContractError, to_openai_compatible_strict_schema
 from ..types import NormalizedLLMRequest, NormalizedLLMResult
 from .base import BaseLLMAdapter
@@ -151,6 +169,8 @@ _VALID_DATA_COLLECTION_VALUES = {
     LLMProvider.DataCollectionPolicy.ALLOW,
 }
 
+_VALID_REASONING_EFFORTS = frozenset(ReasoningEffort.values)
+
 
 class OpenRouterAdapter(BaseLLMAdapter):
     @staticmethod
@@ -173,13 +193,29 @@ class OpenRouterAdapter(BaseLLMAdapter):
                 )
             )
 
-        if request.reasoning_enabled and not self.llm_model.supports_reasoning:
+        if (
+            request.reasoning_effort is not None or request.reasoning_enabled
+        ) and not self.llm_model.supports_reasoning:
             return NormalizedLLMResult(
                 error=NormalizedLLMError(
                     category=LLMErrorCategory.CONFIGURATION,
                     message=(
                         f"Reasoning was requested but LLMModel '{self.llm_model.model_id}' is not "
                         "registered as supporting reasoning."
+                    ),
+                )
+            )
+        if request.reasoning_effort is not None and request.reasoning_effort not in _VALID_REASONING_EFFORTS:
+            # Fails closed on an unrecognized value rather than forwarding an arbitrary string to
+            # OpenRouter -- every legitimate caller sources this from `ReasoningEffort` (the model
+            # registry's `default_reasoning_effort` or a validated per-run override), so this can
+            # only be reached by a caller that bypassed that validation.
+            return NormalizedLLMResult(
+                error=NormalizedLLMError(
+                    category=LLMErrorCategory.CONFIGURATION,
+                    message=(
+                        f"reasoning_effort {request.reasoning_effort!r} is not one of "
+                        f"{sorted(_VALID_REASONING_EFFORTS)}."
                     ),
                 )
             )
@@ -226,7 +262,12 @@ class OpenRouterAdapter(BaseLLMAdapter):
         body["stream"] = False
         if request.top_p is not None:
             body["top_p"] = request.top_p
-        if request.reasoning_enabled:
+        if request.reasoning_effort is not None:
+            # Effort-based reasoning takes precedence over the plain enabled/disabled form when
+            # both happen to be set (module docstring) -- OpenRouter documents these as mutually
+            # exclusive, so this adapter never sends both in the same request body.
+            body["reasoning"] = {"effort": request.reasoning_effort}
+        elif request.reasoning_enabled:
             # Only ever sent when explicitly enabled (module docstring) -- never a blanket
             # per-adapter default, and never for a `False`/`None` request.
             body["reasoning"] = {"enabled": True}

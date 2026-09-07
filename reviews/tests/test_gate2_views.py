@@ -72,6 +72,15 @@ class Gate2ViewTests(TestCase):
         self.application.refresh_from_db()
         self.assertEqual(self.application.current_resume_draft.version, 2)
 
+    def test_feedback_with_blank_comments_shows_error_and_does_not_rerun(self):
+        with scripted_generation(valid_generation_response(self.engagement_id, self.claim_id)):
+            self.client.post(self.url, {"action": "run_ab"})
+            response = self.client.post(self.url, {"action": "feedback", "comments": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Feedback comments are required")
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.current_resume_draft.version, 1)
+
 
 class Gate2CsrfProtectionTests(TestCase):
     def test_post_without_csrf_token_is_rejected(self):

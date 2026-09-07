@@ -35,6 +35,8 @@ def build_request(
     requirements: list[dict],
     *,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMRequest:
     lines = ["Candidate pool:"]
     for claim in candidate_pool:
@@ -58,14 +60,22 @@ def build_request(
         output_schema=RelevanceRankingOutput,
         temperature=0.0,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
+        correlation_id=correlation_id,
     )
 
 
 def rank_relevance(
-    candidate_pool: list[DedupedClaim], requirements: list[dict], *, requested_model_id: int | None = None
+    candidate_pool: list[DedupedClaim],
+    requirements: list[dict],
+    *,
+    requested_model_id: int | None = None,
+    requested_reasoning_effort: str | None = None,
+    correlation_id: str | None = None,
 ) -> NormalizedLLMResult:
-    """`requested_model_id`, when given, is a per-run operator override for this one call
-    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
+    """`requested_model_id`/`requested_reasoning_effort`, when given, are per-run operator
+    overrides for this one call (2026-09-07, per-run model selection; paid GPT-5.4 model
+    defaults) -- never persisted as a new stage default."""
     if not requirements or not candidate_pool:
         return NormalizedLLMResult(
             content=RelevanceRankingOutput(
@@ -76,9 +86,15 @@ def rank_relevance(
             )
         )
     adapter = get_adapter_for_stage(
-        StageModelAssignment.Stage.AC_RANK, requested_model_id=requested_model_id
+        StageModelAssignment.Stage.AC_RANK,
+        requested_model_id=requested_model_id,
+        requested_reasoning_effort=requested_reasoning_effort,
     )
     request = build_request(
-        candidate_pool, requirements, max_output_tokens=adapter.effective_max_output_tokens
+        candidate_pool,
+        requirements,
+        max_output_tokens=adapter.effective_max_output_tokens,
+        reasoning_effort=adapter.effective_reasoning_effort,
+        correlation_id=correlation_id,
     )
     return adapter.generate(request)

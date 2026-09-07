@@ -101,6 +101,12 @@ graph is not an instruction to parallelize coding, only an accurate statement of
 
 ## M2 — LLM provider abstraction, registry, and audit foundation
 
+**Status update (2026-09-07, D-039)**: the registry gained a second, independently-resolved
+per-stage/per-run dimension (`StageModelAssignment.default_reasoning_effort`/
+`LLMCallLog.reasoning_effort`, the `ReasoningEffort` enum) alongside D-038's model selection, plus
+the OpenRouter adapter's translation of it — additive to this milestone's original scope, not a
+redesign. See `docs/DECISIONS.md` D-039.
+
 - **Objective**: the `llm_provider` app fully implemented per ARCHITECTURE.md §3, including a fake/
   test-only adapter so downstream milestones can be tested without live API keys.
 - **Requirements covered**: LLM-001..011, NFR-003, NFR-004, NFR-005, STACK-005, TEST-001 (for this
@@ -390,6 +396,13 @@ day)" subsection in `docs/DECISIONS.md` and the corresponding update in `docs/CU
 
 ## M5 — Agent Candidate, matching, and Human Review Gate 1
 
+**Status update (2026-09-07, D-039)**: Gate 1's operator-facing execution/inspection UI (model +
+reasoning-effort selectors, per-stage attempt-history cards, required-comments-on-rejection,
+paid-call confirmation) reached the completeness this milestone's HITL-004/005/006 requirements
+always implied but the original M5 pass did not fully build out — see `docs/DECISIONS.md` D-039
+and `docs/CURRENT_STATE.md`'s "Paid GPT-5.4 model defaults..." section. No change to M5's
+underlying retrieval/assessment/validator logic.
+
 - **Objective**: `candidate_matching` and the gate-relevant parts of `reviews` fully implemented.
 - **Requirements covered**: AC-001..003, HITL-001, HITL-002, HITL-004, HITL-005, HITL-006,
   NFR-002, D-014's AC portion, D-012's `ANALYSIS`→`PREPARATION` transition on Gate-1 approval.
@@ -446,6 +459,11 @@ day)" subsection in `docs/DECISIONS.md` and the corresponding update in `docs/CU
   something a unit test can fully guarantee.
 
 ## M6 — Agent Builder and Human Review Gate 2
+
+**Status update (2026-09-07, D-039)**: Gate 2 received the same operator-facing execution/
+inspection completeness as Gate 1 (model + reasoning-effort selector, AB_BUILD stage-attempt card,
+required-comments-on-rejection, paid-call confirmation) — see `docs/DECISIONS.md` D-039. No change
+to M6's underlying generation/validator/rendering logic.
 
 - **Objective**: `resume_builder` fully implemented — draft generation through the final markdown
   deliverable.

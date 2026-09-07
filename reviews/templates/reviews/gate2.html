@@ -1,41 +1,58 @@
 {% extends "base.html" %}
 {% block title %}Gate 2 -- {{ application }}{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+<a href="{% url 'job_applications:detail' pk=application.pk %}">Application {{ application.pk }}</a>
+<span class="sep">/</span>
+Gate 2 (Application build)
+{% endblock %}
 {% block content %}
-<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">&larr; Gate 1</a></p>
+<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">&larr; Gate 1 (Candidate Matching)</a></p>
 
-<h2>Human Review Gate 2 -- Resume Draft</h2>
-<p>Pipeline phase: <strong>{{ application.pipeline_phase }}</strong></p>
+<h2>Human Review Gate 2 &mdash; Application Build (AB)</h2>
+<p>
+  Pipeline phase:
+  <span class="badge {% if application.pipeline_phase == 'READY' %}badge-success{% else %}badge-warning{% endif %}">{{ application.get_pipeline_phase_display }}</span>
+</p>
 
 {% if error %}
-<p class="error">{{ error }}</p>
+<p class="error" role="alert">{{ error }}</p>
 {% endif %}
 
 {% if upstream_stale %}
-<p class="error">The current Fit Assessment is based on a superseded JobRequirementAnalysis --
+<p class="error" role="alert">The current Fit Assessment is based on a superseded JobRequirementAnalysis --
 resolve this at Gate 1 first.</p>
 {% endif %}
 
+<div class="table-wrap" style="overflow-x:auto; display:flex; gap:16px; padding:16px; border:none;">
+  {% include "llm_provider/_stage_card.html" with card=stage_cards.AB_BUILD %}
+</div>
+
 {% if not draft %}
-<p>No Agent Builder draft exists yet.</p>
-<form method="post">
+<p class="empty-state">No Agent Builder draft exists yet.</p>
+<form method="post" onsubmit="return confirm('This runs Agent Builder now -- a live LLM call, which may use a paid provider depending on the model selected below. Continue?');">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ab">
   {% include "reviews/_ab_model_selector.html" %}
-  <button type="submit">Run Agent Builder</button>
+  <button type="submit" class="btn">Run Agent Builder</button>
 </form>
 {% else %}
 
 {% if is_stale %}
-<p class="error">This draft (v{{ draft.version }}) is based on a superseded Fit Assessment version --
-re-run Agent Builder before approving.</p>
+<p class="error" role="alert">This draft (v{{ draft.version }}) is based on a superseded Fit Assessment version --
+it cannot be approved or exported until re-run. Re-run Agent Builder below.</p>
 {% endif %}
 
-<h3>Resume Draft v{{ draft.version }}{% if draft.is_confirmed %} (confirmed {{ draft.confirmed_at }}){% endif %}</h3>
+<h3>Resume Draft v{{ draft.version }}{% if draft.is_confirmed %} <span class="badge badge-success">confirmed {{ draft.confirmed_at }}</span>{% endif %}</h3>
 
-<h4>Rendered markdown</h4>
-<pre>{{ draft.rendered_markdown }}</pre>
+<h4>Rendered markdown preview (candidate-facing)</h4>
+<div class="table-wrap"><pre>{{ draft.rendered_markdown }}</pre></div>
 
-<h4>Evidence inspection</h4>
+<h4>Operator evidence inspection</h4>
+<p class="lede">Traceability only -- never shown in the candidate-facing preview above. "(global)" means
+the cited claim is not specifically mapped to the engagement this bullet is filed under.</p>
+<div class="table-wrap">
 <table>
   <thead>
     <tr><th>Section</th><th>Engagement</th><th>Text</th><th>Supporting claims</th><th>Matched requirements</th></tr>
@@ -61,29 +78,33 @@ re-run Agent Builder before approving.</p>
     {% endfor %}
   </tbody>
 </table>
+</div>
 
-<form method="post">
+<form method="post" onsubmit="return confirm('This re-runs Agent Builder now -- a live LLM call, which may use a paid provider. This creates a new draft version; the current one is preserved for audit. Continue?');">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ab">
   {% include "reviews/_ab_model_selector.html" %}
-  <button type="submit">Re-run Agent Builder</button>
+  <button type="submit" class="btn btn-secondary">Re-run Agent Builder</button>
 </form>
 
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="action" value="approve">
-  <button type="submit" {% if is_stale %}disabled{% endif %}>Approve Gate 2</button>
+  <button type="submit" class="btn" {% if is_stale %}disabled aria-disabled="true"{% endif %}>Approve Gate 2</button>
+  {% if is_stale %}<span class="badge badge-danger">Blocked: stale</span>{% endif %}
 </form>
 
 {% endif %}
 
-<h3>Send feedback</h3>
-<form method="post">
+<h3>Send feedback / request rework</h3>
+<p class="lede">Rejecting this draft requires a comment explaining why -- it is recorded in the feedback
+history below and Agent Builder is re-run immediately with a new, append-only version.</p>
+<form method="post" onsubmit="return confirm('This records feedback and immediately re-runs Agent Builder -- a live LLM call, which may use a paid provider. Continue?');">
   {% csrf_token %}
   <input type="hidden" name="action" value="feedback">
-  <p>Comments:<br><textarea name="comments" rows="4" cols="60"></textarea></p>
+  <p><label for="id_comments">Comments (required)</label><br><textarea name="comments" id="id_comments" rows="4" cols="60" required></textarea></p>
   {% include "reviews/_ab_model_selector.html" %}
-  <button type="submit">Submit feedback and re-run Agent Builder</button>
+  <button type="submit" class="btn">Submit feedback and re-run Agent Builder</button>
 </form>
 
 <h3>Feedback history</h3>

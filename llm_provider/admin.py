@@ -145,11 +145,13 @@ class StageModelAssignmentAdmin(admin.ModelAdmin):
     list_display = (
         "stage",
         "model",
+        "default_reasoning_effort",
         "max_output_tokens",
         "read_timeout_seconds",
         "effective_timeout_display",
         "updated_at",
     )
+    list_filter = ("default_reasoning_effort",)
     readonly_fields = ("effective_timeout_display",)
 
     @admin.display(description="Effective (connect, read) timeout")
@@ -171,6 +173,7 @@ class LLMCallLogAdmin(admin.ModelAdmin):
         "resolved_model_id",
         "finish_reason",
         "selection_source",
+        "reasoning_effort",
         "total_tokens",
         "latency_ms",
         "retry_count",
