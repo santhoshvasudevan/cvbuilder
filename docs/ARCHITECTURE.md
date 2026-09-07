@@ -653,20 +653,30 @@ semantics and invariants come first.
   `pipeline_phase` — regenerating a resume after `APPLIED` does not revert the outcome.
 - **Invariants**: this is the single source of "current version" truth that D-006's freshness
   checks and D-010's versioning model both depend on — no other model duplicates that state.
-- **Revising a `READY` application (D-035 investigation, 2026-09-06)**: generating a new version
-  from an application already at `READY` needs no new schema. `job_applications.services.
-  begin_new_version_from_ready` is the canonical, explicit-authorization entry point — a
-  precondition checkpoint (raises `RevisionNotAuthorizedError` unless `pipeline_phase == READY`,
-  mutates nothing itself) a caller must invoke before re-entering Gate 1 for a `READY` application.
-  Every actual state change afterward reuses the existing, already-hardened machinery unchanged:
-  `reviews.services.run_agent_candidate`/`submit_gate1_feedback` (new append-only `FitAssessment`
-  version), `JobApplication.approve_gate1` (D-006 freshness, idempotent no-op if already `READY`
-  and non-stale — `pipeline_phase` never regresses on its own), `reviews.services.
+- **Revising a `READY` application (D-035 investigation, 2026-09-06; corrected D-037,
+  2026-09-07)**: generating a new version from an application already at `READY` needs no new
+  schema/state — it reuses the existing `PipelinePhase` enum. `job_applications.services.
+  begin_new_version_from_ready`/`JobApplication.begin_revision_from_ready` is the canonical,
+  explicit-authorization entry point. **D-037 correction**: D-035/D-036's first version of this was
+  a precondition checkpoint that mutated nothing itself (an audited no-op, not a real, invokable
+  action). It is now a real, guarded `READY -> ANALYSIS` transition — atomic,
+  `select_for_update()`-locked exactly like `approve_gate1`/`approve_gate2`, refusing
+  (`StaleAssessmentError`) to run against a chain already stale relative to an upstream change.
+  Touches only `pipeline_phase`; every current-version pointer and `application_outcome` are left
+  exactly as they stood at `READY`. Every actual state change afterward still reuses the existing,
+  already-hardened machinery unchanged: `reviews.services.run_agent_candidate`/
+  `submit_gate1_feedback` (new append-only `FitAssessment` version — cannot reach Agent Builder
+  until Gate 1 re-approves, since `build_resume_draft` refuses to run while `pipeline_phase` is
+  `ANALYSIS`), `JobApplication.approve_gate1` (D-006 freshness; now genuinely fires its real
+  `ANALYSIS -> PREPARATION` transition again, since the phase actually moved), `reviews.services.
   run_agent_builder`/`submit_gate2_feedback` (new append-only `ResumeDraft` version), and
   `JobApplication.approve_gate2` (D-006 freshness against the *new* `FitAssessment`, refusing to
-  reconfirm a stale draft). No function anywhere sets `pipeline_phase` directly outside these
-  guarded methods. See `docs/DECISIONS.md` D-035 and `job_applications/tests/
-  test_revision_workflow.py` for the full synthetic-data proof (never `JobApplication` 9).
+  reconfirm a stale draft, now genuinely firing `PREPARATION -> READY` again). No function anywhere
+  sets `pipeline_phase` directly outside these guarded methods. A POST-only, CSRF-protected,
+  explicitly-confirmed UI control (`job_applications:begin_revision`) lets an operator invoke this
+  from the `READY` application detail page. See `docs/DECISIONS.md` D-035/D-037 and
+  `job_applications/tests/test_revision_workflow.py` for the full synthetic-data proof (never
+  `JobApplication` 9).
 
 ## 5. What is explicitly NOT built (and why)
 
@@ -980,3 +990,134 @@ exceeds budget after every cap.
 real `JobApplication` 9's deliverable requires a separately authorized, versioned M5/M6 rerun (a new
 `FitAssessment` and `ResumeDraft` version) — this correction does not itself touch `JobApplication`
 9, and `ResumeDraft` 4 remains immutable, exactly as D-010 requires.
+
+**Superseded by §9d below**: an independent audit found this section's own description above —
+"queried live" for engagement eligibility and `get_active_candidate_memory()` for the claim
+pool — was implemented exactly as described, and that is itself the defect: it made a
+`FitAssessment`'s own M6 input a live re-derivation from mutable state rather than a frozen,
+reproducible identity. This section is left as originally recorded (append-only decision/
+architecture history); §9d is the corrected design actually in effect.
+
+## 9d. Pinned evidence identity for Agent Builder (D-037, 2026-09-07)
+
+**Audit finding**: §9c's implementation called `candidate_matching.services.retrieve.
+get_active_candidate_memory()` and queried `CareerEngagement.objects.filter(approval_status=
+APPROVED)`/live `ClaimEngagementMapping.status` **fresh, on every M6 run** — never anything
+recorded on the `FitAssessment` itself. Two consequences, both violating this project's own D-006
+freshness principle ("an identity comparison, never a live re-derivation") and the Product Owner's
+explicit intent that a tailored résumé must never change merely because another `CandidateMemory`
+revision becomes `ACTIVE` later:
+
+1. If `CandidateMemory` 8 activated after `FitAssessment` 10 was created from `CandidateMemory` 7,
+   a later M6 run for `FitAssessment` 10 would silently pull evidence from `CandidateMemory` 8.
+2. An engagement rejected, or a `ClaimEngagementMapping` revoked, after a `FitAssessment` was
+   created would silently vanish from that same `FitAssessment`'s own Agent Builder context on the
+   next M6 run — even though nothing about the `FitAssessment` itself changed.
+
+**Why §9c's own reasoning didn't cover this**: `MemoryClaim` content genuinely is frozen the moment
+a `CandidateMemory` revision first becomes `ACTIVE` (`candidate_memory.models.
+_RevisionScopedModel`/`CandidateMemory.save()` forbid any further mutation) — recomputing anchor/
+language claim *content* fresh against a revision is safe and reproducible. But `CareerEngagement.
+approval_status` and `ClaimEngagementMapping.status` are **not** revision-scoped at all — they are
+deliberately live, independently-editable registries (`CareerEngagement`'s own docstring: "admin-
+editable registry, not per-build state") that can change at any time, completely decoupled from
+`CandidateMemory`'s own BUILDING/NEEDS_REVIEW/ACTIVE/SUPERSEDED lifecycle. Recomputing *which
+engagements are in scope* and *which claims are their anchors* fresh at M6 time was re-deriving
+evidence from exactly the kind of mutable current state D-006 exists to keep out of a frozen
+artifact's own identity.
+
+**Correction**: pin, at the exact moment a `FitAssessment` is created (M5,
+`candidate_matching.services.fit_assessment.build_fit_assessment`), everything that is *not*
+revision-frozen, and re-derive fresh at M6 time only what safely can be.
+
+- **`FitAssessment.based_on_candidate_memory`** (new FK, `on_delete=PROTECT`, nullable only for
+  pre-correction legacy rows) — the exact `CandidateMemory` revision that was `ACTIVE` at creation
+  time. `resume_builder.services.context.build_builder_context` (M6) reads this field and never
+  calls `get_active_candidate_memory()`.
+- **`FitAssessment.baseline_chronology_manifest`** (new `JSONField`, default `{}`) — a plain,
+  schema-versioned dict computed once by `candidate_matching.services.baseline_chronology.
+  build_baseline_manifest` and persisted in the same `transaction.atomic()` block that creates the
+  `FitAssessment` row (atomic by construction — no separate write to get out of sync). Chosen over
+  normalized child rows for the same reason `FitAssessment.retrieval_manifest` (§9's own M5 audit
+  record) already is a JSONField on this model: the content is write-once/read-only, never queried
+  by its own SQL predicates, and persisting it atomically requires nothing beyond being part of the
+  same INSERT. Schema: `schema_version`, `algorithm_version`, `candidate_memory_id`,
+  `approved_engagement_ids` (the pinned engagement roster), `engagements_with_no_eligible_evidence`,
+  `anchor_claim_ids_by_engagement`, `language_claim_ids`, `claim_inclusion_reasons` (every claim_id
+  in scope, job-relevant included, tagged with its reason(s)), `claim_approved_engagement_ids`
+  (each claim's approved-engagement attribution as it stood at manifest-creation time). Deliberately
+  **not** stored: `MemoryClaim.canonical_text_en`/`claim_type`/`subject_scope` (safe to re-fetch by
+  `(candidate_memory_id, claim_id)` — frozen content, see above) or any `CareerEngagement` display
+  field (title/organisation/location/dates — a live registry whose current values are meant to
+  apply to every future render; unchanged from §9c, still resolved via `resume_builder.rendering.
+  markdown`/`candidate_memory.services.static_profile_boundary.render_engagement_header`).
+- **M6 reconstruction** (`resume_builder.services.context.build_builder_context`): fails closed
+  (`candidate_matching.services.baseline_chronology.LegacyFitAssessmentManifestError`) if
+  `based_on_candidate_memory`/`baseline_chronology_manifest` are unset (every pre-D-037 row, e.g.
+  the real `FitAssessment` id 9 — no `MC-<revision>-*` claim-id prefix is ever treated as proof of
+  which revision a legacy row used). Otherwise: `validate_manifest` checks structural/internal
+  consistency (required keys, `candidate_memory_id` match, engagement/claim cross-references) before
+  anything is trusted; `reconstruct_retrieved_claims` re-resolves claim content strictly scoped to
+  `(candidate_memory_id, claim_id__in=...)`, so a claim_id belonging to another revision fails
+  closed (`InvalidBaselineManifestError`) rather than being silently dropped, exactly like §9's own
+  "fails closed, never falls back to the full CandidateMemory" principle. `CandidateRule` selection
+  is still recomputed fresh (unchanged from §9c) but against the *pinned* `CandidateMemory`
+  instance, never the live-active one — safe because `CandidateRule` is itself revision-scoped/
+  frozen.
+- **Completeness enforcement** (`resume_builder/validators/completeness.py`, new): §9c's own
+  markdown renderer showed the same "no evidence available" diagnostic line for both "the manifest
+  recorded zero eligible anchors" (`NO_ELIGIBLE_EVIDENCE`, a genuine diagnostic) and "eligible
+  evidence existed but Agent Builder simply didn't write anything for it" (`MODEL_OMITTED_CONTENT`,
+  a build defect that must never look like a data gap). The latter now fails the whole build closed
+  before rendering, so the diagnostic line in `rendering/markdown.py` is only ever reachable for the
+  former case. A pinned confirmed language claim
+  (`candidate_matching.services.retrieve.RetrievalContext.pinned_language_claim_ids`) not cited by
+  any rendered `LANGUAGE` element also fails the build closed — checked by claim_id citation only,
+  never by parsing rendered prose.
+- **Bullet cap**: `resume_builder/schemas.py::MAX_BULLETS_PER_ENGAGEMENT = 6`, enforced in the
+  pydantic schema (`max_length`, best-effort) and as a hard post-response check in
+  `validators/no_fabrication.py` (authoritative) — never truncated.
+- **Full-request token budget**: §9c's own bound (`MAX_ESTIMATED_REQUEST_TOKENS`, enforced at M6
+  context-construction time) counted only claim/rule/engagement text — never the system prompt, JRA
+  role/employer, `RequirementAssessment` explanations, or the output schema itself, all of which the
+  provider also counts against its context window. `resume_builder/services/generate.py::
+  generate_resume_content` now runs a second, authoritative check on the complete assembled
+  `NormalizedLLMRequest` (the project's one canonical estimator,
+  `candidate_matching.services.retrieval_limits.estimate_tokens`) immediately before
+  `adapter.generate()` performs any HTTP call — fails closed, sanitized (token counts and the
+  configured bound only), never truncates. The earlier, partial check in `services/context.py` is
+  kept as a cheap early signal; since it only ever under-counts relative to the new check, the two
+  can never disagree in a way that matters.
+- **READY revision workflow**: §9c's own D-035-investigation note observed a de facto reopen-Gate-1
+  path already existed but had no formal entry point; the resulting
+  `job_applications.services.begin_new_version_from_ready` shipped as a precondition check that
+  performed **no mutation at all** — an audited no-op. It is now `JobApplication.
+  begin_revision_from_ready`: a real, guarded `READY -> ANALYSIS` backward phase transition, atomic
+  and `select_for_update()`-locked exactly like `approve_gate1`/`approve_gate2`, refusing to run
+  against a chain already stale relative to an upstream change (reusing the existing
+  `StaleAssessmentError`). No new `PipelinePhase` state was needed: an application in `ANALYSIS`
+  with a non-null, non-stale `current_fit_assessment`/`current_resume_draft` is already handled
+  correctly by `resolve_next_action` ("Review Gate 1"), and `resume_builder.services.build.
+  build_resume_draft` already refuses to run while `pipeline_phase` is `ANALYSIS` — so re-opening
+  Gate 1 is now genuinely *enforced*, not merely advisory. A POST-only, CSRF-protected, explicitly-
+  confirmed UI control (`job_applications:begin_revision`) was added to the `READY` application
+  detail page.
+
+**What did not change**: `FitAssessment`/`ResumeDraft` append-only versioning and D-010 immutability;
+the no-fabrication validator's evidence-attachment eligibility rules; AC_RANK's own semantic job
+(job-relevance selection); provenance (every claim still carries its real `claim_id`); §9c's overall
+three-source-merge shape (job-relevant + engagement anchors + language evidence) and the deterministic
+anchor selection rule (`MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT`, experience-level rank then claim_id
+tie-break).
+
+**Migration**: `candidate_matching.0003_fitassessment_based_on_candidate_memory` adds both new
+fields; existing `FitAssessment` rows (including the real id 9) get `null`/`{}` — no snapshot
+identity fabricated retroactively.
+
+**Scope note**: this is a deterministic architecture correction only, same as §9c. It does not
+touch `JobApplication` 9, `JobRequirementAnalysis` 10, `FitAssessment` 9, `ResumeDraft` 4, or
+`CandidateMemory` 7. `FitAssessment` 9 has no pinned identity/manifest, so
+`LegacyFitAssessmentManifestError` now makes explicit and enforced (not merely documented) what
+§9c's own "Remaining work" note left open as a possibility: a fresh, versioned M5 run (a new
+`FitAssessment`) is required before *any* M6 build — corrected or otherwise — can run for
+`JobApplication` 9.

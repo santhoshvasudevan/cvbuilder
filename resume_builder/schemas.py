@@ -12,6 +12,17 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# D-037 completeness enforcement: a v1 bound on generated bullets per engagement, named and
+# documented rather than left unbounded. Chosen generously relative to a typical resume's own
+# experience-section length (3-6 bullets per role is a common convention) so it never constrains a
+# genuinely well-supported engagement, while still giving `no_fabrication.py`'s post-response
+# check (the authoritative enforcement -- this schema-level `max_length` is a best-effort signal
+# only, since not every provider's structured-output mode is guaranteed to enforce list-length
+# constraints) something concrete to reject runaway over-generation against. Enforced by rejecting
+# the whole build (`NoFabricationError`), never by silently truncating which bullets are kept --
+# truncation would be an arbitrary, non-deterministic choice among a model's own bullets.
+MAX_BULLETS_PER_ENGAGEMENT = 6
+
 
 class ResumeElementItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -25,7 +36,7 @@ class ExperienceSectionItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     engagement_id: str
-    bullets: list[ResumeElementItem] = Field(default_factory=list)
+    bullets: list[ResumeElementItem] = Field(default_factory=list, max_length=MAX_BULLETS_PER_ENGAGEMENT)
 
 
 class SkillCategoryItem(BaseModel):

@@ -1,122 +1,106 @@
 """M6's own bounded context builder (audit hardening, 2026-09-03; hybrid-context correction,
-D-035, 2026-09-06) -- Agent Builder must never reload or send the entire CandidateMemory, and must
-not even re-run M5's own retrieval query against the full eligible pool.
+D-035, 2026-09-06; pinned-evidence-identity correction, D-037, 2026-09-07) -- Agent Builder must
+never reload or send the entire CandidateMemory, must not even re-run M5's own retrieval query
+against the full eligible pool, and (D-037) must never consult *live* mutable state to decide what
+evidence exists for an already-created `FitAssessment`.
 
-Three layers are combined here, each tagged with *why* it is present
-(`candidate_matching.services.retrieve.RETRIEVAL_REASON_*`), then merged (never duplicated) by
-`baseline_chronology.merge_retrieved_claims`:
+D-037 root cause and fix: D-036's first version of this function called
+`retrieve.get_active_candidate_memory()` and queried `CareerEngagement.objects.filter(
+approval_status=APPROVED)`/live `ClaimEngagementMapping.status` fresh, every time it ran -- so the
+same `FitAssessment` could feed Agent Builder different evidence depending on *when* M6 happened to
+run, including after a different `CandidateMemory` revision had since activated, or after an
+engagement's approval/mapping state had since changed. This function now reads only two things off
+`fit_assessment` itself: `based_on_candidate_memory` (the exact revision M5 pinned) and
+`baseline_chronology_manifest` (the exact evidence roster M5 computed and persisted at that same
+moment, `candidate_matching.services.baseline_chronology.build_baseline_manifest`) -- both
+validated (`baseline_chronology.validate_manifest`) and reconstructed
+(`baseline_chronology.reconstruct_retrieved_claims`) without a single live query against
+`CareerEngagement.approval_status` or `ClaimEngagementMapping.status`. A `FitAssessment` that
+predates this correction (no pinned identity, e.g. the real `FitAssessment` id 9) is refused
+outright (`LegacyFitAssessmentManifestError`) rather than falling back to the old live-query
+behavior -- see `docs/DECISIONS.md` D-037.
 
-1. **Job-relevant claims** -- exactly `FitAssessment.retrieved_claim_ids` (the bounded, ranked set
-   M5 already selected -- a superset of every claim any RequirementAssessment actually cited, since
-   the disposition-coverage validator only ever accepts evidence from that same set), re-verified
-   fresh against the database (still CONFIRMED/resume_eligible/non-static/on the ACTIVE revision --
-   a claim retired or unconfirmed since M5 ran is excluded rather than blindly trusted from a
-   stored ID list).
-2. **Engagement anchor claims + confirmed language evidence** (D-035) -- a deterministic, zero-LLM
-   baseline computed fresh from the current ACTIVE CandidateMemory by `baseline_chronology.py`,
-   entirely independent of what AC_RANK selected for this specific job. This is what removes
-   career-chronology completeness from probabilistic model selection.
+What is still safe to resolve fresh, and why (see `baseline_chronology.py`'s own module docstring
+for the full rationale): `MemoryClaim.canonical_text_en`/`claim_type`/`subject_scope`, because a
+`CandidateMemory` revision's claim content is permanently frozen the moment it first becomes
+ACTIVE; and `CareerEngagement`'s own display fields (title/organisation/location/dates), because
+that record is a deliberately live, operator-editable registry, never revision-scoped, whose
+current field values are meant to apply to every future render (unchanged from before this
+correction -- see `resume_builder.rendering.markdown`/`candidate_memory.services.
+static_profile_boundary`). Only *which* engagements/claims are in scope is pinned.
 
-Engagements: every currently `APPROVED` `CareerEngagement` -- computed directly from the database,
-not from `FitAssessment.retrieved_engagement_ids` (which, while it happens to already include every
-approved engagement per D-035's own diagnosis, is a stored snapshot that could in principle drift;
-querying live is what actually guarantees "every APPROVED engagement always reaches the baseline
-chronology" rather than relying on that incidental coincidence).
-
-Rules: recomputed via the exact same bounded/deduplicated/capped selection M5 uses
-(`candidate_matching.services.rule_selection.select_bounded_rules`), applied fresh rather than
-stored, since rules are not claim-specific and recomputing is deterministic and idempotent.
+Rules: recomputed fresh, but against the *pinned* `based_on_candidate_memory` instance -- never
+`get_active_candidate_memory()` -- via the same bounded/deduplicated/capped selection M5 uses
+(`candidate_matching.services.rule_selection.select_bounded_rules`). This remains safe to recompute
+rather than pin because `CandidateRule` is a `_RevisionScopedModel`: its content is frozen with its
+owning revision exactly like `MemoryClaim`'s, so recomputing against the same pinned revision is
+deterministic and always reproduces the exact same result -- no manifest entry is needed for it.
 
 Bounded, predictable size: the merged claim set (job-relevant + anchors + language) is still capped
 by construction -- `MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT` per engagement, all language claims (typically
-few) -- and the whole context's estimated size is checked against the same
-`MAX_ESTIMATED_REQUEST_TOKENS` budget M5 already enforces; exceeding it after every cap is a
-configuration/data problem to surface loudly (`RetrievalBudgetExceededError`), never something to
-silently truncate.
+few) -- and this function still runs a partial, early size check against
+`MAX_ESTIMATED_REQUEST_TOKENS` (`RetrievalBudgetExceededError`) as a cheap early signal; the
+authoritative, complete-request check now lives in `services/generate.py::generate_resume_content`
+(D-037 Phase F), which sees the fully assembled request (system prompt, JRA text, requirement
+explanations, and the output schema included) right before the provider call.
 """
 
 from __future__ import annotations
 
 from candidate_matching.models import FitAssessment
+from candidate_matching.services.baseline_chronology import (
+    InvalidBaselineManifestError,
+    LegacyFitAssessmentManifestError,
+    reconstruct_retrieved_claims,
+    validate_manifest,
+)
 from candidate_matching.services.retrieval_limits import (
     MAX_ESTIMATED_REQUEST_TOKENS,
     RetrievalBudgetExceededError,
     estimate_tokens,
 )
-from candidate_matching.services.retrieve import (
-    RETRIEVAL_REASON_JOB_RELEVANT,
-    NoActiveCandidateMemoryError,
-    RetrievalContext,
-    RetrievedClaim,
-    RetrievedEngagement,
-    get_active_candidate_memory,
-)
+from candidate_matching.services.retrieve import RetrievalContext, RetrievedEngagement
 from candidate_matching.services.rule_selection import select_bounded_rules
-from candidate_memory.models import CareerEngagement, MemoryClaim
-from candidate_memory.services.engagement_mapping import STATIC_ENGAGEMENT_CLAIM_TYPES
+from candidate_memory.models import CareerEngagement
 
-from .baseline_chronology import BaselineChronologyResult, build_baseline_chronology, merge_retrieved_claims
-
-
-def _job_relevant_claims(fit_assessment: FitAssessment, candidate_memory_id: int) -> list[RetrievedClaim]:
-    claims = (
-        MemoryClaim.objects.filter(
-            claim_id__in=fit_assessment.retrieved_claim_ids,
-            candidate_memory_id=candidate_memory_id,
-            confirmation_status=MemoryClaim.ConfirmationStatus.CONFIRMED,
-            resume_eligible=True,
-        )
-        .exclude(claim_type__in=STATIC_ENGAGEMENT_CLAIM_TYPES)
-        .prefetch_related("engagement_mappings__career_engagement")
-    )
-
-    retrieved_claims: list[RetrievedClaim] = []
-    for claim in claims:
-        approved_engagement_ids = tuple(
-            sorted(
-                mapping.career_engagement.engagement_id
-                for mapping in claim.engagement_mappings.all()
-                if mapping.status == mapping.Status.APPROVED
-                and mapping.career_engagement.approval_status == CareerEngagement.ApprovalStatus.APPROVED
-            )
-        )
-        retrieved_claims.append(
-            RetrievedClaim(
-                claim_id=claim.claim_id,
-                text=claim.canonical_text_en,
-                claim_type=claim.claim_type,
-                subject_scope=claim.subject_scope,
-                approved_engagement_ids=approved_engagement_ids,
-                retrieval_reasons=(RETRIEVAL_REASON_JOB_RELEVANT,),
-            )
-        )
-    return retrieved_claims
+__all__ = [
+    "InvalidBaselineManifestError",
+    "LegacyFitAssessmentManifestError",
+    "RetrievalBudgetExceededError",
+    "build_builder_context",
+]
 
 
 def build_builder_context(fit_assessment: FitAssessment) -> RetrievalContext:
-    try:
-        candidate_memory = get_active_candidate_memory()
-    except NoActiveCandidateMemoryError:
-        candidate_memory = None
-
-    approved_engagements = list(
-        CareerEngagement.objects.filter(approval_status=CareerEngagement.ApprovalStatus.APPROVED)
-    )
-
-    job_relevant_claims = (
-        _job_relevant_claims(fit_assessment, candidate_memory.pk) if candidate_memory is not None else []
-    )
-
-    if candidate_memory is not None:
-        baseline = build_baseline_chronology(candidate_memory.pk, approved_engagements)
-    else:
-        baseline = BaselineChronologyResult(
-            anchor_claims_by_engagement={}, engagements_with_no_eligible_evidence=[], language_claims=[]
+    if fit_assessment.based_on_candidate_memory_id is None or not fit_assessment.baseline_chronology_manifest:
+        raise LegacyFitAssessmentManifestError(
+            f"FitAssessment {fit_assessment.pk} has no pinned CandidateMemory identity/baseline "
+            "chronology manifest (D-037) -- this is a pre-correction legacy row (e.g. the real "
+            "FitAssessment id 9). There is no way to safely reconstruct which CandidateMemory "
+            "revision or engagement/mapping state it actually used, and this is never guessed "
+            "from incidental data such as an MC-<revision>-* claim-id prefix. Run Agent Candidate "
+            "again (a fresh, versioned M5 run) for this application to obtain a FitAssessment with "
+            "a real pinned identity and manifest before Agent Builder can run."
         )
 
-    retrieved_claims = merge_retrieved_claims(job_relevant_claims, baseline.all_claims)
+    candidate_memory = fit_assessment.based_on_candidate_memory
+    manifest = fit_assessment.baseline_chronology_manifest
+    validate_manifest(manifest, candidate_memory_id=candidate_memory.pk)
+
+    retrieved_claims = reconstruct_retrieved_claims(manifest, candidate_memory.pk)
     retrieved_claims.sort(key=lambda c: c.claim_id)
 
+    approved_engagement_ids = manifest["approved_engagement_ids"]
+    engagements_by_id = {
+        engagement.engagement_id: engagement
+        for engagement in CareerEngagement.objects.filter(engagement_id__in=approved_engagement_ids)
+    }
+    missing_engagement_ids = sorted(set(approved_engagement_ids) - engagements_by_id.keys())
+    if missing_engagement_ids:
+        raise InvalidBaselineManifestError(
+            f"baseline_chronology_manifest references CareerEngagement id(s) that no longer exist: "
+            f"{missing_engagement_ids}."
+        )
     retrieved_engagements = [
         RetrievedEngagement(
             engagement_id=engagement.engagement_id,
@@ -126,18 +110,13 @@ def build_builder_context(fit_assessment: FitAssessment) -> RetrievalContext:
             is_current=engagement.is_current,
             duration_months=engagement.duration_months(),
         )
-        for engagement in approved_engagements
+        for engagement in (engagements_by_id[eid] for eid in approved_engagement_ids)
     ]
     retrieved_engagements.sort(key=lambda e: e.engagement_id)
 
-    if candidate_memory is not None:
-        requirement_texts = list(
-            fit_assessment.based_on_jra.requirements.values_list("text", flat=True)
-        )
-        rule_result = select_bounded_rules(candidate_memory, requirement_texts)
-        rules = rule_result.selected
-    else:
-        rules = []
+    requirement_texts = list(fit_assessment.based_on_jra.requirements.values_list("text", flat=True))
+    rule_result = select_bounded_rules(candidate_memory, requirement_texts)
+    rules = rule_result.selected
 
     context_text_len = sum(len(c.text) for c in retrieved_claims)
     context_text_len += sum(len(r.text) for r in rules)
@@ -147,17 +126,20 @@ def build_builder_context(fit_assessment: FitAssessment) -> RetrievalContext:
     estimated_tokens = estimate_tokens(" " * context_text_len)
     if estimated_tokens > MAX_ESTIMATED_REQUEST_TOKENS:
         raise RetrievalBudgetExceededError(
-            f"Estimated Agent Builder request size ({estimated_tokens} tokens) exceeds "
-            f"MAX_ESTIMATED_REQUEST_TOKENS={MAX_ESTIMATED_REQUEST_TOKENS} even after the D-035 "
-            "baseline chronology's own per-engagement anchor cap was applied -- lower "
-            "MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT or raise the token budget deliberately; this is "
-            "never silently truncated."
+            f"Estimated Agent Builder context size ({estimated_tokens} tokens -- a partial, "
+            "early estimate covering only claim/rule/engagement text, not the full assembled "
+            f"request) exceeds MAX_ESTIMATED_REQUEST_TOKENS={MAX_ESTIMATED_REQUEST_TOKENS} even "
+            "after the D-035 baseline chronology's own per-engagement anchor cap was applied -- "
+            "lower MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT or raise the token budget deliberately; this "
+            "is never silently truncated. (The authoritative, complete-request check runs in "
+            "services/generate.py right before the provider call.)"
         )
 
     return RetrievalContext(
-        candidate_memory_id=candidate_memory.pk if candidate_memory is not None else 0,
+        candidate_memory_id=candidate_memory.pk,
         claims=retrieved_claims,
         engagements=retrieved_engagements,
         rules=rules,
-        engagements_without_eligible_evidence=tuple(baseline.engagements_with_no_eligible_evidence),
+        engagements_without_eligible_evidence=tuple(manifest["engagements_with_no_eligible_evidence"]),
+        pinned_language_claim_ids=tuple(manifest["language_claim_ids"]),
     )

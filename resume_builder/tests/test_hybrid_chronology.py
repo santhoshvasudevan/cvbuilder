@@ -14,6 +14,12 @@ from __future__ import annotations
 from django.test import TestCase
 
 from candidate_matching.models import FitAssessment
+from candidate_matching.services.baseline_chronology import (
+    MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT,
+    build_baseline_chronology,
+    build_manifest_for_job_relevant_claim_ids,
+    compute_engagement_anchors,
+)
 from candidate_matching.services.retrieve import (
     RETRIEVAL_REASON_ENGAGEMENT_ANCHOR,
     RETRIEVAL_REASON_JOB_RELEVANT,
@@ -23,11 +29,6 @@ from candidate_memory.models import CandidateMemory, ClaimEngagementMapping, Mem
 from job_applications.models import JobApplication
 from job_intake.models import JobRequirementAnalysis
 
-from ..services.baseline_chronology import (
-    MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT,
-    build_baseline_chronology,
-    compute_engagement_anchors,
-)
 from ..services.context import build_builder_context
 from .factories import (
     freeze_revision,
@@ -112,6 +113,8 @@ class HybridChronologyFixtureMixin:
         )
         # german_claim and global_claim are deliberately left unmapped -- global, per D-019/D-035.
 
+        self.approved_engagements = [self.ford, self.continental, self.maruti, self.no_evidence_engagement]
+
         if freeze:
             freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
 
@@ -121,11 +124,23 @@ class HybridChronologyFixtureMixin:
         # diagnosis for the real JobApplication 9 / FitAssessment 9). retrieved_engagement_ids is
         # deliberately narrowed to Ford alone too, so these tests also prove the baseline
         # chronology never depends on FitAssessment's own stored engagement-id list.
-        self.fit_assessment = FitAssessment(
-            based_on_jra=self.jra,
-            retrieved_claim_ids=[self.ford_claim.claim_id],
-            retrieved_engagement_ids=[self.ford.engagement_id],
-        )
+        #
+        # D-037: the manifest is built here, once, exactly like the corrected M5 boundary
+        # (`candidate_matching.services.fit_assessment.build_fit_assessment`) would -- against
+        # `self.approved_engagements` as they stand at this exact moment (only meaningful once the
+        # revision is frozen ACTIVE, since a manifest is only ever built at real FitAssessment
+        # creation time against the then-ACTIVE revision).
+        if freeze:
+            manifest = build_manifest_for_job_relevant_claim_ids(
+                self.rev, self.approved_engagements, [self.ford_claim.claim_id]
+            )
+            self.fit_assessment = FitAssessment(
+                based_on_jra=self.jra,
+                based_on_candidate_memory=self.rev,
+                retrieved_claim_ids=[self.ford_claim.claim_id],
+                retrieved_engagement_ids=[self.ford.engagement_id],
+                baseline_chronology_manifest=manifest,
+            )
 
 
 class BaselineChronologyCompletenessTests(HybridChronologyFixtureMixin, TestCase):
@@ -303,8 +318,10 @@ class EndToEndHybridResumeBuildTests(HybridChronologyFixtureMixin, TestCase):
         self.application.advance_to_analysis(jra=self.jra)
         fit_assessment = FitAssessment.objects.create(
             job_application=self.application, version=1, based_on_jra=self.jra,
+            based_on_candidate_memory=self.rev,
             retrieved_claim_ids=[self.ford_claim.claim_id],
             retrieved_engagement_ids=[self.ford.engagement_id],
+            baseline_chronology_manifest=self.fit_assessment.baseline_chronology_manifest,
         )
         self.application.record_fit_assessment(fit_assessment)
         self.application.approve_gate1()

@@ -23,16 +23,20 @@ class BuildResumeDraftTests(TestCase):
         with self.assertRaises(ResumeBuilderError):
             build_resume_draft(application)
 
-    def test_raises_when_candidate_memory_no_longer_active(self):
-        # M6 builds strictly from what the current FitAssessment already selected (audit
-        # hardening) -- if none of those claims are still on an ACTIVE revision, this must fail
-        # closed with a clear, specific error rather than silently building an empty context.
+    def test_succeeds_when_the_pinned_candidate_memory_has_since_been_superseded(self):
+        # D-037: build_resume_draft (M6) must use only the FitAssessment's own *pinned*
+        # CandidateMemory identity, never "whichever revision is ACTIVE right now" -- a later
+        # revision activating (which supersedes this one) must never break, or even alter, an
+        # already-created FitAssessment's own Agent Builder build. CandidateMemory content is
+        # frozen the moment it first becomes ACTIVE, so a SUPERSEDED (but still pinned) revision's
+        # claims remain exactly as valid as they were when this FitAssessment was created.
         from candidate_memory.models import CandidateMemory
 
         application, claim_id, engagement_id = make_ready_for_gate2_application()
         CandidateMemory.objects.update(status=CandidateMemory.Status.SUPERSEDED)
-        with self.assertRaises(ResumeBuilderError):
-            build_resume_draft(application)
+        with scripted_generation(valid_generation_response(engagement_id, claim_id)):
+            draft = build_resume_draft(application)
+        self.assertIn(claim_id, draft.retrieved_claim_ids)
 
     def test_successful_build_creates_draft_and_elements(self):
         application, claim_id, engagement_id = make_ready_for_gate2_application()

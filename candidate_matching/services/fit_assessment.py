@@ -13,6 +13,8 @@ compute the same next version number.
 
 from __future__ import annotations
 
+import dataclasses
+
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
@@ -23,10 +25,11 @@ from ..models import FitAssessment, RequirementAssessment
 from ..validators.disposition_coverage import AssessmentItemData, ensure_full_coverage, sanitize_items
 from . import static_requirements
 from .assess import assess_requirements
+from .baseline_chronology import build_baseline_chronology, build_baseline_manifest, merge_retrieved_claims
 from .bounded_retrieval import RankingFailedError, build_bounded_context
 from .normalize import NormalizationFailedError
 from .retrieval_limits import RetrievalBudgetExceededError
-from .retrieve import get_active_candidate_memory
+from .retrieve import RETRIEVAL_REASON_JOB_RELEVANT, get_active_candidate_memory
 
 
 class AgentCandidateError(Exception):
@@ -118,6 +121,26 @@ def build_fit_assessment(job_application) -> FitAssessment:
     )
     all_items = ensure_full_coverage(sanitized_items, ordered_ids)
 
+    # D-037 pinned-evidence-identity correction: the baseline-chronology manifest is computed here,
+    # once, against this exact CandidateMemory revision and the CareerEngagement/
+    # ClaimEngagementMapping state as it stands at this precise moment -- never recomputed at M6
+    # (Agent Builder) time. `retrieval.claims` (M5's own job-relevant selection, already computed
+    # by `build_bounded_context` above) is re-tagged JOB_RELEVANT and merged with the engagement-
+    # anchor/language baseline so the persisted manifest is the *complete* evidence roster Agent
+    # Builder will ever see for this FitAssessment.
+    job_relevant_claims = [
+        dataclasses.replace(claim, retrieval_reasons=(RETRIEVAL_REASON_JOB_RELEVANT,))
+        for claim in retrieval.claims
+    ]
+    baseline = build_baseline_chronology(candidate_memory.pk, approved_engagements)
+    merged_claims = merge_retrieved_claims(job_relevant_claims, baseline.all_claims)
+    baseline_manifest = build_baseline_manifest(
+        candidate_memory=candidate_memory,
+        approved_engagements=approved_engagements,
+        baseline=baseline,
+        merged_claims=merged_claims,
+    )
+
     try:
         with transaction.atomic():
             locked_application = JobApplication.objects.select_for_update().get(pk=job_application.pk)
@@ -128,9 +151,11 @@ def build_fit_assessment(job_application) -> FitAssessment:
                 job_application=locked_application,
                 version=next_version,
                 based_on_jra=jra,
+                based_on_candidate_memory=candidate_memory,
                 retrieved_claim_ids=retrieval.claim_ids,
                 retrieved_engagement_ids=retrieval.engagement_ids,
                 retrieval_manifest=manifest.as_dict(),
+                baseline_chronology_manifest=baseline_manifest,
             )
             for item in all_items:
                 RequirementAssessment.objects.create(

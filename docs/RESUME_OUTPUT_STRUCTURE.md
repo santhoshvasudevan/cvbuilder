@@ -171,6 +171,40 @@ contract or validation rules at all — every claim, from any source, is still c
 real `claim_id` and passes the same eligibility checks. It changes only what `retrieval.claims`/
 `retrieval.engagements` *contain* going into generation and rendering.
 
+**Pinned evidence identity (D-037, 2026-09-07):** `retrieval.claims`/`retrieval.engagements` above
+are now reconstructed from a `FitAssessment`'s own persisted `baseline_chronology_manifest`
+(computed once, at that `FitAssessment`'s creation), never recomputed against whichever
+`CandidateMemory`/`CareerEngagement`/`ClaimEngagementMapping` state happens to be live when Agent
+Builder runs — see `docs/ARCHITECTURE.md` §9d. This is a construction-time-identity change only;
+§2/§3's structured output contract and eligibility rules are unaffected. A `FitAssessment` that
+predates this correction (no pinned identity) cannot reach Agent Builder at all
+(`LegacyFitAssessmentManifestError`) until a fresh M5 run produces one.
+
+**Completeness enforcement, before rendering (D-037, 2026-09-07):** two structured-output
+completeness checks now run on Agent Builder's *validated* elements, before any markdown is
+rendered (`resume_builder/validators/completeness.py`):
+
+- an `APPROVED` engagement the pinned manifest did **not** flag as having zero eligible evidence,
+  but for which Agent Builder's output produced zero valid `EXPERIENCE_BULLET` elements (including
+  any `KeyAchievement` placed under it), fails the whole build — this is `MODEL_OMITTED_CONTENT`,
+  distinct from the engagement genuinely having no eligible evidence (`NO_ELIGIBLE_EVIDENCE`, §4's
+  own diagnostic line below), and must never be allowed to render as if it were the latter;
+- every claim_id in the pinned manifest's confirmed language evidence must be cited by at least one
+  `LanguageProficiency` element, or the build fails — checked by claim_id citation, never by parsing
+  rendered text, so no specific language or proficiency level is ever hard-coded into this check.
+
+Both failures reuse the existing structured-output-rejection pattern §3 already establishes
+(`NoFabricationError`'s sibling, `CompletenessError`): the whole build is rejected before any
+markdown is ever rendered, nothing is persisted, and the operator (or a re-run) sees exactly what
+failed.
+
+**Bounded experience bullets (D-037, 2026-09-07):** `ExperienceSectionItem.bullets` is capped at
+`MAX_BULLETS_PER_ENGAGEMENT = 6` (`resume_builder/schemas.py`) — enforced in the pydantic schema
+(`max_length`) and, as a hard defense-in-depth backstop independent of whether a given provider's
+structured-output mode actually honors that schema constraint, as a post-response check in
+`validators/no_fabrication.py`. An over-long bullet list fails the whole build; it is never
+silently truncated, since truncation would be an arbitrary choice among the model's own bullets.
+
 ## 4. V1 markdown rendering contract
 
 Once the structured representation passes validation, it is rendered deterministically into this
@@ -224,7 +258,11 @@ chronology (every currently `APPROVED` `CareerEngagement`) gets its header rende
 An engagement with zero bullets shows one explicit italic diagnostic line (`_No résumé-eligible
 narrative evidence is currently available for this engagement._`) instead of either a blank section
 or Agent Builder inventing content to fill it — this is a rendering-time fact about evidence
-availability, never itself treated as evidence.
+availability, never itself treated as evidence. **D-037 (2026-09-07)**: this line is now provably
+reachable only when the pinned manifest itself recorded zero eligible evidence for that engagement
+(`NO_ELIGIBLE_EVIDENCE`) — an engagement that *had* eligible evidence but for which Agent Builder's
+output simply omitted content (`MODEL_OMITTED_CONTENT`) never reaches this renderer at all; the
+whole build fails closed before rendering instead (see the completeness-enforcement note above).
 
 ## 5. What this document deliberately does not do
 

@@ -172,6 +172,64 @@ class JobApplication(models.Model):
                 locked.save(update_fields=["pipeline_phase", "updated_at"])
         self.pipeline_phase = locked.pipeline_phase
 
+    def begin_revision_from_ready(self) -> None:
+        """D-037 corrective fix (supersedes D-036's no-op `begin_new_version_from_ready`): the
+        sole legal READY -> ANALYSIS backward transition, reachable only through the explicit,
+        named `job_applications.services.begin_new_version_from_ready` authorization checkpoint --
+        never a bare `pipeline_phase` write. This reuses the existing phase enum rather than
+        introducing a new state: an application in ANALYSIS with a non-null, non-stale
+        `current_fit_assessment`/`current_resume_draft` is already a state `resolve_next_action`
+        (job_applications/services.py) handles correctly ("Review Gate 1"), and `approve_gate1`'s
+        own ANALYSIS -> PREPARATION transition is exactly the real, enforced "Gate 1 must approve
+        again" gate this workflow needs -- `resume_builder.services.build.build_resume_draft`
+        already refuses to run while phase is ANALYSIS (it requires PREPARATION or READY), so an
+        operator cannot skip straight to Agent Builder on the strength of the old, now-stale-phase
+        FitAssessment.
+
+        No pointer is touched here: `current_jra`/`current_fit_assessment`/`current_resume_draft`/
+        `application_outcome` are left exactly as they stood at READY. Creating the actual new
+        `FitAssessment` version (via `candidate_matching.services.fit_assessment.
+        build_fit_assessment`, e.g. through `reviews.services.run_agent_candidate`) and re-approving
+        Gate 1/Gate 2 are separate, already-existing, already-guarded actions -- this method only
+        reopens the gate; it never runs anything through it itself.
+
+        Refuses (`InvalidPhaseTransitionError`) unless currently READY, and refuses
+        (`StaleAssessmentError`) if the chain is already stale relative to upstream changes (e.g. a
+        Gate-1 feedback re-run after Gate 2 was already approved) -- that is a different, already-
+        handled recovery path (`resolve_next_action`'s existing "Upstream changed since approval"
+        guidance), not this deliberate, clean-chain revision workflow. Locked with
+        `select_for_update()` for the whole check-and-transition, mirroring `approve_gate1`/
+        `approve_gate2`, so a duplicate/concurrent submission is safely rejected rather than
+        double-applied.
+        """
+        with transaction.atomic():
+            locked = JobApplication.objects.select_for_update().get(pk=self.pk)
+            if locked.pipeline_phase != self.PipelinePhase.READY:
+                raise InvalidPhaseTransitionError(
+                    f"Cannot begin a new revision from phase {locked.pipeline_phase!r} -- only a "
+                    "READY application may begin a deliberate new revision (an application still "
+                    "mid-pipeline already has its ordinary Gate 1/Gate 2 controls available)."
+                )
+            fit_assessment = locked.current_fit_assessment
+            draft = locked.current_resume_draft
+            fit_assessment_stale = (
+                fit_assessment is not None and fit_assessment.based_on_jra_id != locked.current_jra_id
+            )
+            draft_stale = (
+                draft is not None
+                and fit_assessment is not None
+                and draft.based_on_fit_assessment_id != fit_assessment.pk
+            )
+            if fit_assessment_stale or draft_stale:
+                raise StaleAssessmentError(
+                    "This application is READY but already stale relative to an upstream change -- "
+                    "resolve staleness at Gate 1 through the ordinary staleness-recovery action "
+                    "instead of beginning a new deliberate revision."
+                )
+            locked.pipeline_phase = self.PipelinePhase.ANALYSIS
+            locked.save(update_fields=["pipeline_phase", "updated_at"])
+        self.pipeline_phase = locked.pipeline_phase
+
 
 class InvalidPhaseTransitionError(Exception):
     pass

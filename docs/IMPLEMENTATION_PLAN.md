@@ -487,6 +487,30 @@ live call was made.
   (`resume_builder/tests/test_hybrid_chronology.py`); full suite 1111/1111. Not merged to `main`;
   the real `JobApplication` 9 deliverable has not been regenerated with this correction (that is a
   separately authorized M5/M6 rerun, out of this follow-up's own authorization).
+- **Corrective follow-up (2026-09-07, D-037, same worktree, this commit a direct child of the
+  D-035/D-036 follow-up's own commit `dbee79b`)**: an independent audit of the 2026-09-06 follow-up
+  above returned `HYBRID FIX BLOCKED -- SNAPSHOT/FRESHNESS DEFECT` — that follow-up's M6 context
+  builder queried the live-`ACTIVE` `CandidateMemory` and live `CareerEngagement`/
+  `ClaimEngagementMapping` state on every run rather than trusting a frozen `FitAssessment`
+  identity. Corrected: `FitAssessment` now pins `based_on_candidate_memory` and a persisted
+  `baseline_chronology_manifest` at M5 creation time (migration
+  `candidate_matching.0003_fitassessment_based_on_candidate_memory`); M6
+  (`resume_builder/services/context.py`) reads only that pinned record, never live state, and fails
+  closed for a pre-correction legacy `FitAssessment` (e.g. the real `FitAssessment` id 9).
+  `resume_builder/services/baseline_chronology.py` (M5-time computation, now correctly located in
+  `candidate_matching`) gained `build_baseline_manifest`/`validate_manifest`/
+  `reconstruct_retrieved_claims`. Also corrected in the same commit: a `MODEL_OMITTED_CONTENT`
+  engagement and an omitted pinned language fact now fail the whole build closed
+  (`resume_builder/validators/completeness.py`, new); `MAX_BULLETS_PER_ENGAGEMENT` bounds generated
+  bullets; the M6 request-budget check now counts the complete assembled request, not a partial
+  estimate; and `begin_new_version_from_ready` is now a real, guarded `READY -> ANALYSIS`
+  transition with a UI control, not an audited no-op. See `docs/DECISIONS.md` D-037 and
+  `docs/ARCHITECTURE.md` §9d. 46 new tests across `candidate_matching/tests/test_fit_assessment.py`,
+  `.../tests/test_baseline_chronology_manifest.py` (new),
+  `resume_builder/tests/test_completeness.py` (new), `.../tests/test_request_budget.py` (new), and
+  `job_applications/tests/test_revision_workflow.py` (rewritten); full suite 1157/1157. Not merged
+  to `main`; `JobApplication` 9's deliverable still has not been regenerated (a fresh, versioned M5
+  run is now a required, enforced precondition for it, not merely a recommendation).
 
 ## M7 — Integrated per-job workflow and markdown deliverable
 

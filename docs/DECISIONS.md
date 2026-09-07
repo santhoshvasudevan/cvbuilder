@@ -2145,3 +2145,146 @@ above ("use mappings only to place narrative bullets under the correct engagemen
   deterministically present) -- full project suite green (1111/1111), `ruff check .` clean,
   `manage.py check`/`makemigrations --check --dry-run` clean, zero live provider calls (`FakeAdapter`
   only throughout).
+
+## D-037: D-036's hybrid chronology audited SNAPSHOT/FRESHNESS DEFECT and corrected -- FitAssessment now pins CandidateMemory identity and a persisted baseline-chronology manifest
+
+- **Status**: **PROPOSED** (2026-09-07) -- implemented and tested on a further isolated worktree/
+  branch (`worktree-hybrid-chronology-fix`, still branched from `fb91e60`, this commit a direct
+  child of D-036's own commit `dbee79b`), not merged to `main` and not yet reviewed/approved by the
+  product owner in this session. This entry supersedes D-036's own "Verification"/completeness
+  claims for the specific defect described below; it does not delete or rewrite D-036, which
+  remains above exactly as originally recorded, per this project's append-only decision history.
+- **Context**: an independent audit of D-036's implementation, run before merge, returned the
+  verdict `HYBRID FIX BLOCKED -- SNAPSHOT/FRESHNESS DEFECT`. D-036's own module docstrings already
+  described the intended architecture accurately, but the actual implementation of
+  `resume_builder.services.context.build_builder_context` (M6) called
+  `candidate_matching.services.retrieve.get_active_candidate_memory()` and queried
+  `CareerEngagement.objects.filter(approval_status=APPROVED)`/live `ClaimEngagementMapping.status`
+  **fresh, every time it ran** -- never anything recorded on the `FitAssessment` itself. This meant
+  a `FitAssessment`'s own Agent Builder input was not actually a frozen, reproducible function of
+  that `FitAssessment` -- it silently depended on whichever `CandidateMemory` revision happened to
+  be `ACTIVE`, and whichever `CareerEngagement`/`ClaimEngagementMapping` rows happened to be
+  approved, at whatever moment M6 was next invoked. Concretely: if `CandidateMemory` 8 activated
+  after `FitAssessment` 10 was created from `CandidateMemory` 7, a subsequent M6 run for
+  `FitAssessment` 10 would silently pull evidence from `CandidateMemory` 8 instead -- and an
+  engagement rejected, or a mapping revoked, after a `FitAssessment` was created would silently
+  vanish from that `FitAssessment`'s own Agent Builder context on the next M6 run. This is exactly
+  the class of defect D-006 (freshness is an identity comparison, never a live re-derivation) and
+  the Product Owner's own explicit intent ("a tailored résumé must ... never change merely because
+  another CandidateMemory revision becomes ACTIVE later") exist to rule out.
+- **Root cause**: D-036 treated the hybrid baseline chronology as a purely *deterministic function*
+  of `(candidate_memory, approved_engagements)` and concluded it was therefore safe to recompute at
+  M6 time rather than persist. That reasoning is correct only for the parts of the computation that
+  are actually revision-scoped/frozen (`MemoryClaim` content on an already-`ACTIVE` `CandidateMemory`
+  revision, per `candidate_memory.models._RevisionScopedModel`) -- it does not hold for
+  `CareerEngagement.approval_status` or `ClaimEngagementMapping.status`, both of which are
+  deliberately live, independently mutable registries (by design -- `CareerEngagement`'s own
+  docstring: "admin-editable registry, not per-build state", never revision-scoped) that can change
+  at any time, completely independently of `CandidateMemory`'s own lifecycle. Recomputing "fresh"
+  against those tables at M6 time is precisely re-deriving evidence from mutable current state
+  instead of trusting a frozen identity -- the freshness/snapshot defect the audit named.
+- **Correction implemented** (full detail in `docs/ARCHITECTURE.md` §9c and inline module
+  docstrings, primarily `candidate_matching/services/baseline_chronology.py`,
+  `candidate_matching/services/fit_assessment.py`, `resume_builder/services/context.py`):
+  - **Schema** (migration `candidate_matching.0003_fitassessment_based_on_candidate_memory`):
+    `FitAssessment` gains `based_on_candidate_memory` (FK to `CandidateMemory`, `on_delete=PROTECT`,
+    nullable only for pre-correction legacy rows) and `baseline_chronology_manifest` (a `JSONField`,
+    default `{}`, mirroring the existing `retrieval_manifest` JSONField convention already
+    established on this same model for M5's own bounded-retrieval audit record -- chosen over
+    normalized child rows because this content is a write-once, read-only reconstruction record
+    never queried by its own SQL predicates, and a JSONField on the same already-append-only row is
+    persisted atomically for free by virtue of being part of the same `FitAssessment.objects.
+    create()` INSERT).
+  - **Manifest schema** (`schema_version`, `algorithm_version`, `candidate_memory_id`,
+    `approved_engagement_ids`, `engagements_with_no_eligible_evidence`,
+    `anchor_claim_ids_by_engagement`, `language_claim_ids`, `claim_inclusion_reasons`,
+    `claim_approved_engagement_ids`) pins exactly the pieces that are *not* revision-frozen -- the
+    roster of engagements in scope, which claims are their anchors, and each claim's approved-
+    engagement attribution -- while deliberately never duplicating `MemoryClaim.canonical_text_en`/
+    `claim_type`/`subject_scope` (safe to re-resolve fresh by `(candidate_memory_id, claim_id)`,
+    since that content is frozen once `ACTIVE`) or `CareerEngagement`'s own display fields (title/
+    organisation/location/dates -- a deliberately live, operator-editable registry whose current
+    values are meant to apply to every future render, unchanged from D-036).
+  - **M5 boundary** (`candidate_matching.services.fit_assessment.build_fit_assessment`): computes
+    the baseline chronology and the merged (job-relevant + anchor + language) claim roster exactly
+    once, against the exact `CandidateMemory` revision and `CareerEngagement`/
+    `ClaimEngagementMapping` state at that precise moment, and persists both new fields in the same
+    `transaction.atomic()` block that already creates the `FitAssessment` row and its
+    `RequirementAssessment` children -- atomic by construction, no separate write step to get out
+    of sync.
+  - **M6 boundary** (`resume_builder.services.context.build_builder_context`): rewritten to read
+    only `fit_assessment.based_on_candidate_memory`/`baseline_chronology_manifest`. No call to
+    `get_active_candidate_memory()`, no live `CareerEngagement.approval_status`/
+    `ClaimEngagementMapping.status` query, anywhere in this function. `candidate_matching.services.
+    baseline_chronology.validate_manifest` runs first (fails closed on missing/malformed/
+    internally-inconsistent manifests) and `reconstruct_retrieved_claims` re-resolves claim content
+    strictly scoped to `(candidate_memory_id, claim_id__in=...)`, so a claim_id belonging to another
+    revision (a corrupted/tampered manifest, or -- pre-D-037 -- a stale/fabricated pointer) fails
+    closed rather than being silently excluded. `CandidateRule` selection is recomputed fresh, but
+    against the *pinned* `CandidateMemory` instance, never the live-active one -- safe because
+    `CandidateRule` is itself a `_RevisionScopedModel`, frozen with its revision exactly like
+    `MemoryClaim`.
+  - **Legacy rows** (the real `FitAssessment` id 9): `based_on_candidate_memory`/
+    `baseline_chronology_manifest` are left `null`/`{}` by the migration -- no snapshot identity is
+    fabricated for them, and no `MC-<revision>-*` claim-id prefix is ever treated as proof of which
+    revision produced them. `build_builder_context` raises `LegacyFitAssessmentManifestError`
+    outright for such a row; `resume_builder.services.build.build_resume_draft` surfaces this as a
+    `ResumeBuilderError`. **`JobApplication` 9 requires a fresh, versioned M5 run (a new
+    `FitAssessment`) before a corrected M6 build can run for it at all** -- this is enforced by
+    code, not merely documented.
+  - **Completeness enforcement** (`resume_builder/validators/completeness.py`, new): distinguishes
+    `NO_ELIGIBLE_EVIDENCE` (the pinned manifest recorded zero eligible anchors for an engagement --
+    renders the existing D-035 diagnostic line) from `MODEL_OMITTED_CONTENT` (eligible evidence
+    existed but Agent Builder's output used none of it for that engagement -- now fails the whole
+    build closed, `CompletenessError`, chosen over rendering a review diagnostic because there is no
+    existing Product Owner decision permitting header-only chronology for an engagement that
+    actually had evidence). Confirmed pinned language evidence
+    (`RetrievalContext.pinned_language_claim_ids`) is checked the same way: every pinned language
+    claim_id must be cited by at least one rendered `LANGUAGE` element, or the build fails closed --
+    checked by claim_id citation only, never by parsing rendered prose, so it generalizes to any
+    language/proficiency value without hard-coding one.
+  - **Bullet cap** (`resume_builder/schemas.py::MAX_BULLETS_PER_ENGAGEMENT = 6`): enforced both as a
+    `pydantic` `max_length` on `ExperienceSectionItem.bullets` (a best-effort signal, since not
+    every provider's structured-output mode necessarily enforces JSON Schema `maxItems`) and as a
+    hard post-response check in `validators/no_fabrication.py` (defense in depth, fails the whole
+    build the same way any other evidence-attachment violation does) -- never silently truncated,
+    since truncation would be an arbitrary, non-deterministic choice of which bullets to keep.
+  - **Full-request token budget** (`resume_builder/services/generate.py::generate_resume_content`):
+    the audited estimator gap -- the pre-D-037 check in `services/context.py` counted only claim/
+    rule/engagement text, never the system prompt, JRA role/employer, `RequirementAssessment`
+    explanations, or the structured-output schema itself -- is corrected by a new check that counts
+    the complete assembled `NormalizedLLMRequest` (via the project's one canonical estimator,
+    `candidate_matching.services.retrieval_limits.estimate_tokens`) immediately after `build_request`
+    assembles it and strictly before `adapter.generate()` performs any HTTP call. Fails closed
+    (`RetrievalBudgetExceededError`) with a sanitized message (token counts and the configured bound
+    only, never request content); never truncates or drops evidence to force a request under budget.
+    The smaller, earlier `services/context.py` check is kept as a cheap defensive early signal (it
+    can only under-count relative to the new authoritative check, never disagree with it in the
+    other direction, so the two never give inconsistent verdicts).
+  - **READY revision workflow** (`job_applications.services.begin_new_version_from_ready` /
+    `JobApplication.begin_revision_from_ready`): D-036 shipped this as a precondition check that
+    performed **no mutation at all** -- an audited no-op, not a real, invokable action. It is now a
+    real, guarded `READY -> ANALYSIS` backward phase transition (atomic, `select_for_update()`-
+    locked exactly like `approve_gate1`/`approve_gate2`, rejecting a call when the chain is already
+    stale relative to an upstream change via the existing `StaleAssessmentError`). This reuses the
+    existing `PipelinePhase` enum rather than introducing a new state: an application in `ANALYSIS`
+    with a non-null, non-stale `current_fit_assessment`/`current_resume_draft` is already a state
+    `job_applications.services.resolve_next_action` handles correctly ("Review Gate 1"), and
+    `resume_builder.services.build.build_resume_draft` already refuses to run while `pipeline_phase`
+    is `ANALYSIS` -- so re-opening Gate 1 is now *actually enforced*, not merely advisory. No
+    current-version pointer or `application_outcome` is touched by this transition; only the phase
+    moves. A canonical POST-only, CSRF-protected, explicitly-confirmed UI action
+    (`job_applications:begin_revision`) was added to the `READY` application detail page; it was not
+    executed against `JobApplication` 9.
+- **What this decision does not cover**: it does not resolve D-035 as operationally closed, and does
+  not mark `JobApplication` 9 corrected. No code change here touched `JobApplication` 9,
+  `JobRequirementAnalysis` 10, `FitAssessment` 9, `ResumeDraft` 4, `CandidateMemory` 7, any
+  `StageModelAssignment`, or `LLMCallLog` -- confirmed unchanged before/after (see
+  `docs/CURRENT_STATE.md`'s corresponding entry for the exact counts). Regenerating the real
+  deliverable with this correction still requires a separately authorized, versioned M5/M6 rerun for
+  `JobApplication` 9, which this work package's authorization explicitly excludes, and which is now
+  additionally *required* (not merely recommended) by `LegacyFitAssessmentManifestError`.
+- **Verification**: no provider call anywhere in this work (`FakeAdapter`/`_ScriptedResultsAdapter`
+  only throughout); full project test suite green; `manage.py check`/`makemigrations --check
+  --dry-run` clean; `ruff check .` clean. See `docs/TEST_STRATEGY.md`'s corresponding entry and the
+  session's final report for exact counts and the independently auditable commit range.

@@ -10,6 +10,13 @@ narrative bullets.
 
 from __future__ import annotations
 
+import json
+
+from candidate_matching.services.retrieval_limits import (
+    MAX_ESTIMATED_REQUEST_TOKENS,
+    RetrievalBudgetExceededError,
+    estimate_tokens,
+)
 from candidate_matching.services.retrieve import (
     RETRIEVAL_REASON_ENGAGEMENT_ANCHOR,
     RETRIEVAL_REASON_JOB_RELEVANT,
@@ -150,6 +157,20 @@ def build_request(
     )
 
 
+def _estimate_full_request_tokens(request: NormalizedLLMRequest) -> int:
+    """D-037 Phase F: the authoritative request-size estimate, counting the *complete* assembled
+    request -- every message (system instructions, JRA role/employer, requirement assessments and
+    their explanations, all four evidence categories, engagement chronology lines including the
+    NO_ELIGIBLE_EVIDENCE diagnostic text, and CandidateRules -- everything `build_request` above
+    put into `request.messages`) plus the structured-output schema itself, which the provider also
+    counts against its context window. Uses the project's one canonical estimator
+    (`candidate_matching.services.retrieval_limits.estimate_tokens`) rather than a different
+    tokenizer, so this figure is directly comparable to every other stage's own budget check."""
+    message_text = "".join(message.get("content", "") for message in request.messages)
+    schema_text = json.dumps(request.output_schema.model_json_schema(), sort_keys=True)
+    return estimate_tokens(message_text) + estimate_tokens(schema_text)
+
+
 def generate_resume_content(
     jra, requirement_assessments: list, retrieval: RetrievalContext
 ) -> NormalizedLLMResult:
@@ -160,4 +181,23 @@ def generate_resume_content(
         retrieval,
         max_output_tokens=adapter.effective_max_output_tokens,
     )
+
+    # D-037 Phase F: run after the final request is fully assembled, before the adapter performs
+    # any HTTP call (`adapter.generate` below is what actually calls the provider). Fails closed,
+    # sanitized -- the message reports only token counts and the configured bound, never any
+    # request content -- and never truncates or drops evidence to force the request under budget.
+    estimated_tokens = _estimate_full_request_tokens(request)
+    if estimated_tokens > MAX_ESTIMATED_REQUEST_TOKENS:
+        raise RetrievalBudgetExceededError(
+            f"Estimated Agent Builder request size ({estimated_tokens} tokens, computed from the "
+            "complete assembled request: system and user messages -- including JRA "
+            "role/employer, every requirement's disposition and explanation, job-relevant "
+            "evidence, engagement-anchor evidence, confirmed language evidence, baseline "
+            "engagement chronology metadata, and candidate rules -- plus the structured-output "
+            f"schema) exceeds MAX_ESTIMATED_REQUEST_TOKENS={MAX_ESTIMATED_REQUEST_TOKENS}. "
+            "Refusing to call the provider; no evidence is ever dropped to force a request under "
+            "budget -- lower MAX_ANCHOR_CLAIMS_PER_ENGAGEMENT/MAX_SELECTED_CLAIMS/MAX_RULES or "
+            "raise the token budget deliberately."
+        )
+
     return adapter.generate(request)

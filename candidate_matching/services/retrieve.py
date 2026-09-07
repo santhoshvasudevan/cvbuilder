@@ -86,6 +86,12 @@ class RetrievalContext:
     # Builder/the renderer, never a reason to fabricate or to drop the engagement. Always empty for
     # M5 (Agent Candidate) contexts, which have no notion of baseline anchors.
     engagements_without_eligible_evidence: tuple[str, ...] = ()
+    # D-037 pinned-evidence-identity correction: the exact claim_ids `baseline_chronology_manifest`
+    # pinned as confirmed language evidence at FitAssessment-creation time -- completeness
+    # enforcement (`resume_builder.validators.completeness`) checks every one of these is actually
+    # represented by a rendered LANGUAGE element, so a pinned language fact can never silently
+    # disappear from the output. Always empty for M5 (Agent Candidate) contexts.
+    pinned_language_claim_ids: tuple[str, ...] = ()
 
     @property
     def claim_ids(self) -> list[str]:

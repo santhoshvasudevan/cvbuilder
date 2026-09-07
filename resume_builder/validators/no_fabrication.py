@@ -45,7 +45,7 @@ from candidate_memory.services.static_profile_boundary import (
 )
 
 from ..models import ResumeElement
-from ..schemas import AgentBuilderOutput
+from ..schemas import MAX_BULLETS_PER_ENGAGEMENT, AgentBuilderOutput
 
 
 class NoFabricationError(Exception):
@@ -175,6 +175,18 @@ def validate_and_flatten(
         if section.engagement_id not in valid_engagement_ids:
             failures.append(
                 f"Engagement {section.engagement_id!r} was not part of the retrieved context for this run."
+            )
+            continue
+        # D-037 completeness enforcement: a defense-in-depth hard cap, redundant with (but not
+        # relying solely on) the schema's own `max_length` (`schemas.ExperienceSectionItem.
+        # bullets`) -- a provider whose structured-output mode does not actually enforce a JSON
+        # schema's maxItems, or a hand-built AgentBuilderOutput in a test that bypasses pydantic
+        # validation via model_construct(), must still be rejected here. Never silently truncated:
+        # which bullets to keep would be an arbitrary choice.
+        if len(section.bullets) > MAX_BULLETS_PER_ENGAGEMENT:
+            failures.append(
+                f"Engagement {section.engagement_id!r} has {len(section.bullets)} bullets, "
+                f"exceeding MAX_BULLETS_PER_ENGAGEMENT={MAX_BULLETS_PER_ENGAGEMENT}."
             )
             continue
         for bullet in section.bullets:

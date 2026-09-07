@@ -162,3 +162,116 @@ class BuildFitAssessmentTests(TestCase):
         self.assertEqual(second.version, 2)
         application.refresh_from_db()
         self.assertEqual(application.current_fit_assessment_id, second.pk)
+
+
+class PinnedEvidenceIdentityTests(TestCase):
+    """D-037: `build_fit_assessment` (the real M5 boundary) must always pin
+    `based_on_candidate_memory` and persist a valid `baseline_chronology_manifest` atomically with
+    the new `FitAssessment` -- these tests exercise the real orchestration function end to end
+    (FakeAdapter only), not a hand-built test fixture."""
+
+    def test_new_fit_assessment_pins_the_active_candidate_memory(self):
+        rev = make_revision(status=CandidateMemory.Status.BUILDING)
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        application = make_job_application_with_jra(
+            requirements=[{"category": "MANDATORY", "text": "Some narrative requirement"}]
+        )
+        with scripted_agent_candidate(valid_assessment_response()):
+            fit_assessment = build_fit_assessment(application)
+
+        self.assertEqual(fit_assessment.based_on_candidate_memory_id, rev.pk)
+
+    def test_manifest_is_persisted_atomically_and_is_valid(self):
+        from ..services.baseline_chronology import validate_manifest
+
+        rev = make_revision(status=CandidateMemory.Status.BUILDING)
+        engagement = make_engagement()
+        claim = make_narrative_claim(rev, canonical_text_en="Owned the payments service end to end.")
+        ClaimEngagementMapping.objects.create(
+            memory_claim=claim, career_engagement=engagement, status=ClaimEngagementMapping.Status.APPROVED
+        )
+        freeze_revision(rev, CandidateMemory.Status.ACTIVE)
+        application = make_job_application_with_jra(
+            requirements=[{"category": "MANDATORY", "text": "Own the payments service end to end."}]
+        )
+        with scripted_agent_candidate(
+            valid_assessment_response(
+                requirement_assessments=[
+                    {
+                        "requirement_id": "JR-001",
+                        "disposition": "MATCH",
+                        "explanation": "Directly owned an equivalent service end to end.",
+                        "gap_or_limitation": "",
+                        "supporting_memory_claim_ids": [claim.claim_id],
+                        "supporting_engagement_ids": [],
+                    }
+                ]
+            )
+        ):
+            fit_assessment = build_fit_assessment(application)
+
+        # Re-fetched fresh from the database: proves the manifest was actually committed in the
+        # same transaction as the FitAssessment row, not merely held on the in-memory instance.
+        persisted = type(fit_assessment).objects.get(pk=fit_assessment.pk)
+        manifest = persisted.baseline_chronology_manifest
+        self.assertTrue(manifest)
+        validate_manifest(manifest, candidate_memory_id=rev.pk)
+        self.assertEqual(manifest["approved_engagement_ids"], [engagement.engagement_id])
+        self.assertIn(claim.claim_id, manifest["claim_inclusion_reasons"])
+
+    def test_candidate_memory_becoming_active_later_does_not_alter_an_existing_fit_assessments_manifest(self):
+        """The exact D-037 drift scenario: FitAssessment 10 created from CandidateMemory 7; a
+        later CandidateMemory 8 becomes ACTIVE. Agent Builder's context for the older
+        FitAssessment must be byte-for-byte identical before and after."""
+        from resume_builder.services.context import build_builder_context
+
+        rev7 = make_revision(status=CandidateMemory.Status.BUILDING)
+        engagement = make_engagement()
+        claim = make_narrative_claim(rev7, canonical_text_en="Owned the payments service end to end.")
+        ClaimEngagementMapping.objects.create(
+            memory_claim=claim, career_engagement=engagement, status=ClaimEngagementMapping.Status.APPROVED
+        )
+        freeze_revision(rev7, CandidateMemory.Status.ACTIVE)
+        application = make_job_application_with_jra(
+            requirements=[{"category": "MANDATORY", "text": "Own the payments service end to end."}]
+        )
+        with scripted_agent_candidate(
+            valid_assessment_response(
+                requirement_assessments=[
+                    {
+                        "requirement_id": "JR-001",
+                        "disposition": "MATCH",
+                        "explanation": "Directly owned an equivalent service end to end.",
+                        "gap_or_limitation": "",
+                        "supporting_memory_claim_ids": [claim.claim_id],
+                        "supporting_engagement_ids": [],
+                    }
+                ]
+            )
+        ):
+            fit_assessment_10 = build_fit_assessment(application)
+
+        manifest_before = dict(fit_assessment_10.baseline_chronology_manifest)
+        context_before = build_builder_context(fit_assessment_10)
+
+        # CandidateMemory 8 activates -- only one CandidateMemory may be ACTIVE at a time, so rev7
+        # is superseded first (the one legal ACTIVE -> SUPERSEDED transition), then the original
+        # engagement is even rejected in the meantime.
+        rev8 = make_revision(status=CandidateMemory.Status.BUILDING)
+        make_narrative_claim(rev8, canonical_text_en="An entirely unrelated later claim.")
+        freeze_revision(rev7, CandidateMemory.Status.SUPERSEDED)
+        freeze_revision(rev8, CandidateMemory.Status.ACTIVE)
+        engagement.approval_status = engagement.ApprovalStatus.REJECTED
+        engagement.save(update_fields=["approval_status"])
+
+        fit_assessment_10.refresh_from_db()
+        manifest_after = fit_assessment_10.baseline_chronology_manifest
+        context_after = build_builder_context(fit_assessment_10)
+
+        self.assertEqual(manifest_before, manifest_after)
+        self.assertEqual(context_before.claim_ids, context_after.claim_ids)
+        self.assertEqual(context_before.engagement_ids, context_after.engagement_ids)
+        self.assertEqual(
+            [c.approved_engagement_ids for c in context_before.claims],
+            [c.approved_engagement_ids for c in context_after.claims],
+        )

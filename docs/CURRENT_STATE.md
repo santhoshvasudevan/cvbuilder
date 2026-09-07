@@ -1,14 +1,25 @@
 # Current State
 
-Last updated: 2026-09-06 (D-035's hybrid baseline-chronology architecture correction --
-implemented and tested on an isolated worktree/branch `worktree-hybrid-chronology-fix` (branched
-from `fb91e60`), not merged to `main`, product-owner review pending (D-036, **PROPOSED**) -- see
-"D-035 hybrid baseline-chronology correction (2026-09-06, D-036)" below. This is a deterministic
-architecture correction plus a formalized READY-revision-workflow entry point only: no provider
-call was made, M5/M6 were not rerun, no Gate was touched, and `JobApplication` 9/`JobRequirementAnalysis`
-10/`FitAssessment` 9/`ResumeDraft` 4/`CandidateMemory` 7 were not reopened, regenerated, or
-otherwise mutated by this session -- confirmed unchanged before and after.). Previously, also
-2026-09-06 (Milestone M7 -- integrated per-job workflow and final markdown
+Last updated: 2026-09-07 (D-037: an independent audit of D-036's hybrid-chronology implementation
+returned `HYBRID FIX BLOCKED -- SNAPSHOT/FRESHNESS DEFECT`; the corrective fix is implemented and
+tested on the same worktree/branch `worktree-hybrid-chronology-fix`, this commit a direct child of
+D-036's own commit `dbee79b`, still not merged to `main`, product-owner review pending (D-037,
+**PROPOSED**) -- see "D-037 pinned-evidence-identity correction (2026-09-07)" below. `FitAssessment`
+now pins its exact `CandidateMemory` identity and a persisted baseline-chronology manifest at M5
+creation time; M6 reads only that pinned record, never live `CandidateMemory`/`CareerEngagement`/
+`ClaimEngagementMapping` state. No provider call was made, M5/M6 were not rerun operationally, no
+Gate was touched, and `JobApplication` 9/`JobRequirementAnalysis` 10/`FitAssessment` 9/`ResumeDraft`
+4/`CandidateMemory` 7 were not reopened, regenerated, or otherwise mutated by this session --
+confirmed unchanged before and after.). Previously, also 2026-09-06 (D-035's hybrid
+baseline-chronology architecture correction -- implemented and tested on an isolated worktree/
+branch `worktree-hybrid-chronology-fix` (branched from `fb91e60`), not merged to `main`,
+product-owner review superseded by D-037 above -- see "D-035 hybrid baseline-chronology correction
+(2026-09-06, D-036)" below. This is a deterministic architecture correction plus a formalized
+READY-revision-workflow entry point only: no provider call was made, M5/M6 were not rerun, no Gate
+was touched, and `JobApplication` 9/`JobRequirementAnalysis` 10/`FitAssessment` 9/`ResumeDraft`
+4/`CandidateMemory` 7 were not reopened, regenerated, or otherwise mutated by this session --
+confirmed unchanged before and after.). Previously, also 2026-09-06 (Milestone M7 -- integrated
+per-job workflow and final markdown
 deliverable -- implemented and tested on an isolated worktree/branch, not merged to `main` in this
 session; plus the real live M5->Gate1->M6->Gate2 run for `JobApplication` 9 and the operator's
 D-033 acceptance of its draft as the v1 final deliverable, both from a separately-authorized
@@ -1685,6 +1696,93 @@ separately authorized, versioned M5/M6 rerun (see "Remaining work" below).
   `docs/ARCHITECTURE.md` §9c, and the diff itself), obtain explicit product-owner authorization,
   then run Agent Builder once against `FitAssessment` 9 (no Agent Candidate re-run needed) and
   review the result at Gate 2 before confirming a new `ResumeDraft` version.
+
+## D-037 pinned-evidence-identity correction (2026-09-07)
+
+Implemented on the same worktree/branch `worktree-hybrid-chronology-fix`; this commit is a direct
+child of D-036's own commit `dbee79b` (still branched, ultimately, from `main` at `fb91e60`).
+Corrects the `HYBRID FIX BLOCKED -- SNAPSHOT/FRESHNESS DEFECT` verdict an independent audit
+returned against D-036's implementation. Full decision record in `docs/DECISIONS.md` D-037; full
+design rationale inline in `candidate_matching/services/baseline_chronology.py`,
+`candidate_matching/services/fit_assessment.py`, and `resume_builder/services/context.py`.
+**Not marking D-035 resolved** -- this corrects the architecture a second time; the real
+`JobApplication` 9 deliverable still requires a separately authorized, versioned M5/M6 rerun.
+
+- **Audited defect confirmed by re-reading the actual code**: `resume_builder/services/context.py::
+  build_builder_context` (M6) called `candidate_matching.services.retrieve.
+  get_active_candidate_memory()` and queried `CareerEngagement.objects.filter(approval_status=
+  APPROVED)`/live `ClaimEngagementMapping.status` fresh, on every call -- nothing about *which*
+  `CandidateMemory` revision, or which engagements/mappings, produced a given `FitAssessment`'s
+  Agent Builder input was ever recorded on the `FitAssessment` itself. A `FitAssessment`'s M6 input
+  could silently change depending on when M6 next ran, including after a different `CandidateMemory`
+  revision activated or an engagement/mapping changed.
+- **Schema change** (migration `candidate_matching.0003_fitassessment_based_on_candidate_memory`):
+  `FitAssessment` gains `based_on_candidate_memory` (FK to `CandidateMemory`, `PROTECT`, nullable
+  only for pre-correction legacy rows) and `baseline_chronology_manifest` (JSONField, default `{}`).
+  Applied to the local development database; `FitAssessment` id 9 confirmed to have both fields at
+  their null/empty default after migration -- no value fabricated for it.
+- **`candidate_matching/services/baseline_chronology.py`** relocated from `resume_builder` (it is
+  now computed at M5 time, not M6 time) and extended with `build_baseline_manifest`,
+  `build_manifest_for_job_relevant_claim_ids` (test/fixture convenience), `validate_manifest`
+  (fail-closed structural/consistency checks), and `reconstruct_retrieved_claims` (rebuilds the
+  exact evidence list a validated manifest describes, re-fetching only claim text/type/scope fresh
+  -- safe, since that content is frozen once a `CandidateMemory` revision is `ACTIVE`).
+- **`candidate_matching/services/fit_assessment.py::build_fit_assessment`** (M5): now computes the
+  baseline chronology and the merged job-relevant+anchor+language claim roster once, and persists
+  `based_on_candidate_memory`/`baseline_chronology_manifest` in the same `transaction.atomic()`
+  block that already creates the `FitAssessment` row.
+- **`resume_builder/services/context.py::build_builder_context`** (M6): rewritten to read only the
+  pinned identity/manifest -- no `get_active_candidate_memory()` call, no live `CareerEngagement`/
+  `ClaimEngagementMapping` query anywhere in the function. Raises `LegacyFitAssessmentManifestError`
+  for a pre-correction row (e.g. the real `FitAssessment` id 9); `resume_builder/services/build.py`
+  surfaces this as `ResumeBuilderError`.
+- **Completeness enforcement** (`resume_builder/validators/completeness.py`, new): an approved
+  engagement with eligible evidence (per the pinned manifest) but zero placed bullets now fails the
+  whole build closed (`MODEL_OMITTED_CONTENT`, distinct from the existing `NO_ELIGIBLE_EVIDENCE`
+  diagnostic line, which remains reachable only for an engagement the manifest itself flagged).
+  Every pinned confirmed language claim (`RetrievalContext.pinned_language_claim_ids`) must be cited
+  by a rendered `LANGUAGE` element or the build fails closed -- by claim_id citation only, never by
+  parsing prose, so no specific language/level value is hard-coded anywhere in application code.
+- **Bullet cap**: `resume_builder/schemas.py::MAX_BULLETS_PER_ENGAGEMENT = 6`, enforced both in the
+  pydantic schema (`max_length`) and as a hard post-response check in `validators/no_fabrication.py`
+  -- never truncated.
+- **Full-request token budget** (`resume_builder/services/generate.py::generate_resume_content`):
+  a new check counts the complete assembled request (system+user messages plus the output schema)
+  via the project's one canonical estimator, immediately before the adapter's HTTP call, replacing
+  reliance on `services/context.py`'s own partial (claim/rule/engagement-text-only) estimate as the
+  sole gate. Fails closed with a sanitized (no request content) error message.
+- **READY revision workflow**: `job_applications.services.begin_new_version_from_ready`/
+  `JobApplication.begin_revision_from_ready` is now a real, guarded `READY -> ANALYSIS` transition
+  (previously a no-op precondition check only) -- atomic, `select_for_update()`-locked, rejecting a
+  call against an already-stale chain. A POST-only, CSRF-protected, explicitly-confirmed UI action
+  (`job_applications:begin_revision`) was added to the `READY` application detail page. Not
+  exercised against `JobApplication` 9.
+- **Tests**: 1157/1157 passing (up from 1111 pre-correction), covering snapshot-identity pinning
+  (a real `build_fit_assessment` run records `based_on_candidate_memory` and a valid, atomically-
+  persisted manifest; a second `CandidateMemory` revision activating afterward leaves an existing
+  `FitAssessment`'s own manifest and M6 context byte-for-byte identical; engagement approval/mapping
+  changes after manifest creation do not alter it; cross-revision claim_ids and malformed manifests
+  fail closed), completeness (`MODEL_OMITTED_CONTENT` fails the whole build; a missing pinned
+  language fact fails the whole build; the bullet cap is enforced both at the schema and
+  post-response layers), the full-request token budget (a large `RequirementAssessment` explanation
+  alone is now enough to trip the check, proving the prior partial estimator's gap is closed; the
+  provider adapter is never even constructed once the budget check fails), and the READY revision
+  workflow (GET rejected, CSRF required, only `READY` may begin, a duplicate POST is safely
+  rejected, historical `FitAssessment`/`ResumeDraft` rows and `application_outcome` are unchanged,
+  and the full re-run sequence genuinely requires fresh Gate 1/Gate 2 approval for the new
+  versions).
+- **Verification**: `manage.py check`/`makemigrations --check --dry-run` clean, `ruff check .`
+  clean, zero live provider calls anywhere in this work (`FakeAdapter`/`_ScriptedResultsAdapter`
+  only). Operational counts (`JobApplication`, `JobRequirementAnalysis`, `FitAssessment`,
+  `ResumeDraft`, `CandidateMemory`, `LLMCallLog`, `StageModelAssignment`) and `JobApplication` 9's
+  own pointers/phase were confirmed identical before and after this session's work.
+- **Remaining work before `JobApplication` 9 can be regenerated with this correction**: unchanged
+  from D-036's own entry below, with one addition -- `FitAssessment` 9 has no pinned identity/
+  manifest (confirmed: both fields are null/empty after migration), so `LegacyFitAssessmentManifestError`
+  now makes this explicit and enforced: a fresh, versioned M5 run (a new `FitAssessment`) is
+  required before *any* M6 build can run for `JobApplication` 9, corrected or otherwise -- a live
+  Agent Builder run reusing the existing `FitAssessment` 9 (which D-036's own entry left open as a
+  theoretical possibility) is no longer possible even in principle.
 
 ## Maintenance rule for this file
 

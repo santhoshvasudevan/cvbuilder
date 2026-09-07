@@ -3,12 +3,19 @@
 `services/static_profile_boundary.render_engagement_header`, resolved fresh from the database by
 `engagement_id` -- never anything Agent Builder produced (D-019).
 
-Baseline chronology completeness (D-035, 2026-09-06): every engagement in `retrieval.engagements`
-(every currently `APPROVED` `CareerEngagement`, per `services/context.py`) gets a rendered header,
+Baseline chronology completeness (D-035, 2026-09-06; pinned-identity correction D-037,
+2026-09-07): every engagement in `retrieval.engagements` (the exact, pinned roster
+`services/context.py` reconstructs from the owning `FitAssessment`'s
+`baseline_chronology_manifest`, never a live `APPROVED`-engagement query) gets a rendered header,
 regardless of whether Agent Builder actually wrote any bullets for it -- an engagement's presence in
 the résumé is no longer contingent on the model having selected/generated content for it. An
 engagement with zero bullets renders an explicit italic diagnostic line instead of either a blank
-section or a fabricated bullet -- see `_NO_EVIDENCE_DIAGNOSTIC`.
+section or a fabricated bullet -- see `_NO_EVIDENCE_DIAGNOSTIC`. By the time this module runs, that
+line is only ever reachable for a genuine `NO_ELIGIBLE_EVIDENCE` engagement (one the pinned manifest
+itself recorded had zero eligible anchor claims): `resume_builder.validators.completeness` runs
+*before* rendering and fails the whole build closed for the other case (`MODEL_OMITTED_CONTENT` --
+eligible evidence existed but Agent Builder's output didn't use it), so this module never has to
+tell the two apart itself.
 
 Achievement placement (Sec 4's "avoid unnecessary duplication... left open for a future
 iteration"): a deterministic v1 policy, not a semantic/fuzzy dedup. An achievement is treated as
@@ -45,7 +52,7 @@ def _engagement_sort_key(engagement: CareerEngagement) -> tuple[int, int]:
     return (-end_index, -start_index)
 
 
-def _place_achievements(
+def place_achievements(
     elements: list[ValidatedElement], retrieval: RetrievalContext
 ) -> list[ValidatedElement]:
     covered_claim_ids: set[str] = set()
@@ -98,7 +105,7 @@ def render_resume_markdown(
     retrieval: RetrievalContext,
     language: str = "en",
 ) -> str:
-    elements = _place_achievements(elements, retrieval)
+    elements = place_achievements(elements, retrieval)
 
     def section_items(section: str, engagement_id: str = "") -> list[ValidatedElement]:
         return sorted(

@@ -7,6 +7,8 @@ from django.views.decorators.http import require_http_methods
 from .models import JobApplication
 from .services import (
     InvalidOutcomeTransitionError,
+    RevisionNotAuthorizedError,
+    begin_new_version_from_ready,
     build_dashboard_row,
     compute_dashboard_summary,
     compute_freshness,
@@ -64,3 +66,24 @@ def detail_view(request, pk: int):
             "error": error,
         },
     )
+
+
+@require_http_methods(["POST"])
+def begin_revision_view(request, pk: int):
+    """The canonical, operator-facing UI action for the READY-revision workflow (D-037): POST
+    only, CSRF-protected (the default Django middleware, exercised by the form's `{% csrf_token
+    %}` in `detail.html`), and requires the application to actually be `READY` -- every guarantee
+    is re-checked fresh here via `job_applications.services.begin_new_version_from_ready`, never
+    trusted from what the page happened to render. A GET (even to this URL) is rejected outright
+    by `require_http_methods`; there is no way to trigger this action without a POST."""
+    application = get_object_or_404(JobApplication, pk=pk)
+    try:
+        begin_new_version_from_ready(application)
+        messages.success(
+            request,
+            "A new revision has begun: this application is back at Gate 1 -- re-run Agent "
+            "Candidate to create a new FitAssessment version and review it there.",
+        )
+    except RevisionNotAuthorizedError as exc:
+        messages.error(request, str(exc))
+    return redirect("job_applications:detail", pk=application.pk)

@@ -8,6 +8,7 @@ import contextlib
 from unittest import mock
 
 from candidate_matching.models import FitAssessment
+from candidate_matching.services.baseline_chronology import build_manifest_for_job_relevant_claim_ids
 from candidate_matching.tests.factories import (
     freeze_revision,
     make_engagement,
@@ -147,9 +148,12 @@ def make_ready_for_gate2_application(
         )
     application.advance_to_analysis(jra=jra)
 
+    manifest = build_manifest_for_job_relevant_claim_ids(rev, [engagement], [claim.claim_id])
     fit_assessment = FitAssessment.objects.create(
         job_application=application, version=1, based_on_jra=jra,
+        based_on_candidate_memory=rev,
         retrieved_claim_ids=[claim.claim_id], retrieved_engagement_ids=[engagement.engagement_id],
+        baseline_chronology_manifest=manifest,
     )
     for order, _requirement in enumerate(requirements, start=1):
         from candidate_matching.models import RequirementAssessment

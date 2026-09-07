@@ -18,10 +18,16 @@ from __future__ import annotations
 from django.db import IntegrityError, transaction
 from django.db.models import Max
 
+from candidate_matching.services.baseline_chronology import (
+    InvalidBaselineManifestError,
+    LegacyFitAssessmentManifestError,
+)
+from candidate_matching.services.retrieval_limits import RetrievalBudgetExceededError
 from job_applications.models import JobApplication
 
 from ..models import ResumeDraft, ResumeElement
-from ..rendering.markdown import render_resume_markdown
+from ..rendering.markdown import place_achievements, render_resume_markdown
+from ..validators.completeness import CompletenessError, ensure_completeness
 from ..validators.no_fabrication import NoFabricationError, validate_and_flatten
 from .context import build_builder_context
 from .generate import generate_resume_content
@@ -54,16 +60,16 @@ def build_resume_draft(job_application) -> ResumeDraft:
         )
 
     jra = job_application.current_jra
-    retrieval = build_builder_context(fit_assessment)
-    if fit_assessment.retrieved_claim_ids and not retrieval.claims:
-        raise ResumeBuilderError(
-            "None of this FitAssessment's retrieved claims are still confirmed, resume-eligible, "
-            "and on the ACTIVE CandidateMemory -- the underlying memory has changed since Gate 1 "
-            "was approved. Re-run Agent Candidate against the current CandidateMemory first."
-        )
+    try:
+        retrieval = build_builder_context(fit_assessment)
+    except (LegacyFitAssessmentManifestError, InvalidBaselineManifestError) as exc:
+        raise ResumeBuilderError(str(exc)) from exc
     requirement_assessments = list(fit_assessment.requirement_assessments.all())
 
-    llm_result = generate_resume_content(jra, requirement_assessments, retrieval)
+    try:
+        llm_result = generate_resume_content(jra, requirement_assessments, retrieval)
+    except RetrievalBudgetExceededError as exc:
+        raise ResumeBuilderError(str(exc)) from exc
     if llm_result.is_error:
         raise ResumeBuilderError(f"Agent Builder generation failed: {llm_result.error.message}")
     ab_output = llm_result.content
@@ -71,6 +77,17 @@ def build_resume_draft(job_application) -> ResumeDraft:
     try:
         elements = validate_and_flatten(ab_output, retrieval=retrieval)
     except NoFabricationError as exc:
+        raise ResumeBuilderError(str(exc)) from exc
+
+    # D-037 completeness enforcement: run on the *placed* elements (achievements resolved to their
+    # final section/engagement) so an achievement placed under an engagement counts toward that
+    # engagement's content. `place_achievements` is a pure, deterministic function of
+    # (elements, retrieval) -- calling it again inside `render_resume_markdown` below reproduces
+    # the exact same placement, so no result computed here needs to be threaded through.
+    placed_elements = place_achievements(elements, retrieval)
+    try:
+        ensure_completeness(placed_elements, retrieval)
+    except CompletenessError as exc:
         raise ResumeBuilderError(str(exc)) from exc
 
     language = ab_output.positioning_guidance.resume_language or "en"

@@ -10,6 +10,7 @@ from __future__ import annotations
 from django.test import TestCase
 
 from candidate_matching.models import FitAssessment
+from candidate_matching.services.baseline_chronology import build_manifest_for_job_relevant_claim_ids
 from candidate_memory.models import CandidateMemory, ClaimEngagementMapping
 from job_applications.models import JobApplication
 from job_intake.models import JobRequirementAnalysis
@@ -17,6 +18,19 @@ from job_intake.models import JobRequirementAnalysis
 from ..services.context import build_builder_context
 from ..validators.no_fabrication import NoFabricationError, validate_and_flatten
 from .factories import freeze_revision, make_engagement, make_narrative_claim, make_revision
+
+
+def _pinned_fit_assessment(jra, candidate_memory, approved_engagements, job_relevant_claim_ids):
+    manifest = build_manifest_for_job_relevant_claim_ids(
+        candidate_memory, list(approved_engagements), list(job_relevant_claim_ids)
+    )
+    return FitAssessment(
+        based_on_jra=jra,
+        based_on_candidate_memory=candidate_memory,
+        retrieved_claim_ids=list(job_relevant_claim_ids),
+        retrieved_engagement_ids=[e.engagement_id for e in approved_engagements],
+        baseline_chronology_manifest=manifest,
+    )
 
 
 def _make_jra() -> JobRequirementAnalysis:
@@ -90,17 +104,14 @@ class EngagementPlacementAdversarialTests(TestCase):
         )
         freeze_revision(self.rev, CandidateMemory.Status.ACTIVE)
 
-        self.fit_assessment = FitAssessment(
-            based_on_jra=_make_jra(),
-            retrieved_claim_ids=[
+        self.fit_assessment = _pinned_fit_assessment(
+            _make_jra(),
+            self.rev,
+            approved_engagements=[self.ford, self.continental, self.maruti],
+            job_relevant_claim_ids=[
                 self.ford_claim.claim_id,
                 self.continental_claim.claim_id,
                 self.global_claim.claim_id,
-            ],
-            retrieved_engagement_ids=[
-                self.ford.engagement_id,
-                self.continental.engagement_id,
-                self.maruti.engagement_id,
             ],
         )
         self.retrieval = build_builder_context(self.fit_assessment)
@@ -153,10 +164,13 @@ class EngagementPlacementAdversarialTests(TestCase):
             career_engagement=self.continental,
             status=ClaimEngagementMapping.Status.APPROVED,
         )
-        fit_assessment = FitAssessment(
-            based_on_jra=self.fit_assessment.based_on_jra,
-            retrieved_claim_ids=[self.ford_claim.claim_id],
-            retrieved_engagement_ids=[self.ford.engagement_id, self.continental.engagement_id],
+        # Manifest rebuilt (simulating a fresh M5 run) *after* the new mapping was approved --
+        # naturally picks up both approved engagements for this claim.
+        fit_assessment = _pinned_fit_assessment(
+            self.fit_assessment.based_on_jra,
+            self.rev,
+            approved_engagements=[self.ford, self.continental, self.maruti],
+            job_relevant_claim_ids=[self.ford_claim.claim_id],
         )
         retrieval = build_builder_context(fit_assessment)
 
@@ -177,16 +191,17 @@ class EngagementPlacementAdversarialTests(TestCase):
         claim = make_narrative_claim(rev, canonical_text_en="Mapping-status scenario claim.")
         ClaimEngagementMapping.objects.create(memory_claim=claim, career_engagement=self.ford, status=status)
         freeze_revision(rev, CandidateMemory.Status.ACTIVE)
-        return claim
+        return claim, rev
 
     def test_rejected_mapping_never_reaches_retrieval_citing_it_is_treated_as_fabricated(self):
         from ..schemas import AgentBuilderOutput
 
-        rejected_claim = self._mapping_status_scenario(ClaimEngagementMapping.Status.REJECTED)
-        fit_assessment = FitAssessment(
-            based_on_jra=self.fit_assessment.based_on_jra,
-            retrieved_claim_ids=[rejected_claim.claim_id],  # only ever possible via a stale/tampered pointer
-            retrieved_engagement_ids=[self.ford.engagement_id],
+        rejected_claim, rev = self._mapping_status_scenario(ClaimEngagementMapping.Status.REJECTED)
+        fit_assessment = _pinned_fit_assessment(
+            self.fit_assessment.based_on_jra, rev,
+            approved_engagements=[self.ford],
+            # only ever possible via a stale/tampered pointer
+            job_relevant_claim_ids=[rejected_claim.claim_id],
         )
         retrieval = build_builder_context(fit_assessment)
         # build_builder_context re-verifies each claim's OWN eligibility -- it does not exclude a
@@ -205,11 +220,11 @@ class EngagementPlacementAdversarialTests(TestCase):
     def test_proposed_only_mapping_is_also_treated_as_global_never_as_approved_for_that_engagement(self):
         from ..schemas import AgentBuilderOutput
 
-        proposed_claim = self._mapping_status_scenario(ClaimEngagementMapping.Status.PROPOSED)
-        fit_assessment = FitAssessment(
-            based_on_jra=self.fit_assessment.based_on_jra,
-            retrieved_claim_ids=[proposed_claim.claim_id],
-            retrieved_engagement_ids=[self.ford.engagement_id],
+        proposed_claim, rev = self._mapping_status_scenario(ClaimEngagementMapping.Status.PROPOSED)
+        fit_assessment = _pinned_fit_assessment(
+            self.fit_assessment.based_on_jra, rev,
+            approved_engagements=[self.ford],
+            job_relevant_claim_ids=[proposed_claim.claim_id],
         )
         retrieval = build_builder_context(fit_assessment)
         self.assertEqual(retrieval.claims[0].approved_engagement_ids, ())
@@ -220,32 +235,29 @@ class EngagementPlacementAdversarialTests(TestCase):
         with self.assertRaises(NoFabricationError):
             validate_and_flatten(output, retrieval=retrieval)
 
-    def test_claim_from_a_different_candidate_memory_revision_is_never_retrievable(self):
-        from ..schemas import AgentBuilderOutput
+    def test_claim_from_a_different_candidate_memory_revision_fails_closed(self):
+        """D-037: a manifest referencing another CandidateMemory revision's claim_id (simulating
+        corruption/tampering -- this can never happen through the real M5 boundary, which only
+        ever queries claims on the exact pinned revision) is rejected outright at context-build
+        time, never silently excluded and left for the no-fabrication validator to catch later."""
+        from candidate_matching.services.baseline_chronology import InvalidBaselineManifestError
 
         other_rev = make_revision(status=CandidateMemory.Status.BUILDING)
         other_claim = make_narrative_claim(other_rev, canonical_text_en="From a different revision.")
         freeze_revision(other_rev, CandidateMemory.Status.SUPERSEDED)
 
+        manifest = build_manifest_for_job_relevant_claim_ids(self.rev, [self.ford], [])
+        manifest["claim_inclusion_reasons"][other_claim.claim_id] = ["JOB_RELEVANT"]
+        manifest["claim_approved_engagement_ids"][other_claim.claim_id] = []
         fit_assessment = FitAssessment(
             based_on_jra=self.fit_assessment.based_on_jra,
+            based_on_candidate_memory=self.rev,
             retrieved_claim_ids=[other_claim.claim_id],  # only reachable via a stale/tampered pointer
             retrieved_engagement_ids=[self.ford.engagement_id],
+            baseline_chronology_manifest=manifest,
         )
-        retrieval = build_builder_context(fit_assessment)
-        # The cross-revision, stale-pointer claim itself never resolves -- but (D-035 hybrid
-        # chronology) self.ford's own legitimate anchor claim (self.ford_claim, confirmed/eligible
-        # on the real ACTIVE revision) is now deterministically present regardless of what this
-        # particular FitAssessment happened to select, so the context is no longer expected to be
-        # empty outright.
-        self.assertNotIn(other_claim.claim_id, retrieval.claim_ids)
-
-        output = AgentBuilderOutput.model_validate(
-            _output_with_bullet(self.ford.engagement_id, [other_claim.claim_id])
-        )
-        with self.assertRaises(NoFabricationError) as ctx:
-            validate_and_flatten(output, retrieval=retrieval)
-        self.assertIn("not in the retrieved context", str(ctx.exception))
+        with self.assertRaises(InvalidBaselineManifestError):
+            build_builder_context(fit_assessment)
 
     def test_unknown_engagement_id_is_rejected(self):
         from ..schemas import AgentBuilderOutput

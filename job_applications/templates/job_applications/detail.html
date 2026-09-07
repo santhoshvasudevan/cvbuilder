@@ -138,4 +138,18 @@ Application #{{ application.pk }}
 <p>Application outcome can only be recorded once Gate 2 is approved and the current resume draft
 is not stale.</p>
 {% endif %}
+
+{% if application.pipeline_phase == "READY" and not row.is_stale %}
+<h2>Begin a new revision</h2>
+<p>Starting a new revision reopens Gate 1 for this application (e.g. because the target posting
+changed, or CandidateMemory has since been corrected) without touching this application's existing,
+already-approved history -- the current FitAssessment/ResumeDraft versions remain exactly as they
+are, and Gate 1 and Gate 2 will both need to be reviewed again for whatever new versions you create
+next.</p>
+<form method="post" action="{% url 'job_applications:begin_revision' pk=application.pk %}"
+      onsubmit="return confirm('Begin a new revision for this application? This reopens Gate 1 -- your existing approved history is preserved, but Gate 1 and Gate 2 will need to be reviewed again for any new versions.');">
+  {% csrf_token %}
+  <button type="submit" class="btn">Begin new revision</button>
+</form>
+{% endif %}
 {% endblock %}

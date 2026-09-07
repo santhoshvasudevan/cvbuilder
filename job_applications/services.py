@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from django.urls import reverse
 
-from .models import JobApplication
+from .models import InvalidPhaseTransitionError, JobApplication, StaleAssessmentError
 
 
 class InvalidOutcomeTransitionError(Exception):
@@ -27,29 +27,31 @@ class RevisionNotAuthorizedError(Exception):
 
 
 def begin_new_version_from_ready(application: JobApplication) -> None:
-    """The canonical, explicit-authorization entry point for the READY-revision workflow (D-035
-    investigation, 2026-09-06): generating a new artifact chain for an application that has
-    already reached `READY` (e.g. the target posting was updated, or the operator wants Agent
-    Candidate/Agent Builder re-run against a corrected CandidateMemory).
+    """The canonical, explicit-authorization entry point for the READY-revision workflow.
 
-    This function performs **no mutation** -- it is a required, explicit precondition checkpoint a
-    caller (a future dedicated UI control, or an operator-driven script) must call and have
-    succeed *before* re-entering Gate 1 for a `READY` application, so that "start a new version"
-    is always a deliberate, named action distinct from Gate 1's ordinary re-run/feedback
-    controls (which already place no `pipeline_phase` precondition on their own, by design, since
-    they must also work mid-pipeline). Formalizing this as its own function -- rather than leaving
-    the workflow only reachable as an unlabeled side effect of navigating to Gate 1's page --
-    is what makes the authorization explicit and auditable at the call site, without requiring any
-    new persisted state or a migration.
+    D-037 corrective fix: D-036's first version of this function performed **no mutation at all**
+    -- an independent audit found that left "begin a new version" as an unreachable no-op helper
+    rather than a real, guarded transition, formalizing nothing an operator could actually invoke.
+    This now performs the one real state change the workflow needs
+    (`JobApplication.begin_revision_from_ready`, `job_applications/models.py`): a guarded
+    READY -> ANALYSIS phase transition, atomic and locked exactly like `approve_gate1`/
+    `approve_gate2`. No current-version pointer (`current_jra`/`current_fit_assessment`/
+    `current_resume_draft`) or `application_outcome` is touched -- only `pipeline_phase` moves,
+    which is what makes the *next* `approve_gate1()` call (once a new `FitAssessment` version
+    exists) a real ANALYSIS -> PREPARATION transition again, rather than the silent READY-stays-
+    READY no-op it would otherwise be.
 
-    Every actual state-changing step of the workflow this authorizes is already implemented and
-    already enforces every other required guarantee on its own:
+    Every actual state-changing step of the revision workflow this authorizes is already
+    implemented and already enforces every other required guarantee on its own:
 
     - `reviews.services.run_agent_candidate` / `submit_gate1_feedback` (targeting AC, or AJ to
       first re-analyze the posting) -- always creates a new, append-only `FitAssessment` (or
       `JobRequirementAnalysis`) version and repoints `JobApplication.current_*`; the previous
       `ResumeDraft`/`FitAssessment`/`JobRequirementAnalysis` versions are never modified (D-010),
-      preserved exactly as immutable history.
+      preserved exactly as immutable history. `resume_builder.services.build.build_resume_draft`
+      itself refuses to run while `pipeline_phase` is `ANALYSIS` (it requires `PREPARATION` or
+      `READY`), so Agent Builder genuinely cannot run against the stale phase until Gate 1
+      re-approves.
     - `job_applications.models.JobApplication.approve_gate1` -- refuses a stale `FitAssessment`
       (D-006 freshness, `based_on_jra_id` vs. `current_jra_id`), and only transitions through the
       real `ANALYSIS`/`PREPARATION`/`READY` phases via its own guarded method -- never a direct
@@ -60,17 +62,17 @@ def begin_new_version_from_ready(application: JobApplication) -> None:
     - `job_applications.models.JobApplication.approve_gate2` -- the same D-006 freshness guard
       (`based_on_fit_assessment_id` vs. `current_fit_assessment_id`) and guarded phase transition.
 
-    Raises `RevisionNotAuthorizedError` if `application` is not currently `READY` -- this workflow
-    exists specifically for *revising a completed* application; an application still mid-pipeline
-    already has its ordinary Gate 1/Gate 2 controls available with no separate authorization step
-    needed.
+    Raises `RevisionNotAuthorizedError` if `application` is not currently `READY` (an application
+    still mid-pipeline already has its ordinary Gate 1/Gate 2 controls available with no separate
+    authorization step needed), or if it is `READY` but already stale relative to an upstream
+    change (that is the existing, different "resolve staleness at Gate 1" recovery path, not this
+    one) -- both of `JobApplication.begin_revision_from_ready`'s own domain errors are normalized
+    to this one public exception so callers (the view, tests) only need to handle one type.
     """
-    if application.pipeline_phase != JobApplication.PipelinePhase.READY:
-        raise RevisionNotAuthorizedError(
-            f"begin_new_version_from_ready requires pipeline_phase=READY, got "
-            f"{application.pipeline_phase!r} -- this application is still mid-pipeline and already "
-            "has its ordinary Gate 1/Gate 2 controls available with no separate authorization step."
-        )
+    try:
+        application.begin_revision_from_ready()
+    except (InvalidPhaseTransitionError, StaleAssessmentError) as exc:
+        raise RevisionNotAuthorizedError(str(exc)) from exc
 
 
 @dataclass(frozen=True)

@@ -284,6 +284,30 @@ milestone scope):
   contains the previously-omitted content) without needing any LLM-quality judgment call — this
   correction is a deterministic data-flow/rendering fix, not a prompt-quality change, so it needed
   no exception to the "no cassette testing until outputs stabilize" rule above.
+- **M6 corrective follow-up (2026-09-07, D-037)**: an independent audit found the 2026-09-06 fix
+  above still re-derived evidence from live mutable state at M6 time instead of a pinned
+  `FitAssessment` identity. Testing this correction needed one new pattern beyond "deterministic,
+  `FakeAdapter`-only": proving *drift-immunity* -- that changing live state (activating a second
+  `CandidateMemory` revision, rejecting a `CareerEngagement`, revoking a `ClaimEngagementMapping`)
+  *after* a `FitAssessment`'s manifest was already persisted has **zero** effect on that
+  `FitAssessment`'s own reconstructed M6 context (`candidate_matching/tests/
+  test_fit_assessment.py::PinnedEvidenceIdentityTests`, `resume_builder/tests/
+  test_context.py::test_engagement_rejected_after_manifest_creation_still_appears_pinned`,
+  `::test_mapping_status_change_after_manifest_creation_does_not_alter_reconstruction`) --
+  asserting equality of the manifest/context *before and after* the mutation, not just asserting a
+  single post-mutation snapshot. Manifest validation itself (`candidate_matching/tests/
+  test_baseline_chronology_manifest.py`, 15 tests) is tested as a pure unit -- malformed/
+  inconsistent/cross-revision dicts constructed by hand, no database fixture beyond what's needed
+  to build one valid manifest to mutate. Completeness enforcement
+  (`resume_builder/tests/test_completeness.py`) and the full-request budget check
+  (`resume_builder/tests/test_request_budget.py`) both drive the real `build_resume_draft`/
+  `generate_resume_content` orchestration end to end, `FakeAdapter` only, and the budget test
+  additionally asserts the mocked adapter's `generate()` is never even called once the check fails
+  -- proving the fail-closed check truly runs before any would-be HTTP call, not just that an
+  exception is eventually raised somewhere in the call stack. 46 new tests total; still no
+  LLM-quality judgment call anywhere (this remains a deterministic data-flow/schema-validation
+  correction), so it needed no exception to the "no cassette testing until outputs stabilize" rule
+  above.
 
 
 
