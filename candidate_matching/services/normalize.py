@@ -105,17 +105,22 @@ def build_request(
 
 
 def expand_requirements_for_search(
-    requirements: list[dict], *, posting_language: str
+    requirements: list[dict], *, posting_language: str, requested_model_id: int | None = None
 ) -> dict[str, RequirementNormalizationItem]:
     """The orchestration entry point `bounded_retrieval.py` calls. Returns one
     `RequirementNormalizationItem` per input requirement, keyed by `requirement_id`. Raises
-    `NormalizationFailedError` rather than ever returning a partial or degraded result."""
+    `NormalizationFailedError` rather than ever returning a partial or degraded result.
+
+    `requested_model_id`, when given, is a per-run operator override for this one call
+    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
     if not requirements:
         return {}
 
     input_ids = [requirement["requirement_id"] for requirement in requirements]
 
-    adapter = get_adapter_for_stage(StageModelAssignment.Stage.AC_NORMALIZE)
+    adapter = get_adapter_for_stage(
+        StageModelAssignment.Stage.AC_NORMALIZE, requested_model_id=requested_model_id
+    )
     request = build_request(
         requirements,
         posting_language=posting_language,

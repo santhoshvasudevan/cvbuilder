@@ -19,6 +19,9 @@ from job_applications.models import (
 from job_intake.services.fetch import FetchError
 from job_intake.services.intake import AnalysisFailedError, IntakeValidationError
 from job_intake.services.intake import ConcurrentModificationError as JraConcurrentModificationError
+from llm_provider.models import StageModelAssignment
+from llm_provider.services.eligibility import eligible_models_for_stage, model_display_label
+from llm_provider.services.model_selection import ModelNotEligibleForStageError, parse_requested_model_id
 from resume_builder.services.build import (
     ConcurrentModificationError as ResumeDraftConcurrentModificationError,
 )
@@ -35,17 +38,61 @@ from .services import (
     submit_gate2_feedback,
 )
 
+GATE1_MODEL_STAGES = (
+    StageModelAssignment.Stage.AC_NORMALIZE,
+    StageModelAssignment.Stage.AC_RANK,
+    StageModelAssignment.Stage.AC_MATCH,
+    StageModelAssignment.Stage.AJ_ANALYZE,
+)
+GATE2_MODEL_STAGES = (StageModelAssignment.Stage.AB_BUILD,)
+
+
+def _stage_model_choices(stages) -> dict:
+    """Builds the per-stage selector context (`{stage: {"choices": [...], "current_default":
+    model_or_None}}`) both gate templates render one `<select>` from -- one shared helper so
+    Gate 1's four independently-configurable calls (AJ_ANALYZE/AC_NORMALIZE/AC_RANK/AC_MATCH) and
+    Gate 2's one (AB_BUILD) are built the exact same way (2026-09-07, per-run model selection)."""
+    context = {}
+    for stage in stages:
+        default_assignment = (
+            StageModelAssignment.objects.select_related("model__provider").filter(stage=stage).first()
+        )
+        default_model = default_assignment.model if default_assignment else None
+        choices = []
+        for model in eligible_models_for_stage(stage):
+            label = model_display_label(model)
+            if default_model is not None and model.pk == default_model.pk:
+                label = f"{label} [Default]"
+            choices.append((model.pk, label))
+        context[stage] = {"choices": choices, "current_default": default_model}
+    return context
+
 
 @require_http_methods(["GET", "POST"])
 def gate1_view(request, application_id: int):
     application = get_object_or_404(JobApplication, pk=application_id)
     error = None
 
+    submitted_models = {
+        StageModelAssignment.Stage.AC_NORMALIZE: request.POST.get("model_ac_normalize", ""),
+        StageModelAssignment.Stage.AC_RANK: request.POST.get("model_ac_rank", ""),
+        StageModelAssignment.Stage.AC_MATCH: request.POST.get("model_ac_match", ""),
+        StageModelAssignment.Stage.AJ_ANALYZE: request.POST.get("model_aj", ""),
+    }
+
     if request.method == "POST":
         action = request.POST.get("action")
         try:
+            ac_requested_models = {
+                stage: parse_requested_model_id(submitted_models[stage])
+                for stage in (
+                    StageModelAssignment.Stage.AC_NORMALIZE,
+                    StageModelAssignment.Stage.AC_RANK,
+                    StageModelAssignment.Stage.AC_MATCH,
+                )
+            }
             if action == "run_ac":
-                run_agent_candidate(application)
+                run_agent_candidate(application, requested_models=ac_requested_models)
                 messages.success(request, "Agent Candidate assessment produced.")
             elif action == "feedback":
                 target = request.POST.get("target", "")
@@ -56,6 +103,10 @@ def gate1_view(request, application_id: int):
                     comments=comments,
                     url=request.POST.get("url", ""),
                     pasted_text=request.POST.get("pasted_text", ""),
+                    requested_model_id=parse_requested_model_id(
+                        submitted_models[StageModelAssignment.Stage.AJ_ANALYZE]
+                    ),
+                    requested_models=ac_requested_models,
                 )
                 messages.success(request, f"Feedback recorded and {target} re-run.")
             elif action == "approve":
@@ -74,6 +125,7 @@ def gate1_view(request, application_id: int):
             AnalysisFailedError,
             FitAssessmentConcurrentModificationError,
             JraConcurrentModificationError,
+            ModelNotEligibleForStageError,
         ) as exc:
             error = str(exc)
         except FetchError as exc:
@@ -116,6 +168,8 @@ def gate1_view(request, application_id: int):
             "is_stale": is_stale,
             "feedback_history": feedback_history,
             "error": error,
+            "model_stages": _stage_model_choices(GATE1_MODEL_STAGES),
+            "submitted_models": submitted_models,
         },
     )
 
@@ -124,15 +178,21 @@ def gate1_view(request, application_id: int):
 def gate2_view(request, application_id: int):
     application = get_object_or_404(JobApplication, pk=application_id)
     error = None
+    submitted_model_ab = request.POST.get("model_ab", "")
 
     if request.method == "POST":
         action = request.POST.get("action")
         try:
+            requested_model_id = parse_requested_model_id(submitted_model_ab)
             if action == "run_ab":
-                run_agent_builder(application)
+                run_agent_builder(application, requested_model_id=requested_model_id)
                 messages.success(request, "Agent Builder draft produced.")
             elif action == "feedback":
-                submit_gate2_feedback(application, comments=request.POST.get("comments", ""))
+                submit_gate2_feedback(
+                    application,
+                    comments=request.POST.get("comments", ""),
+                    requested_model_id=requested_model_id,
+                )
                 messages.success(request, "Feedback recorded and Agent Builder re-run.")
             elif action == "approve":
                 approve_gate2(application)
@@ -146,6 +206,7 @@ def gate2_view(request, application_id: int):
             GateNotReadyError,
             StaleAssessmentError,
             ResumeDraftConcurrentModificationError,
+            ModelNotEligibleForStageError,
         ) as exc:
             error = str(exc)
 
@@ -211,5 +272,7 @@ def gate2_view(request, application_id: int):
             "upstream_stale": upstream_stale,
             "feedback_history": feedback_history,
             "error": error,
+            "model_stages": _stage_model_choices(GATE2_MODEL_STAGES),
+            "submitted_model_ab": submitted_model_ab,
         },
     )

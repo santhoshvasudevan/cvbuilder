@@ -17,15 +17,27 @@ class FeedbackTargetError(Exception):
     pass
 
 
-def run_agent_candidate(job_application):
+def run_agent_candidate(job_application, *, requested_models: dict[str, int] | None = None):
     """Explicit, operator-initiated Agent Candidate run -- the initial run for this application,
     or a plain re-run with no feedback attached (e.g. after the underlying CandidateMemory or
-    CareerEngagement registry changed). Always creates a new FitAssessment version."""
-    return build_fit_assessment(job_application)
+    CareerEngagement registry changed). Always creates a new FitAssessment version.
+
+    `requested_models`, when given, is a per-run operator override map keyed by
+    `StageModelAssignment.Stage` value (2026-09-07, per-run model selection), covering
+    AC_NORMALIZE/AC_RANK/AC_MATCH -- Agent Candidate's three independently-configurable LLM calls.
+    Never persisted as a new stage default."""
+    return build_fit_assessment(job_application, requested_models=requested_models)
 
 
 def submit_gate1_feedback(
-    job_application, *, target: str, comments: str, url: str = "", pasted_text: str = ""
+    job_application,
+    *,
+    target: str,
+    comments: str,
+    url: str = "",
+    pasted_text: str = "",
+    requested_model_id: int | None = None,
+    requested_models: dict[str, int] | None = None,
 ) -> ReviewFeedback:
     """Records the feedback, then immediately performs the targeted re-run as one synchronous
     action (this repository has no queue/broker per STACK-003 -- there is no "pending" interval to
@@ -44,9 +56,11 @@ def submit_gate1_feedback(
     )
 
     if target == ReviewFeedback.Target.AJ:
-        rerun_analysis(job_application, url=url, pasted_text=pasted_text)
+        rerun_analysis(
+            job_application, url=url, pasted_text=pasted_text, requested_model_id=requested_model_id
+        )
     else:
-        build_fit_assessment(job_application)
+        build_fit_assessment(job_application, requested_models=requested_models)
 
     return feedback
 
@@ -55,13 +69,18 @@ def approve_gate1(job_application) -> None:
     job_application.approve_gate1()
 
 
-def run_agent_builder(job_application):
+def run_agent_builder(job_application, *, requested_model_id: int | None = None):
     """Explicit, operator-initiated Agent Builder run -- the initial run for this application, or
-    a plain re-run with no feedback attached. Always creates a new ResumeDraft version."""
-    return build_resume_draft(job_application)
+    a plain re-run with no feedback attached. Always creates a new ResumeDraft version.
+
+    `requested_model_id`, when given, is a per-run operator override for AB_BUILD (2026-09-07,
+    per-run model selection) -- never persisted as a new stage default."""
+    return build_resume_draft(job_application, requested_model_id=requested_model_id)
 
 
-def submit_gate2_feedback(job_application, *, comments: str) -> ReviewFeedback:
+def submit_gate2_feedback(
+    job_application, *, comments: str, requested_model_id: int | None = None
+) -> ReviewFeedback:
     """Gate 2 feedback always targets Agent Builder (AB) -- Gate 2 review is about resume content,
     not the underlying fit assessment; feedback about a wrong disposition or missing evidence
     belongs at Gate 1 instead. Records the feedback, then immediately reruns Agent Builder as one
@@ -72,7 +91,7 @@ def submit_gate2_feedback(job_application, *, comments: str) -> ReviewFeedback:
         target=ReviewFeedback.Target.AB,
         comments=comments,
     )
-    build_resume_draft(job_application)
+    build_resume_draft(job_application, requested_model_id=requested_model_id)
     return feedback
 
 

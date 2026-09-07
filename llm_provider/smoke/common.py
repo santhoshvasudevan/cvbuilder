@@ -140,7 +140,9 @@ def select_default_model(provider_type: str) -> LLMModel:
 
     candidates = list(
         LLMModel.objects.filter(
-            provider__provider_type=provider_type, supports_structured_output=True
+            provider__provider_type=provider_type,
+            supports_structured_output=True,
+            is_active=True,
         ).select_related("provider")
     )
     if len(candidates) == 1:
@@ -238,4 +240,8 @@ def run_smoke_test(
         sys.exit(1)
 
     latency = f"{result.latency_ms:.0f}" if result.latency_ms is not None else "?"
-    print(f"{provider_type}: OK -- content={result.content!r} usage={result.usage} latency_ms={latency}")
+    print(
+        f"{provider_type}: OK -- content={result.content!r} usage={result.usage} "
+        f"latency_ms={latency} requested_model={llm_model.model_id!r} "
+        f"resolved_model={result.resolved_model!r} finish_reason={result.finish_reason!r}"
+    )

@@ -26,6 +26,12 @@
     {{ form.pasted_text }}
     {{ form.pasted_text.errors }}
   </p>
+  <p>
+    {{ form.model_aj.label_tag }}<br>
+    {{ form.model_aj }}
+    {{ form.model_aj.errors }}
+    <br><small>{{ form.model_aj.help_text }}</small>
+  </p>
   <button type="submit">Analyze</button>
 </form>
 {% endblock %}

@@ -15,11 +15,12 @@ class LLMProviderAdmin(admin.ModelAdmin):
     list_display = (
         "name",
         "provider_type",
+        "is_active",
         "credential_env_var",
         "data_collection_policy",
         "created_at",
     )
-    list_filter = ("provider_type",)
+    list_filter = ("provider_type", "is_active")
     change_list_template = "admin/llm_provider/llmprovider/change_list.html"
 
     def get_urls(self):
@@ -128,13 +129,15 @@ class LLMProviderAdmin(admin.ModelAdmin):
 class LLMModelAdmin(admin.ModelAdmin):
     list_display = (
         "model_id",
+        "display_name",
         "provider",
+        "is_active",
         "supports_structured_output",
         "supports_streaming",
         "supports_reasoning",
         "max_output_tokens",
     )
-    list_filter = ("provider", "supports_structured_output")
+    list_filter = ("provider", "is_active", "supports_structured_output")
 
 
 @admin.register(StageModelAssignment)
@@ -165,13 +168,16 @@ class LLMCallLogAdmin(admin.ModelAdmin):
         "stage",
         "provider",
         "model",
+        "resolved_model_id",
+        "finish_reason",
+        "selection_source",
         "total_tokens",
         "latency_ms",
         "retry_count",
         "error_category",
         "rate_limit_diagnostics",
     )
-    list_filter = ("stage", "provider", "error_category")
+    list_filter = ("stage", "provider", "error_category", "resolved_model_id", "selection_source")
     readonly_fields = [f.name for f in LLMCallLog._meta.fields]
 
     def has_add_permission(self, request):

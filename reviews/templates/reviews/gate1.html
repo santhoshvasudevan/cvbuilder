@@ -32,6 +32,7 @@
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ac">
+  {% include "reviews/_ac_model_selectors.html" %}
   <button type="submit">Run Agent Candidate</button>
 </form>
 {% else %}
@@ -92,6 +93,7 @@ JobRequirementAnalysis version -- re-run Agent Candidate before approving.</p>
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ac">
+  {% include "reviews/_ac_model_selectors.html" %}
   <button type="submit">Re-run Agent Candidate</button>
 </form>
 
@@ -121,6 +123,16 @@ JobRequirementAnalysis version -- re-run Agent Candidate before approving.</p>
   <p>Comments:<br><textarea name="comments" rows="4" cols="60"></textarea></p>
   <p>Optional new URL (Agent Jobber only):<br><input type="text" name="url" size="60"></p>
   <p>Optional new pasted text (Agent Jobber only):<br><textarea name="pasted_text" rows="4" cols="60"></textarea></p>
+  <p>
+    <label for="id_model_aj">Agent Jobber model (used if target is Agent Jobber)</label><br>
+    <select name="model_aj" id="id_model_aj">
+      <option value="" {% if not submitted_models.AJ_ANALYZE %}selected{% endif %}>System default</option>
+      {% for value, label in model_stages.AJ_ANALYZE.choices %}
+      <option value="{{ value }}" {% if submitted_models.AJ_ANALYZE == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </p>
+  {% include "reviews/_ac_model_selectors.html" %}
   <button type="submit">Submit feedback and re-run</button>
 </form>
 

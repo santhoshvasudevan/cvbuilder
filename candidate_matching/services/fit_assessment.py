@@ -20,6 +20,7 @@ from django.db.models import Max
 
 from candidate_memory.models import CareerEngagement
 from job_applications.models import JobApplication
+from llm_provider.models import StageModelAssignment
 
 from ..models import FitAssessment, RequirementAssessment
 from ..validators.disposition_coverage import AssessmentItemData, ensure_full_coverage, sanitize_items
@@ -43,7 +44,13 @@ class ConcurrentModificationError(Exception):
     lock via a different database connection pool configuration)."""
 
 
-def build_fit_assessment(job_application) -> FitAssessment:
+def build_fit_assessment(job_application, *, requested_models: dict[str, int] | None = None) -> FitAssessment:
+    """`requested_models`, when given, is a per-run operator override map keyed by
+    `StageModelAssignment.Stage` value (2026-09-07, per-run model selection) --
+    `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` keys are consulted; any absent/None key resolves through
+    that stage's configured `StageModelAssignment`, exactly as before. Never persisted as a new
+    stage default."""
+    requested_models = requested_models or {}
     if job_application.current_jra is None:
         raise AgentCandidateError(
             "JobApplication has no current JobRequirementAnalysis -- run Agent Jobber first."
@@ -92,12 +99,19 @@ def build_fit_assessment(job_application) -> FitAssessment:
 
     try:
         retrieval, manifest = build_bounded_context(
-            candidate_memory, narrative_requirements, posting_language=jra.posting_language
+            candidate_memory,
+            narrative_requirements,
+            posting_language=jra.posting_language,
+            requested_models=requested_models,
         )
     except (RankingFailedError, NormalizationFailedError, RetrievalBudgetExceededError) as exc:
         raise AgentCandidateError(f"Bounded retrieval failed: {exc}") from exc
 
-    llm_result = assess_requirements(retrieval, narrative_requirements)
+    llm_result = assess_requirements(
+        retrieval,
+        narrative_requirements,
+        requested_model_id=requested_models.get(StageModelAssignment.Stage.AC_MATCH),
+    )
     if llm_result.is_error:
         raise AgentCandidateError(f"Agent Candidate assessment failed: {llm_result.error.message}")
     llm_items = [

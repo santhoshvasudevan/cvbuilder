@@ -18,6 +18,12 @@ from ..models import LLMCallLog, LLMModel
 from ..retry import RetryPolicy, execute_with_retry
 from ..types import NormalizedLLMRequest, NormalizedLLMResult, TokenUsage
 
+# Default `LLMCallLog.selection_source` for an adapter constructed directly (e.g. `FakeAdapter(model)`
+# in a test, or any pre-2026-09-07 call site) rather than via `get_adapter_for_stage`, which is the
+# only place that ever sets this to OVERRIDE. Matches the pre-existing, unqualified "this stage's
+# configured default" behavior byte-for-byte for every caller that predates per-run selection.
+_DEFAULT_SELECTION_SOURCE = LLMCallLog.SelectionSource.DEFAULT
+
 # The one canonical fallback used when neither a stage-specific budget
 # (`StageModelAssignment.max_output_tokens`) nor a model capability (`LLMModel.max_output_tokens`)
 # is configured (2026-09-04, stage-specific token budgets). Every pipeline service must obtain its
@@ -58,6 +64,10 @@ class BaseLLMAdapter(ABC):
         # directly, overridden by `get_adapter_for_stage` only when the stage's own
         # `StageModelAssignment.read_timeout_seconds` is explicitly configured.
         self.effective_read_timeout_seconds = DEFAULT_READ_TIMEOUT_SECONDS
+        # Requested-vs-default audit (2026-09-07, per-run model selection): overwritten by
+        # `get_adapter_for_stage` to OVERRIDE when this adapter was built from an explicit
+        # per-run operator selection rather than the stage's StageModelAssignment.
+        self.selection_source = _DEFAULT_SELECTION_SOURCE
 
     @property
     def request_timeout(self) -> tuple[float, float]:
@@ -95,6 +105,11 @@ class BaseLLMAdapter(ABC):
                     ),
                     retry_count=result.retry_count,
                     latency_ms=result.latency_ms,
+                    # Preserve requested-vs-resolved audit info across this branch's replacement
+                    # result -- a Pydantic-schema-validation failure is still worth attributing to
+                    # whichever underlying model actually produced the (schema-invalid) content.
+                    resolved_model=result.resolved_model,
+                    finish_reason=result.finish_reason,
                 )
             else:
                 result.content = validated
@@ -108,6 +123,10 @@ class BaseLLMAdapter(ABC):
             provider=self.llm_model.provider,
             model=self.llm_model,
             stage=request.stage,
+            resolved_model_id=result.resolved_model or "",
+            finish_reason=result.finish_reason or "",
+            correlation_id=request.correlation_id or "",
+            selection_source=self.selection_source or "",
             input_tokens=usage.input_tokens,
             cached_input_tokens=usage.cached_input_tokens,
             output_tokens=usage.output_tokens,

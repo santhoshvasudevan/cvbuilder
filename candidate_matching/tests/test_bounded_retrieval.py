@@ -159,7 +159,7 @@ class BuildBoundedContextTests(TestCase):
 
         from ..schemas import RelevanceRankingOutput
 
-        def _select_all(candidate_pool, requirements):
+        def _select_all(candidate_pool, requirements, *, requested_model_id=None):
             return NormalizedLLMResult(
                 content=RelevanceRankingOutput(
                     rankings=[

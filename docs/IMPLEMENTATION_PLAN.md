@@ -151,6 +151,33 @@ changes — see D-025 in `docs/DECISIONS.md` and the "OpenRouter provider integr
 `docs/CURRENT_STATE.md`. Implementation-only: no `StageModelAssignment` was pointed at it and no
 live call was made.
 
+**Addendum (2026-09-07, D-038, PROPOSED)**: the OpenRouter Z.ai/GLM active stage assignment
+(`AC_NORMALIZE`, live-qualified per D-027) is replaced by OpenRouter's Free Models Router
+(`openrouter/free`) via a new idempotent `configure_openrouter_free_router` management command,
+reusing the existing `OpenRouterAdapter` unchanged for request construction/retry/error handling —
+only the registry (a new `LLMModel.is_active` flag so the retired Z.ai row is deactivated, never
+deleted, and enforced against re-routing) and the audit ledger (`LLMCallLog.resolved_model_id`/
+`finish_reason`/`correlation_id`, for a virtual router whose selected model can vary call to call)
+changed. See D-038 in `docs/DECISIONS.md` and the "OpenRouter Free Router migration" section of
+`docs/CURRENT_STATE.md`. Deterministically tested only; not yet live-qualified or applied to the
+real registry.
+
+**Addendum (2026-09-07, same day, D-038 ACCEPTED, broadened scope)**: the product owner approved
+D-038 and broadened it to make `openrouter/free` the default for **every** implemented stage
+(`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD`), not only
+`AC_NORMALIZE`. Added: a registry-driven per-run model-selection architecture
+(`llm_provider/services/eligibility.py`, `llm_provider/services/model_selection.py`; explicit
+override → stage default → typed failure, no hidden fallback) with operator-facing selectors on
+the real AJ (`job_intake`) and AC/AB (`reviews` Gate 1/Gate 2) workflow pages — not only Django
+admin; `LLMProvider.is_active`/`LLMModel.display_name`/`LLMCallLog.selection_source` (migration
+`llm_provider.0009_...`); `configure_openrouter_free_router` broadened to converge every stage and
+to deactivate every provider row's copy of the retired Z.ai model, not only the canonical one (a
+real-database check found an orphaned duplicate). Migration and configuration were applied to the
+real local development database with the operator's explicit authorization (verified idempotent
+directly against it). Live OpenRouter qualification remains deliberately deferred to the later
+M5/M6 run — not a completion criterion for this addendum. See D-038's "Update (2026-09-07, same
+day)" subsection in `docs/DECISIONS.md` and the corresponding update in `docs/CURRENT_STATE.md`.
+
 ## M3 — Candidate Memory build and confirmation workflow
 
 - **Objective**: the `candidate_memory` app fully implemented — explicit bootstrap from the three

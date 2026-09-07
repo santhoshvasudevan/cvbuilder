@@ -70,6 +70,19 @@ class LLMProvider(models.Model):
             "`provider.data_collection` routing directive. Ignored by every other provider type."
         ),
     )
+    is_active = models.BooleanField(
+        default=True,
+        help_text=(
+            "Whether any model under this provider may be selected for a new "
+            "StageModelAssignment or offered as a per-run override in the AJ/AC/AB model-selection "
+            "UI (2026-09-07, per-run model selection / D-038 default-configuration broadening). "
+            "Mirrors LLMModel.is_active at the provider level -- never deletes a provider row or "
+            "its LLMModel/LLMCallLog history; a retired provider is deactivated instead, which "
+            "removes every one of its models from eligibility (llm_provider.services.eligibility) "
+            "without needing to flip each model individually. Existing rows default to True, so "
+            "this migration changes no provider's current behavior on its own."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self) -> str:
@@ -84,9 +97,34 @@ class LLMModel(models.Model):
     model_id = models.CharField(
         max_length=200, help_text="Provider-specific model identifier, e.g. 'gpt-4o-mini'."
     )
+    display_name = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text=(
+            "Optional operator-friendly label shown in the AJ/AC/AB model-selection UI in place "
+            "of the raw model_id (2026-09-07, per-run model selection). Blank means the UI falls "
+            "back to showing '<provider name> -- <model_id>' -- this field exists only to improve "
+            "a selector's readability (e.g. 'Free Models Router' for 'openrouter/free'), never to "
+            "change routing or eligibility, which are always keyed off model_id/provider."
+        ),
+    )
     supports_structured_output = models.BooleanField(default=False)
     supports_streaming = models.BooleanField(default=False)
     supports_reasoning = models.BooleanField(default=False)
+    is_active = models.BooleanField(
+        default=True,
+        help_text=(
+            "Whether this model may still be selected for a new StageModelAssignment or the "
+            "smoke-test harness's default-model selection (2026-09-07, OpenRouter Free Router "
+            "migration). Never deletes a model row or its LLMCallLog history -- a retired model "
+            "(e.g. a superseded OpenRouter slug) is set to False instead, preserving referential "
+            "integrity and audit history while making rollback (flip this back to True, or "
+            "reassign a stage to it) a plain registry edit rather than a re-creation. "
+            "`get_adapter_for_stage` refuses to route a live call to an inactive model "
+            "(`InactiveModelAssignedError`) so nothing can silently keep calling a deactivated "
+            "model just because an old StageModelAssignment row still points at it."
+        ),
+    )
     max_output_tokens = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -205,6 +243,63 @@ class LLMCallLog(models.Model):
     provider = models.ForeignKey(LLMProvider, on_delete=models.PROTECT, related_name="call_logs")
     model = models.ForeignKey(LLMModel, on_delete=models.PROTECT, related_name="call_logs")
     stage = models.CharField(max_length=20, choices=StageModelAssignment.Stage.choices)
+
+    resolved_model_id = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text=(
+            "The actual upstream model id the provider reports it used to serve this call "
+            "(2026-09-07, requested-vs-resolved audit -- relevant for a virtual router such as "
+            "OpenRouter's Free Models Router, whose requested slug, e.g. 'openrouter/free', is "
+            "not the model that actually generated the response). Parsed only from the "
+            "response's own documented top-level 'model' field when present -- never guessed, "
+            "never overwriting `model` (the requested LLMModel FK, which always stays exact). "
+            "Blank when the provider did not report one (e.g. an error response, or a provider "
+            "whose response shape does not include it)."
+        ),
+    )
+    finish_reason = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text=(
+            "The provider's reported finish_reason for a successful call (e.g. 'stop', "
+            "'length'). Blank for an error row or when the provider did not report one. A "
+            "truncated response (finish_reason=length) is never stored as a success row in the "
+            "first place (llm_provider/adapters/openai.py's parser fails it closed as "
+            "CONFIGURATION before reaching here) -- this field records the reason for the rows "
+            "that do succeed, for diagnostic grouping."
+        ),
+    )
+    correlation_id = models.CharField(
+        max_length=200,
+        blank=True,
+        help_text=(
+            "Optional caller-supplied correlation/workflow identifier (e.g. a JobApplication "
+            "id), carried through from NormalizedLLMRequest.correlation_id when the caller sets "
+            "one. Blank when not supplied -- no pipeline call site is required to set this."
+        ),
+    )
+
+    class SelectionSource(models.TextChoices):
+        """Distinguishes a call routed through the stage's configured global
+        StageModelAssignment default from one routed through an explicit per-run operator
+        override (2026-09-07, per-run model selection). Blank for any row written before this
+        field existed -- never backfilled/guessed for historical rows."""
+
+        DEFAULT = "DEFAULT", "Stage default (StageModelAssignment)"
+        OVERRIDE = "OVERRIDE", "Explicit per-run override"
+
+    selection_source = models.CharField(
+        max_length=10,
+        choices=SelectionSource.choices,
+        blank=True,
+        help_text=(
+            "Whether `model` (the requested LLMModel FK above) was resolved from the stage's "
+            "configured global default or from an explicit per-run operator override. Set by "
+            "`llm_provider.adapters.get_adapter_for_stage`/`BaseLLMAdapter`; blank for any "
+            "LLMCallLog row written before this field existed."
+        ),
+    )
 
     input_tokens = models.PositiveIntegerField(null=True, blank=True)
     cached_input_tokens = models.PositiveIntegerField(null=True, blank=True)

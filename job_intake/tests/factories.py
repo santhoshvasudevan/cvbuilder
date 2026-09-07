@@ -31,7 +31,7 @@ def scripted_analysis(fixed_response: dict):
     itself is replaced)."""
     model = make_fake_stage_assignment()
 
-    def _get_adapter_for_stage(stage):
+    def _get_adapter_for_stage(stage, *, requested_model_id=None):
         return FakeAdapter(model, fixed_response=fixed_response)
 
     with mock.patch("job_intake.services.analyze.get_adapter_for_stage", _get_adapter_for_stage):

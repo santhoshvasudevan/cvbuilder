@@ -97,11 +97,15 @@ def build_request(
 
 
 def assess_requirements(
-    retrieval: RetrievalContext, requirements: list[dict]
+    retrieval: RetrievalContext, requirements: list[dict], *, requested_model_id: int | None = None
 ) -> NormalizedLLMResult:
+    """`requested_model_id`, when given, is a per-run operator override for this one call
+    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
     if not requirements:
         return NormalizedLLMResult(content=AgentCandidateAssessment(requirement_assessments=[]))
-    adapter = get_adapter_for_stage(StageModelAssignment.Stage.AC_MATCH)
+    adapter = get_adapter_for_stage(
+        StageModelAssignment.Stage.AC_MATCH, requested_model_id=requested_model_id
+    )
     request = build_request(
         retrieval, requirements, max_output_tokens=adapter.effective_max_output_tokens
     )

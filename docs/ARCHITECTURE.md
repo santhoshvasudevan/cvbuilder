@@ -206,7 +206,23 @@ provider-specific:
   the adapter fails closed — no HTTP call — if that field is ever an invalid stored value), and
   the two optional attribution headers (`OPENROUTER_HTTP_REFERER`/`OPENROUTER_APP_TITLE`). The
   model id sent is always exactly `LLMModel.model_id` — no fallback to a paid or different model
-  exists anywhere in the adapter.
+  exists anywhere in the adapter. **(2026-09-07, D-038, OpenRouter Free Router migration)**: the
+  registry can now represent `openrouter/free` — OpenRouter's Free Models Router
+  (`https://openrouter.ai/docs/guides/routing/routers/free-router`), a *virtual* router over a
+  changing pool of free-tier models rather than one pinned model — using the same `LLMModel` row
+  shape, with truthful, conservative capability flags rather than an inferred/inherited ceiling
+  (`supports_reasoning=False`, a conservative `max_output_tokens` matched to the smallest
+  already-qualified stage budget in this codebase, never assumed from whichever model happens to
+  serve a given request). Because the router's selected underlying model can differ call to call,
+  `LLMCallLog` gained `resolved_model_id`/`finish_reason` (populated by the shared OpenAI-compatible
+  parser from the response body's own `model`/`finish_reason` fields when present, never guessed,
+  never overwriting the requested `LLMModel` FK) so a call can be attributed to what actually served
+  it, distinct from what was requested; and `LLMModel` gained `is_active` (default `True`) so a
+  retired model (e.g. the superseded Z.ai/GLM row) can be excluded from routing
+  (`get_adapter_for_stage` raises `InactiveModelAssignedError` for a stage still assigned to an
+  inactive model) without deleting it or breaking the historical `LLMCallLog`/`StageModelAssignment`
+  rows that reference it (`on_delete=models.PROTECT` on both FKs already guarantees that
+  independently). See D-038 in `docs/DECISIONS.md` for the full migration record.
 
 New providers added later implement the same adapter interface and get their own isolated
 translation class; no shared pipeline code changes (NFR-005).
@@ -617,7 +633,9 @@ semantics and invariants come first.
   streaming support, reasoning support, max output tokens — LLM-005/D-009, approved as-is). No
   pricing fields at M2 (D-008, **APPROVED WITH REPRIORITIZATION** — token consumption is the v1
   priority; pricing is optional/deferred and, if added later, must not require reworking
-  `LLMCallLog` — see below).
+  `LLMCallLog` — see below). **(2026-09-07, D-038)** `is_active` (default `True`) — a retired model
+  is deactivated, never deleted; `get_adapter_for_stage` refuses to route a stage still assigned to
+  an inactive model, so retirement can never be silently bypassed by a stale assignment.
 
 ### `StageModelAssignment`
 - **Responsibility**: maps a pipeline stage (`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_MATCH`/`AB_BUILD`) to
@@ -637,6 +655,61 @@ semantics and invariants come first.
   text.
 - **Aggregation (NFR-004)**: must support summing token counts per `JobApplication`, per pipeline
   stage, per provider, and per model without extra instrumentation beyond this table.
+- **(2026-09-07, D-038) Requested-vs-resolved model auditing**: `resolved_model_id`/`finish_reason`
+  record what the provider's own response reported for a given call — relevant for a virtual
+  router (e.g. `openrouter/free`) whose selected underlying model can vary call to call and is
+  otherwise unobservable. Populated only when the response reports them, never guessed, and never
+  substituted for `model` (the requested `LLMModel` FK, which always stays exact). `correlation_id`
+  is additive plumbing for a future caller-supplied workflow identifier — the field and its
+  `NormalizedLLMRequest.correlation_id` counterpart exist, but no pipeline call site sets one yet,
+  so it stays blank in practice today.
+
+### Per-run model selection (2026-09-07, D-038 update)
+
+`StageModelAssignment` remains the *global default* for a stage — it never represents an
+individual run's selection. A separate, additive mechanism layers a per-run override on top of it,
+with a fixed precedence and no hidden fallback of any kind:
+
+1. an explicit, currently-eligible model selected for this one run (an operator override submitted
+   through the AJ/AC/AB UI);
+2. otherwise the stage's `StageModelAssignment` (the global default);
+3. otherwise a typed, actionable `NoStageDefaultConfiguredError` — never a hard-coded
+   provider/model.
+
+- **`llm_provider/services/eligibility.py`**: `eligible_models_for_stage(stage)` is the *one*
+  shared source of truth both the AJ/AC/AB UI and the execution path consult — a model is
+  selectable only if its provider is active (`LLMProvider.is_active`, new field), the model itself
+  is active, it declares the capability the stage requires (structured output, for every stage
+  implemented today), its provider has a configured credential *reference* (never the credential
+  value), and it is not the FAKE provider type outside a test run. A model can therefore never
+  appear in a selector but be rejected at execution time, or vice versa, because there is only one
+  function deciding eligibility, not two that could drift apart. Adding a future paid model
+  (OpenRouter or a direct provider) requires only a truthful, active registry row — zero change to
+  this module, to AJ/AC/AB forms, to templates, or to any pipeline service.
+- **`llm_provider/services/model_selection.py`**: `resolve_stage_model(stage,
+  requested_model_id=None)` implements the three-step precedence above, returning which `LLMModel`
+  was selected and whether the source was the stage default or an explicit override.
+  `llm_provider.adapters.get_adapter_for_stage` gained an optional `requested_model_id` keyword
+  argument that delegates to this resolver — every existing call site that never passes it behaves
+  exactly as before. The resolved model is validated and looked up *before* any provider HTTP call,
+  so an ineligible/unavailable selection fails closed with no network request ever made.
+- **Audit trail**: `LLMCallLog.model` (pre-existing) already records the exact requested model;
+  the new `LLMCallLog.selection_source` (`DEFAULT`/`OVERRIDE`) records *why* it was requested — from
+  the stage's configured default, or from an explicit per-run choice — distinct from the
+  pre-existing `resolved_model_id`, which continues to record what OpenRouter's free router
+  actually routed the call to. These three facts (requested model, why it was requested, what
+  actually served it) are never conflated. An override is resolved and persisted at call time only
+  — it never mutates the stage's `StageModelAssignment`, so a later change to the global default
+  can never rewrite an earlier run's own recorded selection, and a rerun/resumption of that same
+  run continues to use the same requested model unless an operator deliberately changes the
+  selection before triggering a new run.
+- **UI**: `job_intake`'s intake form (`AJ_ANALYZE`) and `reviews`' Gate 1
+  (`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` — one selector per independently-routed call,
+  since Agent Candidate makes three separate LLM calls) and Gate 2 (`AB_BUILD`) pages each gained a
+  selector defaulting to "System default", built fresh from `eligible_models_for_stage` on every
+  request, marking the current default `[Default]`. Model selection is orthogonal to, and never
+  bypasses, the approval/evidence/no-fabrication/staleness gates those views already enforce — it
+  controls routing only, never authorizes generation or approval.
 
 ### `JobApplication` (D-012, **APPROVED** 2026-09-02)
 - **Responsibility**: the aggregate/root entity for one tracked vacancy/application — groups the

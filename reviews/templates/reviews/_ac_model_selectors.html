@@ -1,0 +1,36 @@
+{% comment %}
+Agent Candidate's three independently-configurable LLM calls (2026-09-07, per-run model
+selection): AC_NORMALIZE, AC_RANK, AC_MATCH. Included from every form on gate1.html that
+(re)runs Agent Candidate (the "Run/Re-run Agent Candidate" buttons and the feedback form's AC
+path) so each stage gets its own selector rather than one ambiguous choice covering all three.
+{% endcomment %}
+<fieldset>
+  <legend>Agent Candidate model selection (optional overrides)</legend>
+  <p>
+    <label for="id_model_ac_normalize">Requirement normalization (AC_NORMALIZE)</label><br>
+    <select name="model_ac_normalize" id="id_model_ac_normalize">
+      <option value="" {% if not submitted_models.AC_NORMALIZE %}selected{% endif %}>System default</option>
+      {% for value, label in model_stages.AC_NORMALIZE.choices %}
+      <option value="{{ value }}" {% if submitted_models.AC_NORMALIZE == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </p>
+  <p>
+    <label for="id_model_ac_rank">Relevance ranking (AC_RANK)</label><br>
+    <select name="model_ac_rank" id="id_model_ac_rank">
+      <option value="" {% if not submitted_models.AC_RANK %}selected{% endif %}>System default</option>
+      {% for value, label in model_stages.AC_RANK.choices %}
+      <option value="{{ value }}" {% if submitted_models.AC_RANK == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </p>
+  <p>
+    <label for="id_model_ac_match">Fit assessment (AC_MATCH)</label><br>
+    <select name="model_ac_match" id="id_model_ac_match">
+      <option value="" {% if not submitted_models.AC_MATCH %}selected{% endif %}>System default</option>
+      {% for value, label in model_stages.AC_MATCH.choices %}
+      <option value="{{ value }}" {% if submitted_models.AC_MATCH == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </p>
+</fieldset>

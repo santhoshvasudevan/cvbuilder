@@ -311,6 +311,64 @@ milestone scope):
 
 
 
+**OpenRouter Free Router migration (2026-09-07, D-038)**: 28 new deterministic tests --
+`llm_provider/tests/test_openrouter_free_router_config.py` (the idempotent
+`configure_openrouter_free_router` service/command: fresh-database creation, the realistic
+pre-migration Z.ai-assignment scenario, repeated-invocation idempotency, historical `LLMCallLog`
+preservation across deactivation, `ProtectedError` on an attempted delete of a still-referenced
+model, the `InactiveModelAssignedError` routing guard and its reactivation rollback path, and
+`--dry-run` leaving the database byte-for-byte unchanged) and
+`llm_provider/tests/test_openrouter_free_router_request.py` (the exact `openrouter/free` model id
+reaching the serialized `requests.post` body, never double-prefixed/reconstructed/split -- including
+a synthetic multi-slash id as a general regression guard -- `tools`/`tool_choice` absence,
+`response_format`/`provider.require_parameters` presence, reasoning-field absence for the
+non-reasoning free-router model, and the new requested-vs-resolved-model/finish_reason/
+correlation_id audit fields, including the never-guessed-on-error case). All mock at the
+`requests.post` boundary and assert the actual serialized body, per this file's standing
+convention. Deliberately does **not** re-test the general OpenRouter transport/structured-output/
+privacy/retry/error-classification matrix already covered model-id-agnostically by
+`test_openrouter_adapter.py` -- that coverage applies unchanged to any model id, including this
+one, and a read-only audit confirmed the adapter never parses, splits, or reconstructs
+`LLMModel.model_id` anywhere, so no behavior there needed to change for this migration. Manual opt-in
+live qualification (`manage.py smoke_test_openrouter --model openrouter/free`) was **not attempted**
+in the session that implemented this -- `OPENROUTER_API_KEY` was not configured in that environment.
+
+**Per-run model selection (2026-09-07, same day, D-038 broadened scope)**: 42 further deterministic
+tests. `llm_provider/tests/test_model_eligibility.py` (11) -- inactive provider/model excluded,
+incompatible (non-structured-output) model excluded, missing credential reference excluded,
+eligible OpenRouter Free/NVIDIA included, the retired Z.ai model excluded via `is_active` (plus a
+dedicated case proving eligibility itself is purely `is_active`-driven per row, with the actual
+"deactivate every row" safety property proven where it's enforced -- the config-command tests
+below), FAKE always excluded, a newly-added registry model appearing with zero calling-code change,
+and display-label formatting. `llm_provider/tests/test_model_selection.py` (11) --
+`resolve_stage_model`'s three-step precedence (override → default → typed
+`NoStageDefaultConfiguredError`), an override never mutating the global `StageModelAssignment`, an
+ineligible/nonexistent override rejected, and `get_adapter_for_stage`'s `requested_model_id`
+wiring (override uses its own model's capability rather than the default stage's tuned budget,
+`selection_source` recorded correctly, an unavailable selection failing before any `requests.post`
+call, and independent selection across two different stages in one call). Expanded
+`test_openrouter_free_router_config.py`: every stage (not only `AC_NORMALIZE`) defaults to
+`openrouter/free` on both a fresh and a realistic pre-populated database, idempotency re-proven for
+the full 6-stage matrix, `AB_BUILD`'s prior OpenAI assignment removed while the `gpt-5` row itself
+stays active/untouched, NVIDIA-assigned stages move to the free router while the NVIDIA model row
+stays active/untouched, no paid/fallback model is ever introduced as a side effect, and (the
+real-database finding this update made) a second, orphaned OpenRouter-type provider row's own copy
+of the retired Z.ai model id is also deactivated, not only the canonical row's. One updated case in
+`test_routing.py`: an unassigned stage now raises the typed `NoStageDefaultConfiguredError` instead
+of a bare Django `DoesNotExist`. 14 new UI/execution tests --
+`job_intake/tests/test_model_selection_ui.py` and `reviews/tests/test_model_selection_ui.py` --
+render the selectors from the real registry (default marked, NVIDIA alternative present, inactive
+model absent, accessible `<label for>`/`id` pairing), and drive a full request through mocked
+`requests.post` to prove an override actually reaches the provider call and is recorded on
+`LLMCallLog` with `selection_source=OVERRIDE` while the global default stays unchanged, an
+invalid/ineligible selection is rejected before any provider call (via Django `ChoiceField`
+validation for `job_intake`'s form, via the shared `resolve_stage_model` typed error for `reviews`'
+raw-HTML forms), and a valid selection survives an unrelated downstream validation error rather
+than silently resetting to the default. Full suite after this update: 1229/1229 passing (70 new
+tests total for D-038, 28 + 42); `manage.py check`/`makemigrations --check --dry-run` clean;
+`ruff check .` clean. Live qualification remains deliberately deferred to the later, separately
+authorized M5/M6 run.
+
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").
 That is a manual review activity at each milestone's acceptance walkthrough, not a unit test —

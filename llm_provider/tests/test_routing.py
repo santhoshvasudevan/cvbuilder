@@ -35,8 +35,14 @@ class StageRoutingTests(TestCase):
 
         self.assertIsInstance(get_adapter_for_stage(StageModelAssignment.Stage.AC_MATCH), FakeAdapter)
 
-    def test_unassigned_stage_raises_lookup_error(self):
-        with self.assertRaises(StageModelAssignment.DoesNotExist):
+    def test_unassigned_stage_raises_typed_configuration_error(self):
+        # 2026-09-07, per-run model selection: a stage with no StageModelAssignment and no
+        # explicit override now fails with a typed, actionable
+        # NoStageDefaultConfiguredError (llm_provider.services.model_selection) rather than a
+        # bare Django DoesNotExist -- there is still no implicit fallback of any kind.
+        from ..adapters import NoStageDefaultConfiguredError
+
+        with self.assertRaises(NoStageDefaultConfiguredError):
             get_adapter_for_stage(StageModelAssignment.Stage.AB_BUILD)
 
 

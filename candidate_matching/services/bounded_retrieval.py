@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 
 from candidate_memory.models import CandidateMemory
+from llm_provider.models import StageModelAssignment
 
 from .candidate_generation import RequirementCandidates, generate_candidates, union_candidate_pool
 from .dedup import DedupedClaim, deduplicate_claims
@@ -99,8 +100,18 @@ def _cap_selected(
 
 
 def build_bounded_context(
-    candidate_memory: CandidateMemory, requirements: list[dict], *, posting_language: str = "en"
+    candidate_memory: CandidateMemory,
+    requirements: list[dict],
+    *,
+    posting_language: str = "en",
+    requested_models: dict[str, int] | None = None,
 ) -> tuple[RetrievalContext, RetrievalManifest]:
+    """`requested_models`, when given, is a per-run operator override map keyed by
+    `StageModelAssignment.Stage` value (2026-09-07, per-run model selection) -- only
+    `AC_NORMALIZE`/`AC_RANK` keys are consulted here (the two LLM-backed stages this function
+    itself calls); an absent or `None` key resolves through that stage's configured
+    `StageModelAssignment`, exactly as before. Never persisted as a new stage default."""
+    requested_models = requested_models or {}
     eligible = retrieve_eligible_pool(candidate_memory)
     deduped = deduplicate_claims(eligible.claims)
     duplicate_count = len(eligible.claims) - len(deduped)
@@ -120,7 +131,9 @@ def build_bounded_context(
             {"requirement_id": r["requirement_id"], "text": r["text"]} for r in requirements
         ]
         normalization_by_id = expand_requirements_for_search(
-            normalization_requirements, posting_language=posting_language
+            normalization_requirements,
+            posting_language=posting_language,
+            requested_model_id=requested_models.get(StageModelAssignment.Stage.AC_NORMALIZE),
         )
 
         search_requirements = []
@@ -149,7 +162,11 @@ def build_bounded_context(
             excluded_counts["ranking_pool_cap"] = pool_cap_excluded
         candidate_pool_ids = {claim.claim_id for claim in candidate_pool}
 
-        ranking_result = rank_relevance(candidate_pool, requirements)
+        ranking_result = rank_relevance(
+            candidate_pool,
+            requirements,
+            requested_model_id=requested_models.get(StageModelAssignment.Stage.AC_RANK),
+        )
         if ranking_result.is_error:
             raise RankingFailedError(
                 f"D-015 relevance-ranking step failed: {ranking_result.error.message}"

@@ -5,6 +5,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from job_applications.models import JobApplication
+from llm_provider.services.model_selection import ModelNotEligibleForStageError, parse_requested_model_id
 
 from .forms import JobPostingIntakeForm
 from .models import JobRequirement
@@ -24,6 +25,14 @@ def intake_view(request):
         return render(request, "job_intake/intake.html", {"form": form})
 
     try:
+        requested_model_id = parse_requested_model_id(form.cleaned_data["model_aj"])
+    except ModelNotEligibleForStageError as exc:
+        return render(
+            request, "job_intake/intake.html",
+            {"form": form, "error": str(exc)},
+        )
+
+    try:
         resolved = resolve_posting_source(
             url=form.cleaned_data["url"], pasted_text=form.cleaned_data["pasted_text"]
         )
@@ -37,19 +46,23 @@ def intake_view(request):
         return render(
             request, "job_intake/intake.html",
             {
-                "form": JobPostingIntakeForm(initial={"url": submitted_url}),
+                "form": JobPostingIntakeForm(
+                    initial={"url": submitted_url, "model_aj": form.cleaned_data["model_aj"]}
+                ),
                 "fetch_error": exc.safe_message,
                 "offer_paste_fallback": True,
             },
         )
 
     try:
-        application = run_intake(resolved)
-    except AnalysisFailedError as exc:
+        application = run_intake(resolved, requested_model_id=requested_model_id)
+    except (AnalysisFailedError, ModelNotEligibleForStageError) as exc:
         return render(
             request, "job_intake/intake.html",
             {
-                "form": JobPostingIntakeForm(initial={"url": submitted_url}),
+                "form": JobPostingIntakeForm(
+                    initial={"url": submitted_url, "model_aj": form.cleaned_data["model_aj"]}
+                ),
                 "error": f"Analysis failed: {exc}",
             },
         )

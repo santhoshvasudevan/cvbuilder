@@ -79,6 +79,18 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
         output_tokens=usage_raw.get("completion_tokens"),
         total_tokens=usage_raw.get("total_tokens"),
     )
+    # Requested-vs-resolved model auditing (2026-09-07): OpenAI-compatible responses echo a
+    # top-level `model` field. For a fixed-model provider this just confirms the requested id; for
+    # a virtual router (OpenRouter's `openrouter/free`) it is the only way to learn which
+    # underlying model actually served the call. Read only when present and a non-empty string --
+    # never guessed, never defaulted to the requested model id.
+    resolved_model_raw = payload.get("model")
+    resolved_model = (
+        resolved_model_raw if isinstance(resolved_model_raw, str) and resolved_model_raw else None
+    )
+
+    def _safe_finish_reason(raw: object) -> str | None:
+        return raw if isinstance(raw, str) and raw else None
 
     try:
         choice = payload["choices"][0]
@@ -141,7 +153,12 @@ def parse_openai_style_chat_completion(response: "requests.Response") -> Normali
             error=NormalizedLLMError.from_exception(LLMErrorCategory.SCHEMA_VALIDATION, exc),
             usage=usage,
         )
-    return NormalizedLLMResult(content=content_dict, usage=usage)
+    return NormalizedLLMResult(
+        content=content_dict,
+        usage=usage,
+        resolved_model=resolved_model,
+        finish_reason=_safe_finish_reason(finish_reason),
+    )
 
 
 def build_chat_completion_body(

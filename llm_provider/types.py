@@ -30,6 +30,11 @@ class NormalizedLLMRequest:
     # True/False or a set float ever reaches a request body.
     reasoning_enabled: bool | None = None
     top_p: float | None = None
+    # Optional caller-supplied correlation/workflow identifier (2026-09-07, requested-vs-resolved
+    # audit), carried through verbatim to LLMCallLog.correlation_id when set. `None` (the default)
+    # means no pipeline call site currently supplies one -- this is additive audit plumbing, not a
+    # requirement for existing callers to change.
+    correlation_id: str | None = None
 
 
 @dataclasses.dataclass
@@ -50,6 +55,15 @@ class NormalizedLLMResult:
     error: NormalizedLLMError | None = None
     latency_ms: float | None = None
     retry_count: int = 0
+    # Requested-vs-resolved model auditing (2026-09-07, OpenRouter Free Router migration): a
+    # virtual router such as OpenRouter's `openrouter/free` accepts one requested model id but may
+    # route the call to a different underlying model per request. `resolved_model`/`finish_reason`
+    # are read only from the provider's own response body when present -- never guessed, never
+    # substituted for the requested `LLMModel.model_id` (which the caller/registry/LLMCallLog.model
+    # FK already record exactly). Both stay `None` for an error result or when the provider's
+    # response shape doesn't report them.
+    resolved_model: str | None = None
+    finish_reason: str | None = None
 
     @property
     def is_error(self) -> bool:

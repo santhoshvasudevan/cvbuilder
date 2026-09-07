@@ -1,6 +1,26 @@
 # Current State
 
-Last updated: 2026-09-07 (D-037: an independent audit of D-036's hybrid-chronology implementation
+Last updated: 2026-09-07 (D-038 update: the product owner approved D-038 -- status now
+**ACCEPTED** -- and broadened its scope to make OpenRouter's Free Models Router (`openrouter/free`)
+the global default for **every** currently implemented LLM pipeline stage
+(`MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD`), not only
+`AC_NORMALIZE` (the one stage the original PROPOSED entry touched); added a registry-driven
+per-run model-selection architecture (`llm_provider/services/eligibility.py`,
+`llm_provider/services/model_selection.py`) with AJ/AC/AB operator-facing UI selectors; and applied
+the resulting migration and configuration to the real local development database -- see
+"OpenRouter Free Router migration (2026-09-07, D-038)" below for the original entry and its
+"Update (2026-09-07, same day)" subsection for everything in this paragraph. Implemented and
+deterministically tested on the same isolated worktree/branch `worktree-openrouter-free-router`
+[branched from local `main` HEAD `1f2d06b`, which already includes D-037 above], still not merged
+to `main`. Scoped to the `llm_provider` registry/adapter layer, the AJ/AC/AB model-selection UI,
+and documentation: no `JobApplication`, `JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`,
+`CandidateMemory`, or Gate was touched. Live OpenRouter qualification remains deliberately deferred
+to the later, separately authorized M5/M6 run.
+Previously, also 2026-09-07 (D-038's original, narrower entry -- `AC_NORMALIZE`, the only stage
+that was assigned to the retired Z.ai model, replaced by `openrouter/free`; implemented and
+deterministically tested, **PROPOSED**, not yet run against the real development database in that
+session -- superseded in scope, not in substance, by the update immediately above).
+Previously, as of 2026-09-07 (D-037: an independent audit of D-036's hybrid-chronology implementation
 returned `HYBRID FIX BLOCKED -- SNAPSHOT/FRESHNESS DEFECT`; the corrective fix is implemented and
 tested on the same worktree/branch `worktree-hybrid-chronology-fix`, this commit a direct child of
 D-036's own commit `dbee79b`, still not merged to `main`, product-owner review pending (D-037,
@@ -79,6 +99,174 @@ matches; 9 static-type mappings `REJECTED`; 944 global claims intentionally unma
 per-job workflow, freshness enforcement across the whole chain, and the dashboard) remains **not
 implemented** -- confirmed: no `job_applications` dashboard list/detail view exists, and no
 cross-app integration beyond the pointer-based freshness checks M5/M6 already enforce individually.
+
+## OpenRouter Free Router migration (2026-09-07, D-038) -- original narrower entry, superseded in scope by the update below
+
+Replaces the one active OpenRouter stage assignment on the retired Z.ai/GLM model
+(`z-ai/glm-5.2:free`, `LLMProvider` id 9, `LLMModel` id 10 in the real development database) with
+OpenRouter's Free Models Router (`openrouter/free`). Per `docs/CURRENT_STATE.md`'s own prior
+entries, `AC_NORMALIZE` is the only stage that was ever assigned to the Z.ai model --
+`AJ_ANALYZE`/`MEMORY_BUILD`/`AC_MATCH`/`AC_RANK` remain on NVIDIA Nemotron, `AB_BUILD` remains on
+OpenAI `gpt-5`, and none of those are touched by this work. Full detail, including the root-cause
+audit of why the existing `OpenRouterAdapter` needed no request-construction/retry/error-taxonomy
+changes at all, is in D-038 in `docs/DECISIONS.md`; summarized here:
+
+- **Schema** (migration `llm_provider.0008_llmcalllog_correlation_id_llmcalllog_finish_reason_
+  and_more`, additive): `LLMModel.is_active` (`BooleanField`, default `True`) -- a retired model is
+  deactivated, never deleted (`LLMCallLog`/`StageModelAssignment` both use `on_delete=PROTECT` on
+  their `model` FK, so deletion was already structurally impossible while referenced);
+  `get_adapter_for_stage` now raises `InactiveModelAssignedError` for a stage still assigned to an
+  inactive model, so a stale assignment can never silently keep routing to a retired model.
+  `LLMCallLog.resolved_model_id`/`finish_reason` (both blank `CharField`) -- the shared OpenAI-
+  compatible response parser (`llm_provider/adapters/openai.py`, used by OpenAI/NVIDIA NIM/
+  OpenRouter alike) now also reads the response body's own top-level `model` field and the winning
+  choice's `finish_reason` on success, read only when present, never guessed, never overwriting the
+  requested `LLMModel` FK -- the requested-vs-resolved distinction a virtual router like
+  `openrouter/free` requires, since its selected underlying model can vary call to call and is
+  otherwise unobservable. `LLMCallLog.correlation_id`/`NormalizedLLMRequest.correlation_id` (both
+  new, blank/`None` by default) are additive plumbing for a future caller-supplied workflow
+  identifier -- **not yet wired into any of the six pipeline call sites** that construct a
+  `NormalizedLLMRequest`, a deliberately deferred, proportionate follow-up rather than part of this
+  migration's actual goal.
+- **Idempotent configuration** (`llm_provider/services/openrouter_free_router.py`,
+  `manage.py configure_openrouter_free_router [--dry-run]`): finds-or-creates the OpenRouter
+  provider row (fills in the documented base URL only if genuinely blank; never touches an existing
+  row's `data_collection_policy`); finds-or-creates an active `openrouter/free` `LLMModel` with
+  `supports_structured_output=True`, `supports_reasoning=False` (never inferred from the retired
+  Z.ai row), and a conservative `max_output_tokens=8192` (matched to the smallest already
+  live-qualified stage budget in this codebase, D-027's figure -- not the Z.ai row's much larger
+  verified 230,400); deactivates the Z.ai row if found and still active; reassigns every
+  `StageModelAssignment` currently on the Z.ai model (in the real database, exactly
+  `AC_NORMALIZE`) to the free-router model, clamping any pre-existing stage budget that would
+  otherwise exceed the new model's declared capability. One `transaction.atomic()` block;
+  `--dry-run` performs the same writes and then unconditionally rolls back, so its report reflects
+  real, `full_clean()`-validated state without touching the database. Verified idempotent (a second
+  run makes no further writes) and to leave every other provider/model/stage completely untouched,
+  against an isolated, throwaway `postgres:16-alpine` container -- never the real development
+  database. **Not run against the real development database in this session** -- that remains a
+  separately authorized operator action, matching `bootstrap_candidate_memory`'s own "explicit,
+  never automatic" precedent.
+- **Admin/diagnostics**: `LLMModelAdmin` gained `is_active` to `list_display`/`list_filter`;
+  `LLMCallLogAdmin` gained `resolved_model_id`/`finish_reason` to `list_display` and
+  `resolved_model_id` to `list_filter`, so failures/output quality can be grouped by which model
+  actually served a call, not only by which was requested. `manage.py smoke_test_openrouter`'s
+  final success line now also prints `requested_model`/`resolved_model`/`finish_reason`.
+- **Privacy**: `data_collection_policy` defaults to `DENY` for a freshly-created provider row
+  (unchanged from D-025) and `provider.require_parameters=true` remains unconditional for every
+  OpenRouter request -- neither is weakened by this migration.
+- **Tests**: 28 new deterministic tests (`llm_provider/tests/test_openrouter_free_router_config.py`,
+  `llm_provider/tests/test_openrouter_free_router_request.py`) -- see `docs/TEST_STRATEGY.md`'s
+  corresponding entry for the full list. Full suite: 1185/1185 passing (up from 1157 pre-change,
+  exactly the 28 new tests -- zero regressions); the same 4 pre-existing, unrelated
+  `test_smoke_output_budget.py` failures present on unmodified `main` (confirmed via `git stash -u`
+  bisection before any change in this work was applied) are unchanged and out of this work's scope.
+  `manage.py check`/`makemigrations --check --dry-run` clean; `ruff check .` clean.
+- **Live qualification**: **not attempted** -- `OPENROUTER_API_KEY` is not configured in the
+  isolated worktree this work was implemented in (no `.env` file; worktrees do not inherit the
+  primary checkout's untracked files). `manage.py smoke_test_openrouter --model openrouter/free`
+  is the correct, already-general next action once a credential is available and the operator
+  explicitly authorizes a live call.
+- **Not done in this session**: no live provider call; no `StageModelAssignment`/registry row
+  changed in the real development database; `configure_openrouter_free_router` was not run for
+  real outside the throwaway verification container; no M5/M6/Gate action; `JobApplication` 9,
+  `JobRequirementAnalysis` 10, `FitAssessment` 9, `ResumeDraft` 4, and `CandidateMemory` 7
+  untouched. Implemented on isolated worktree/branch `worktree-openrouter-free-router`, on top of
+  local `main` HEAD `1f2d06b` -- not merged into `main`.
+- **Next action (superseded by the update below)**: the original entry's own next action --
+  product-owner review of D-038 -- is now complete (**ACCEPTED**); the remaining next action is
+  live qualification, deliberately deferred to the later M5/M6 run (see the update's own "Live
+  qualification" point).
+
+## OpenRouter Free Router migration -- Update (2026-09-07, same day, D-038 broadened scope) -- IMPLEMENTED, deterministically tested, APPLIED to the real development database
+
+Same-day follow-up to the entry immediately above. Full detail is in D-038's own "Update
+(2026-09-07, same day)" subsection in `docs/DECISIONS.md`; summarized here:
+
+- **Operator approval**: D-038 is now **ACCEPTED**. The product owner also directed a broadened
+  scope (below), confirmed NVIDIA/OpenAI remain selectable-but-never-default alternatives, and
+  authorized applying the configuration to the real development database. Live qualification
+  remains explicitly deferred to the later M5/M6 run.
+- **Broadened default scope**: `openrouter/free` is now the `StageModelAssignment` default for
+  **all six** currently implemented stages -- `MEMORY_BUILD`/`AJ_ANALYZE`/`AC_NORMALIZE`/
+  `AC_RANK`/`AC_MATCH`/`AB_BUILD` -- not only `AC_NORMALIZE`. `configure_openrouter_free_router`
+  (`llm_provider/services/openrouter_free_router.py`) now converges every stage regardless of its
+  prior assignment (Z.ai, NVIDIA, OpenAI, or none at all), and now deactivates **every** `LLMModel`
+  row matching the retired Z.ai model id across every provider row that has one -- a real-database
+  check found a second, orphaned OpenRouter-type provider row (`"dbg"`, a stray pre-existing
+  debug/smoke-test artifact) with its own independent, still-active copy of the retired model id,
+  which the original narrower deactivation logic would have left silently eligible; both rows are
+  now deactivated. Still one `transaction.atomic()` block, still `--dry-run`-safe, still idempotent.
+- **Per-run model-selection architecture (new)**: `llm_provider/services/eligibility.py`
+  (`eligible_models_for_stage`, the one shared source of truth for which models a stage may use --
+  active provider/model, required capability, configured credential reference, never FAKE) and
+  `llm_provider/services/model_selection.py` (`resolve_stage_model`: explicit eligible override ->
+  stage default -> typed `NoStageDefaultConfiguredError`, no hidden fallback).
+  `llm_provider.adapters.get_adapter_for_stage` gained an optional `requested_model_id` parameter
+  delegating to this resolver; existing callers that never pass it are unaffected.
+- **Schema** (migration `llm_provider.0009_llmcalllog_selection_source_llmmodel_display_name_
+  and_more`, additive): `LLMProvider.is_active` (default `True`), `LLMModel.display_name` (optional
+  operator label), `LLMCallLog.selection_source` (`DEFAULT`/`OVERRIDE`) -- distinct from the
+  pre-existing `resolved_model_id` (still OpenRouter's actual routed model) and from `model` (the
+  requested `LLMModel` FK, unchanged).
+- **AJ/AC/AB UI (new)**: a per-run model selector on the real intake form (`job_intake`, AJ_ANALYZE)
+  and on Gate 1 (`reviews`, AJ_ANALYZE/AC_NORMALIZE/AC_RANK/AC_MATCH -- one selector per
+  independently-routed call) and Gate 2 (`reviews`, AB_BUILD). Each defaults to "System default",
+  marks the current default `[Default]`, shows active eligible alternatives (including NVIDIA),
+  hides inactive/ineligible models, re-validates server-side, and never bypasses an approval/
+  evidence/staleness gate -- selection controls routing only.
+- **Tests**: 42 new deterministic tests this update (28 from the original entry + 42 = 70 new
+  overall for D-038): `llm_provider/tests/test_model_eligibility.py` (11),
+  `llm_provider/tests/test_model_selection.py` (11), an expanded
+  `test_openrouter_free_router_config.py` (full 6-stage matrix, the orphaned-duplicate-Z.ai case),
+  an updated `test_routing.py` case, and 14 new UI/execution tests across `job_intake` and `reviews`.
+  Full suite: 1229/1229 passing; `manage.py check`/`makemigrations --check --dry-run` clean;
+  `ruff check .` clean.
+- **Applied to the real local development database** (confirmed genuinely local dev: Docker
+  container `cvbuilder-db-1`, image `postgres:16-alpine`, bound to `localhost:5432`,
+  `docker-compose.yml`-standard credentials): migration 0009 applied;
+  `configure_openrouter_free_router` run for real. Before: `AC_NORMALIZE` on Z.ai,
+  `AJ_ANALYZE`/`MEMORY_BUILD`/`AC_MATCH`/`AC_RANK` on NVIDIA Nemotron, `AB_BUILD` on OpenAI `gpt-5`.
+  After: all six stages on `openrouter/free`; the canonical Z.ai row and the newly-found orphaned
+  duplicate both deactivated (never deleted); NVIDIA (ids 2, 3) and OpenAI `gpt-5` (id 12) rows
+  untouched, active, selectable. Idempotency reverified directly against this real database.
+  `LLMCallLog.objects.count()`: 288 before, 288 after (unchanged); all 6 historical Z.ai-referencing
+  rows, including id 319 (the real D-033 live call), confirmed intact.
+- **Live qualification**: still not attempted -- deliberately deferred to the later, separately
+  authorized M5/M6 run; not a completion criterion for this update.
+- **Next action**: the later, separately authorized M5/M6 run, which will exercise
+  `manage.py smoke_test_openrouter --model openrouter/free` (or a real AJ/AC/AB run through the new
+  UI) as its first live-verified resolved-model/finish_reason data point.
+
+### Operator instructions: model defaults and per-run selection
+
+- **Set a stage's global default**: Django admin → `llm_provider` → `Stage model assignments` →
+  edit the row for the stage, change `Model` to the desired active `LLMModel`, save. This is the
+  only place a stage's default lives; nothing else in the codebase can silently override it.
+  `manage.py configure_openrouter_free_router` is the one scripted way to reset every stage's
+  default to `openrouter/free` in one idempotent action — safe to run repeatedly, `--dry-run` to
+  preview first.
+- **Choose a model for one run**: on the job-intake page (Agent Jobber) or Gate 1/Gate 2 (Agent
+  Candidate/Agent Builder), use the "model" selector next to the action you're about to take.
+  Leaving it on "System default" uses the stage's `StageModelAssignment`; picking anything else is
+  a one-time override for that run only — it never changes the global default, and it is
+  re-validated against the current registry at submit time even if the page was rendered earlier.
+- **See which model actually answered**: Django admin → `llm_provider` → `LLM call logs`. Each row
+  shows `model` (what was requested), `selection_source` (`DEFAULT` or `OVERRIDE` — why it was
+  requested), and `resolved_model_id` (what OpenRouter's free router actually routed the call to,
+  when it differs from `model` and the response reported it). These three are never conflated.
+- **Add a paid model later** (OpenRouter or a direct provider): create/activate its `LLMProvider`
+  row (with a `credential_env_var` pointing at wherever its real key will live — the value itself
+  is never stored here) and its `LLMModel` row (truthful `supports_structured_output`/
+  `max_output_tokens`, an optional `display_name`), both via the existing admin. It becomes
+  selectable as a per-run override the moment it's active and eligible — no code, form, template,
+  or pipeline change required. It never becomes a stage's default, and is never used as an
+  automatic fallback, unless an operator explicitly reassigns that stage's
+  `StageModelAssignment` to it.
+- **Restore the system default** for a stage after trying an override: either just leave future
+  runs' selectors on "System default" (the override never touched the global assignment, so
+  nothing needs undoing), or, if the *global default itself* was deliberately changed, edit
+  `Stage model assignments` back via the admin — the same one-field edit as setting it in the
+  first place.
 
 ## What exists (M3 — new)
 

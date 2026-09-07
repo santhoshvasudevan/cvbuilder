@@ -62,8 +62,10 @@ def build_request(
 
 
 def rank_relevance(
-    candidate_pool: list[DedupedClaim], requirements: list[dict]
+    candidate_pool: list[DedupedClaim], requirements: list[dict], *, requested_model_id: int | None = None
 ) -> NormalizedLLMResult:
+    """`requested_model_id`, when given, is a per-run operator override for this one call
+    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
     if not requirements or not candidate_pool:
         return NormalizedLLMResult(
             content=RelevanceRankingOutput(
@@ -73,7 +75,9 @@ def rank_relevance(
                 ]
             )
         )
-    adapter = get_adapter_for_stage(StageModelAssignment.Stage.AC_RANK)
+    adapter = get_adapter_for_stage(
+        StageModelAssignment.Stage.AC_RANK, requested_model_id=requested_model_id
+    )
     request = build_request(
         candidate_pool, requirements, max_output_tokens=adapter.effective_max_output_tokens
     )

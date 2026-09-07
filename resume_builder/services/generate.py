@@ -172,9 +172,13 @@ def _estimate_full_request_tokens(request: NormalizedLLMRequest) -> int:
 
 
 def generate_resume_content(
-    jra, requirement_assessments: list, retrieval: RetrievalContext
+    jra, requirement_assessments: list, retrieval: RetrievalContext, *, requested_model_id: int | None = None
 ) -> NormalizedLLMResult:
-    adapter = get_adapter_for_stage(StageModelAssignment.Stage.AB_BUILD)
+    """`requested_model_id`, when given, is a per-run operator override for this one call
+    (2026-09-07, per-run model selection) -- never persisted as a new stage default."""
+    adapter = get_adapter_for_stage(
+        StageModelAssignment.Stage.AB_BUILD, requested_model_id=requested_model_id
+    )
     request = build_request(
         jra,
         requirement_assessments,

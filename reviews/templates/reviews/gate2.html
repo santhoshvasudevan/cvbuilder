@@ -20,6 +20,7 @@ resolve this at Gate 1 first.</p>
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ab">
+  {% include "reviews/_ab_model_selector.html" %}
   <button type="submit">Run Agent Builder</button>
 </form>
 {% else %}
@@ -64,6 +65,7 @@ re-run Agent Builder before approving.</p>
 <form method="post">
   {% csrf_token %}
   <input type="hidden" name="action" value="run_ab">
+  {% include "reviews/_ab_model_selector.html" %}
   <button type="submit">Re-run Agent Builder</button>
 </form>
 
@@ -80,6 +82,7 @@ re-run Agent Builder before approving.</p>
   {% csrf_token %}
   <input type="hidden" name="action" value="feedback">
   <p>Comments:<br><textarea name="comments" rows="4" cols="60"></textarea></p>
+  {% include "reviews/_ab_model_selector.html" %}
   <button type="submit">Submit feedback and re-run Agent Builder</button>
 </form>
 

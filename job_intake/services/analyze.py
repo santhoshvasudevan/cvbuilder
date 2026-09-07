@@ -110,7 +110,13 @@ def build_request(
     )
 
 
-def analyze_posting(posting_text: str) -> NormalizedLLMResult:
-    adapter = get_adapter_for_stage(StageModelAssignment.Stage.AJ_ANALYZE)
+def analyze_posting(posting_text: str, *, requested_model_id: int | None = None) -> NormalizedLLMResult:
+    """`requested_model_id`, when given, is a per-run operator override for this one call
+    (2026-09-07, per-run model selection) -- an `LLMModel` primary key, never persisted as a new
+    stage default. `None` (the default) resolves through the stage's configured
+    `StageModelAssignment`, exactly as before."""
+    adapter = get_adapter_for_stage(
+        StageModelAssignment.Stage.AJ_ANALYZE, requested_model_id=requested_model_id
+    )
     request = build_request(posting_text, max_output_tokens=adapter.effective_max_output_tokens)
     return adapter.generate(request)

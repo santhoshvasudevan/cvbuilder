@@ -42,7 +42,9 @@ class ConcurrentModificationError(Exception):
     rationale, same (effectively unreachable given the `select_for_update()` lock) safety net."""
 
 
-def build_resume_draft(job_application) -> ResumeDraft:
+def build_resume_draft(job_application, *, requested_model_id: int | None = None) -> ResumeDraft:
+    """`requested_model_id`, when given, is a per-run operator override for AB_BUILD (2026-09-07,
+    per-run model selection) -- never persisted as a new stage default."""
     fit_assessment = job_application.current_fit_assessment
     if fit_assessment is None:
         raise ResumeBuilderError(
@@ -67,7 +69,9 @@ def build_resume_draft(job_application) -> ResumeDraft:
     requirement_assessments = list(fit_assessment.requirement_assessments.all())
 
     try:
-        llm_result = generate_resume_content(jra, requirement_assessments, retrieval)
+        llm_result = generate_resume_content(
+            jra, requirement_assessments, retrieval, requested_model_id=requested_model_id
+        )
     except RetrievalBudgetExceededError as exc:
         raise ResumeBuilderError(str(exc)) from exc
     if llm_result.is_error:
