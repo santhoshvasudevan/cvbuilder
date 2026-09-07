@@ -435,6 +435,29 @@ after this correction: 1339/1339 passing (39 net new/rewritten on top of the ori
 `manage.py check`/`makemigrations --check --dry-run`/`ruff check .` all clean. No live call was
 made for this correction either.
 
+**Product Owner output-token budget correction (2026-09-07, D-040)**: 24 new deterministic tests
+(`llm_provider/tests/test_gpt54_budget_correction.py`) -- both `gpt-5.4-mini`/`gpt-5.4` accept and
+persist the corrected 16384-token capability via `full_clean()`; `AC_NORMALIZE`/`AC_RANK`/
+`AC_MATCH`/`AB_BUILD` each resolve to an effective request budget of exactly 16384 through the real
+`get_adapter_for_stage` resolution path (never merely a registry field read out of context);
+`MEMORY_BUILD`/`AJ_ANALYZE` confirmed unchanged at 4096/8192; a stage budget above the new 16384
+ceiling is still rejected by both `full_clean()` and, defense-in-depth, `get_adapter_for_stage`'s
+own `InvalidStageBudgetError`; `selection_source` stays `DEFAULT` with no override submitted; every
+provider/model mapping and reasoning level is unchanged; no fallback/substitution mechanism exists;
+the configuration operation is idempotent, including when re-run against a simulated stale
+pre-correction database still carrying the old 8192 budgets (proving the correction genuinely
+*writes* the new value rather than treating an already-matching model/reasoning pair as "nothing to
+do"); and the four affected stages' real request bodies are constructed locally via the adapter's
+own pure `build_chat_completion_body` function -- never through `adapter.generate()`, and `requests`
+is never imported or patched anywhere in the new file -- confirming `max_completion_tokens=16384`
+reaches the OpenAI reasoning-model request contract for all four. 24 existing tests in
+`test_gpt54_defaults_config.py` were updated for the new three-element `STAGE_DEFAULT_MATRIX` shape
+(model, reasoning, per-stage budget) and the 16384 capability value, with zero behavior change to
+what they otherwise assert. Full suite after this correction: 1363/1363 passing (24 net new on top
+of 1339); `manage.py check`/`makemigrations --check --dry-run` (confirmed no schema migration is
+generated -- a pure data/configuration correction)/`ruff check .` all clean. No provider call was
+made for this correction.
+
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").
 That is a manual review activity at each milestone's acceptance walkthrough, not a unit test —

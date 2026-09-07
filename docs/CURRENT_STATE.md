@@ -1,6 +1,22 @@
 # Current State
 
-Last updated: 2026-09-07 (D-039, **ACCEPTED**, corrected same day: paid GPT-5.4 model defaults via
+Last updated: 2026-09-07 (D-040, **ACCEPTED**, Product Owner output-token budget correction: a
+preflight audit ahead of the first operator-driven M5 UI run for `JobApplication` 9 found the
+D-039 registry's 8192-token output ceiling already exceeded by real historical `LLMCallLog`
+measurements for `AC_RANK` (~12230) and `AB_BUILD` (~8204), with inadequate headroom for
+`AC_NORMALIZE` (~7650) and `AC_MATCH` (~7326). The Product Owner approved a conservative 16384-
+token application-registered capability for both `gpt-5.4-mini`/`gpt-5.4`, and raised
+`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AB_BUILD`'s own stage budgets to 16384 to match; `MEMORY_BUILD`
+(4096) and `AJ_ANALYZE` (8192) are unchanged. 16384 is a permitted maximum only, never an expected
+consumption target -- OpenAI bills exactly what a call actually produces; `finish_reason=length`
+still fails closed unconditionally (D-026), and this correction adds no automatic retry/fallback.
+Implemented via the same idempotent `manage.py configure_gpt54_defaults` mechanism (no schema
+migration required -- confirmed a pure data/configuration change), applied to and idempotency-
+proven against the real local development database. 24 new deterministic tests
+(`llm_provider/tests/test_gpt54_budget_correction.py`), full suite 1339 -> 1363 passing, zero
+provider calls made. See "Product Owner output-token budget correction (2026-09-07, D-040)" below
+and `docs/DECISIONS.md`'s D-040 entry for full detail.
+Previously, also 2026-09-07 (D-039, **ACCEPTED**, corrected same day: paid GPT-5.4 model defaults via
 the **direct OpenAI API** (`https://api.openai.com/v1`, credential `OPENAI_API_KEY`) -- not
 OpenRouter, which was the original pass's implementation misunderstanding, corrected before merge
 -- per-stage reasoning-effort configuration, and a complete M5/M6 stage-console UI. Supersedes
@@ -130,6 +146,47 @@ per-job workflow, freshness enforcement across the whole chain, and the dashboar
 implemented** -- confirmed: no `job_applications` dashboard list/detail view exists, and no
 cross-app integration beyond the pointer-based freshness checks M5/M6 already enforce individually.
 
+## Product Owner output-token budget correction (2026-09-07, D-040) -- IMPLEMENTED, deterministically tested, APPLIED to the real development database
+
+Full detail: `docs/DECISIONS.md`'s D-040 entry. Summary:
+
+- **Trigger**: a preflight budget audit ahead of the first operator-driven M5 UI run for
+  `JobApplication` 9 (part of a separate, explicitly stop-before-any-Gate-click task) checked
+  D-039's registered 8192-token output ceiling against real historical `LLMCallLog` output-token
+  measurements from this exact pipeline: AC_NORMALIZE ~7650, AC_RANK ~12230, AC_MATCH ~7326,
+  AB_BUILD ~8204. AC_RANK/AB_BUILD had already exceeded 8192 in real usage; AC_NORMALIZE/AC_MATCH
+  had inadequate headroom. The audit stopped and reported rather than proceeding or self-fixing.
+- **Decision**: register a conservative 16384-token application-level output capability for both
+  `gpt-5.4-mini`/`gpt-5.4` (well within this model family's own separately-audited/documented
+  ceiling, but deliberately not raised to that larger number -- Product Owner instruction: "do not
+  inflate the registry to a larger undocumented number"). Stage budgets: `AC_NORMALIZE`/`AC_RANK`/
+  `AC_MATCH`/`AB_BUILD` raised 8192 -> 16384; `MEMORY_BUILD` (4096) and `AJ_ANALYZE` (8192)
+  unchanged. Provider/model mappings, reasoning levels, and timeouts are all unchanged.
+- **16384 is a ceiling, never a consumption target**: billing follows only tokens actually
+  produced; `finish_reason=length` still fails closed unconditionally (D-026); no automatic
+  retry/fallback was introduced.
+- **Canonical source**: the same idempotent `llm_provider/services/gpt54_defaults.py`/
+  `manage.py configure_gpt54_defaults [--dry-run]` mechanism D-039 established --
+  `STAGE_DEFAULT_MATRIX` now carries each stage's own output budget explicitly (a real
+  reproducibility gap closed by this change: previously a fresh database would have left every
+  stage's budget unset, silently inheriting the *model's* full capability for every stage --
+  including `MEMORY_BUILD`/`AJ_ANALYZE`, which must stay smaller). No schema migration --
+  confirmed a pure data/configuration correction.
+- **Tests**: 24 new (`llm_provider/tests/test_gpt54_budget_correction.py`) -- capability
+  acceptance, effective-budget resolution for all four expanded stages, the two unchanged stages,
+  the exceeds-capability guard (both `full_clean()` and the `get_adapter_for_stage` defense-in-
+  depth path), `selection_source` stays DEFAULT, provider/model/reasoning unchanged, no fallback,
+  idempotency (including from a simulated stale pre-correction state), and all four affected
+  stages' real request bodies constructed locally (never via `requests.post`, never mocked --
+  simply never imported) confirming `max_completion_tokens=16384` reaches the OpenAI reasoning-
+  model request contract. Full suite: 1339 -> 1363 passing; `manage.py check`/`makemigrations
+  --check --dry-run`/`ruff check .` all clean.
+- **Real database application**: applied and idempotency-proven directly against the real local
+  dev database. `LLMCallLog` count, `JobApplication` 9's phase/pointers, and both Gates confirmed
+  unchanged before and after -- no provider call, M5/M6 run, or Gate action of any kind was made.
+- **Live qualification**: still `NOT RUN` -- this is a preflight correction, not a substitute for
+  the operator-driven M5 run it was performed ahead of.
+
 ## Paid GPT-5.4 model defaults, reasoning-effort configuration, and M5/M6 stage console (2026-09-07, D-039) -- IMPLEMENTED, deterministically tested, APPLIED to the real development database
 
 Full detail: `docs/DECISIONS.md`'s D-039 entry. Summary:
@@ -150,8 +207,9 @@ Full detail: `docs/DECISIONS.md`'s D-039 entry. Summary:
   (`llm_provider/services/gpt54_defaults.py`) — reuses this registry's own pre-existing direct
   OpenAI `LLMProvider` row (id 11, already serving `gpt-5`) rather than duplicating it; registers
   `gpt-5.4-mini`/`gpt-5.4` under it (truthful `supports_structured_output=True`/
-  `supports_reasoning=True`/`supports_streaming=False`, `max_output_tokens=8192`, matching D-038's
-  own conservative ceiling) and converges all six `StageModelAssignment` rows to the matrix above;
+  `supports_reasoning=True`/`supports_streaming=False`, `max_output_tokens=16384` — raised from an
+  initial 8192 by D-040's Product Owner budget correction, see below) and converges all six
+  `StageModelAssignment` rows to the matrix above;
   also ensures the OpenRouter-hosted equivalents exist as optional alternatives. Safe to run
   repeatedly; never touches `openrouter/free`/NVIDIA/Z.ai/the pre-existing `gpt-5` row. Two real
   bugs were found and fixed during this work: (1) an interaction bug between this command and
@@ -1885,10 +1943,14 @@ settled; it remains PROPOSED and was not touched by this correction. Neither D-0
 anything else is blocking for the M7 work already completed above; D-034 would only need
 revisiting if the product owner later wants an outcome recordable before `READY`. D-035 through
 D-038 are recorded and implemented per their own sections above/`docs/DECISIONS.md`. D-039 (paid
-GPT-5.4 model defaults via OpenRouter, per-stage reasoning-effort configuration, and the M5/M6
-stage console -- see "Paid GPT-5.4 model defaults..." above) is **ACCEPTED AND IMPLEMENTED**,
-applied to the real local development database; live OpenRouter qualification under the new
-defaults remains deliberately deferred to the operator-driven M5/M6 run.
+GPT-5.4 model defaults via the direct OpenAI API -- corrected same day from an initial pass that
+mistakenly used OpenRouter -- per-stage reasoning-effort configuration, and the M5/M6 stage
+console -- see "Paid GPT-5.4 model defaults..." above) is **ACCEPTED AND IMPLEMENTED**, applied to
+the real local development database. D-040 (Product Owner output-token budget correction -- 16384
+registered capability, AC_NORMALIZE/AC_RANK/AC_MATCH/AB_BUILD raised to 16384, see "Product Owner
+output-token budget correction..." above) is **ACCEPTED AND IMPLEMENTED**, applied to the real
+local development database. Live qualification under the current defaults remains deliberately
+deferred to the operator-driven M5/M6 run.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

@@ -2885,3 +2885,116 @@ paid-call-confirmation UI work above, all of which are provider-agnostic and una
    own commit history for the exact hashes; nothing was pushed.
 9. **Live qualification**: still `NOT RUN -- intentionally deferred for the operator-driven M5/M6
    execution`, unchanged by this correction.
+
+## D-040: Product Owner output-token budget correction -- 16384 registered capability, four M5/M6 stage budgets raised
+
+- **Status**: **ACCEPTED** (2026-09-07), Product Owner-directed, ahead of the operator-driven M5
+  UI run for `JobApplication` 9 (a preflight check against real historical `LLMCallLog` data,
+  performed before the operator was authorized to click "Run M5," is what surfaced the gap this
+  decision corrects). Scoped entirely to `llm_provider`'s registry/adapter layer and directly
+  corresponding tests/documentation -- no provider/model mapping, reasoning level, or timeout was
+  touched; no `JobApplication`, `JobRequirementAnalysis`, `FitAssessment`, `ResumeDraft`,
+  `CandidateMemory`, or Gate state was touched; no provider call of any kind was made.
+- **Context**: D-039 (and its same-day correction) registered a conservative 8192-token
+  application-level output capability for both direct-OpenAI `gpt-5.4-mini`/`gpt-5.4` models,
+  inherited from D-038's `openrouter/free` free-router precedent rather than derived from this
+  pipeline's own real usage. A preflight budget audit ahead of the first operator-driven M5 UI run
+  for `JobApplication` 9 checked the registered budgets against real historical `LLMCallLog`
+  output-token measurements from this exact pipeline and found: AC_NORMALIZE ~7650, AC_RANK
+  ~12230, AC_MATCH ~7326, AB_BUILD ~8204 output tokens. AC_RANK and AB_BUILD had *already*
+  exceeded the 8192 ceiling in real historical usage (proving it insufficient, not merely tight),
+  and AC_NORMALIZE/AC_MATCH had inadequate headroom above their own historical highs. The
+  operator-facing task that surfaced this explicitly stopped before any Gate/provider action per
+  its own instruction ("Stop and report before the operator clicks anything if these checks
+  fail") and awaited this Product Owner decision rather than silently proceeding or self-fixing.
+- **Decision**: register a conservative application-level output capability of **16384** tokens
+  for both `gpt-5.4-mini` and `gpt-5.4` (comfortably above every historical figure above, and well
+  within this model family's own separately-audited ceiling -- the pre-existing direct-OpenAI
+  `gpt-5` row in this same registry is audited at 128,000 max output tokens, D-029/Phase F;
+  official-documentation corroboration was additionally sought for `gpt-5.4` itself, consistent
+  with that same 128,000-token family ceiling). This decision deliberately registers only 16384,
+  **not** that larger family ceiling -- an explicit Product Owner instruction ("do not inflate the
+  registry to a larger undocumented number"), since 16384 already clears every observed real
+  measurement with ample headroom and this codebase's own "token consumption is the v1
+  observability priority" invariant (CLAUDE.md) favors a conservative, empirically-justified
+  ceiling over a maximal one.
+- **Stage budgets** (`StageModelAssignment.max_output_tokens`, the value that actually bounds a
+  given request -- the model capability above is only the outer ceiling a stage budget can never
+  exceed):
+
+  | Stage | Before | After | Historical measured high |
+  | --- | --- | --- | --- |
+  | `MEMORY_BUILD` | 4096 | **unchanged (4096)** | not part of this correction |
+  | `AJ_ANALYZE` | 8192 | **unchanged (8192)** | not part of this correction |
+  | `AC_NORMALIZE` | 8192 | **16384** | ~7650 |
+  | `AC_RANK` | 8192 | **16384** | ~12230 |
+  | `AC_MATCH` | 8192 | **16384** | ~7326 |
+  | `AB_BUILD` | 8192 | **16384** | ~8204 |
+
+  `MEMORY_BUILD`/`AJ_ANALYZE` are deliberately left untouched -- this correction targets only the
+  four stages real measurements proved too tight; both remaining stages' existing budgets are
+  already comfortably under the new 16384 model-capability ceiling, so raising that ceiling has no
+  side effect on them.
+- **16384 is a permitted maximum, never an expected or required consumption target**: OpenAI bills
+  exactly the tokens a call actually produces, regardless of the configured ceiling; a call that
+  finishes in far fewer tokens than 16384 costs and consumes only what it actually used. Raising
+  this ceiling does not itself cause any stage to produce longer output -- it only removes a
+  premature truncation risk that real historical data proved was already being hit.
+- **`finish_reason=length` continues to fail closed unconditionally** (D-026): this decision does
+  not add, weaken, or bypass that behavior in any way, and does not introduce or authorize any
+  automatic retry or provider/model fallback for it or for any other failure mode -- a truncated
+  response is still never accepted as a genuine final answer at any budget.
+- **Canonical configuration source**: `llm_provider/services/gpt54_defaults.py` (the same
+  idempotent mechanism D-039 already established, `manage.py configure_gpt54_defaults
+  [--dry-run]`) -- never an ad hoc ORM mutation, never a schema migration (this is a pure data/
+  configuration correction; `makemigrations --check --dry-run` confirms no schema change is
+  needed). `STAGE_DEFAULT_MATRIX` now carries a third element per stage (the stage's own output
+  budget, alongside its existing model id and reasoning effort) instead of relying on whatever a
+  `StageModelAssignment` row happened to already have from an unrelated, earlier configuration
+  pass -- a real reproducibility gap this decision also closes: before this change, a *fresh*
+  database (no pre-existing `StageModelAssignment` rows) would have left every stage's budget
+  unset, silently falling back to the *model's own full capability ceiling* for every stage
+  (including `MEMORY_BUILD`/`AJ_ANALYZE`, which must stay at 4096/8192) rather than each stage's
+  own deliberately-tuned value. `configure_gpt54_defaults` now explicitly converges every stage's
+  `max_output_tokens` to its canonical value on every run (never merely clamping a pre-existing
+  value down when it happens to exceed the ceiling, as the prior logic did) -- proven idempotent
+  and reproducible from a fresh database and from a database still carrying the old 8192 values.
+- **Tests**: 24 new deterministic tests
+  (`llm_provider/tests/test_gpt54_budget_correction.py`) -- both models accept/persist the 16384
+  capability via `full_clean()`; the four expanded stages resolve to an effective request budget
+  of exactly 16384 via the real `get_adapter_for_stage` resolution path; `MEMORY_BUILD`/
+  `AJ_ANALYZE` remain 4096/8192; a stage budget above the new 16384 ceiling is still rejected by
+  `full_clean()` and, defense-in-depth, by `get_adapter_for_stage`'s own
+  `InvalidStageBudgetError` guard; `selection_source` stays `DEFAULT` with no override submitted;
+  every provider/model mapping and reasoning level is unchanged; no fallback/substitution
+  mechanism exists; the configuration operation is idempotent (including from a simulated stale
+  pre-correction state still carrying the old 8192 budgets); and the four affected stages' real
+  request bodies are constructed locally, via the adapter's own pure `build_chat_completion_body`
+  function -- never through `adapter.generate()`, never through `requests.post` (not imported,
+  not patched, not reachable anywhere in the new test file) -- confirming `max_completion_tokens`
+  (the reasoning-model request key) carries exactly 16384. 24 existing tests in
+  `test_gpt54_defaults_config.py` were updated for the new three-element matrix shape and the
+  16384 model-capability value; zero behavior change to what they otherwise assert. Full suite:
+  1339 -> 1363 (24 net new), all passing; `manage.py check`/`makemigrations --check --dry-run`/
+  `ruff check .` all clean. No provider HTTP request occurs in any test in this repository as a
+  result of this change (proven both by the absence of any `requests` reference in the new file
+  and by this project's pre-existing network-guarded test runner).
+- **Real database application**: `manage.py configure_gpt54_defaults` re-run against the real
+  local development database (Postgres via `docker compose`, confirmed healthy before any write).
+  Idempotency proven directly: a second real run and a subsequent `--dry-run` both reported no
+  further changes. Verified via the Django ORM (never ad hoc SQL): exactly one active direct-OpenAI
+  `LLMProvider` row, exactly one `gpt-5.4-mini` and one `gpt-5.4` `LLMModel` row (both now at
+  16384 capability), exactly six `StageModelAssignment` rows with the corrected budget table
+  above, all provider/model mappings and reasoning levels unchanged, all four affected stages'
+  `full_clean()` succeeding. `LLMCallLog` count, `JobApplication` 9's phase/pointers, and both
+  Gates' state were confirmed unchanged before and after (this decision never ran M5, M6, a smoke
+  test, or any provider-backed operation).
+- **Live qualification**: still `NOT RUN` -- this decision is itself a preflight correction ahead
+  of the operator-driven M5 UI run, not a substitute for it. Stage budgets should be revisited
+  again later using observed `LLMCallLog` token-usage metrics from that real run (and subsequent
+  ones), not tuned further speculatively ahead of one.
+- **Rollback**: reduce any of the four affected `StageModelAssignment.max_output_tokens` values
+  (or the two `LLMModel.max_output_tokens` capability values) via the existing registry admin, or
+  re-run `configure_gpt54_defaults` after editing `gpt54_defaults.py`'s constants back -- a plain,
+  reversible registry operation; no historical `LLMCallLog`/`FitAssessment`/`ResumeDraft` row is
+  ever touched by this decision or its rollback.

@@ -15,9 +15,12 @@ from django.test import TestCase
 
 from ..models import LLMCallLog, LLMModel, LLMProvider, ReasoningEffort, StageModelAssignment
 from ..services.gpt54_defaults import (
+    AJ_ANALYZE_OUTPUT_BUDGET,
+    EXPANDED_STAGE_OUTPUT_BUDGET,
     GPT54_MAX_OUTPUT_TOKENS,
     GPT54_MINI_MODEL_ID,
     GPT54_MODEL_ID,
+    MEMORY_BUILD_OUTPUT_BUDGET,
     OPENROUTER_GPT54_MINI_MODEL_ID,
     OPENROUTER_GPT54_MODEL_ID,
     STAGE_DEFAULT_MATRIX,
@@ -29,12 +32,24 @@ from .factories import make_model, make_provider, make_stage_assignment
 ALL_STAGES = list(StageModelAssignment.Stage.values)
 
 EXPECTED_MATRIX = {
-    StageModelAssignment.Stage.MEMORY_BUILD: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AJ_ANALYZE: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AC_NORMALIZE: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AC_MATCH: (GPT54_MODEL_ID, ReasoningEffort.HIGH),
-    StageModelAssignment.Stage.AC_RANK: (GPT54_MODEL_ID, ReasoningEffort.HIGH),
-    StageModelAssignment.Stage.AB_BUILD: (GPT54_MODEL_ID, ReasoningEffort.MEDIUM),
+    StageModelAssignment.Stage.MEMORY_BUILD: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, MEMORY_BUILD_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AJ_ANALYZE: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AJ_ANALYZE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_NORMALIZE: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_MATCH: (
+        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_RANK: (
+        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AB_BUILD: (
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
 }
 
 
@@ -66,18 +81,19 @@ class CompleteDefaultMatrixTests(TestCase):
         self.assertEqual(STAGE_DEFAULT_MATRIX, EXPECTED_MATRIX)
 
     def test_matrix_uses_only_direct_openai_ids_never_openrouter_ids(self):
-        matrix_model_ids = {model_id for model_id, _ in STAGE_DEFAULT_MATRIX.values()}
+        matrix_model_ids = {model_id for model_id, _reasoning, _budget in STAGE_DEFAULT_MATRIX.values()}
         self.assertEqual(matrix_model_ids, {GPT54_MINI_MODEL_ID, GPT54_MODEL_ID})
         self.assertNotIn(OPENROUTER_GPT54_MINI_MODEL_ID, matrix_model_ids)
         self.assertNotIn(OPENROUTER_GPT54_MODEL_ID, matrix_model_ids)
 
     def test_real_run_assigns_every_stage_to_the_exact_direct_matrix(self):
         configure_gpt54_defaults(dry_run=False)
-        for stage, (expected_model_id, expected_reasoning) in EXPECTED_MATRIX.items():
+        for stage, (expected_model_id, expected_reasoning, expected_budget) in EXPECTED_MATRIX.items():
             assignment = StageModelAssignment.objects.select_related("model__provider").get(stage=stage)
             self.assertEqual(assignment.model.model_id, expected_model_id)
             self.assertEqual(assignment.model.provider.provider_type, LLMProvider.ProviderType.OPENAI)
             self.assertEqual(assignment.default_reasoning_effort, expected_reasoning)
+            self.assertEqual(assignment.max_output_tokens, expected_budget)
 
 
 class DirectOpenAIProviderTests(TestCase):
@@ -133,11 +149,14 @@ class RegistryCapabilityTests(TestCase):
             self.assertTrue(model.supports_structured_output)
             self.assertTrue(model.supports_reasoning)
 
-    def test_output_budget_never_exceeds_the_pre_existing_conservative_ceiling(self):
+    def test_model_capability_matches_the_product_owner_approved_16k_ceiling(self):
+        """Product Owner budget correction (2026-09-07): both models register the approved
+        conservative 16384-token capability -- never a larger, undocumented number, and never the
+        original D-039 pass's now-proven-insufficient 8192."""
         configure_gpt54_defaults(dry_run=False)
         for model_id in (GPT54_MINI_MODEL_ID, GPT54_MODEL_ID):
             model = _direct_model(model_id)
-            self.assertEqual(model.max_output_tokens, 8192)
+            self.assertEqual(model.max_output_tokens, 16384)
             self.assertEqual(model.max_output_tokens, GPT54_MAX_OUTPUT_TOKENS)
 
     def test_display_names_are_exact(self):

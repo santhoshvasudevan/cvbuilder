@@ -52,31 +52,73 @@ OPENAI_CREDENTIAL_ENV_VAR = "OPENAI_API_KEY"
 OPENROUTER_PROVIDER_NAME = "OpenRouter"
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Conservative output-token ceiling for both GPT-5.4 models, direct and OpenRouter-hosted alike
-# (requirements Sec 4: "without unnecessarily increasing the application's current per-call output
-# budget"). Matches the exact value `openrouter_free_router.FREE_ROUTER_MAX_OUTPUT_TOKENS` already
-# uses -- the smallest known-good stage budget already exercised live in this codebase
-# (AC_NORMALIZE/AC_MATCH, D-027) -- rather than a larger number assumed from GPT-5.4's own
-# theoretical maximum (the pre-existing direct-OpenAI `gpt-5` row's own 128000 is a different,
-# separately-verified model's capability, not a precedent this decision inherits). A model that
-# cannot sustain even this budget still fails safely: `finish_reason=length` is classified
-# CONFIGURATION and never silently accepted (`llm_provider/adapters/openai.py`'s shared parser,
-# D-026). Intended to be verified/adjusted via `manage.py smoke_test_openai --model gpt-5.4`, never
-# raised speculatively ahead of an actual live call.
-GPT54_MAX_OUTPUT_TOKENS = 8192
+# Conservative *application-registered* output-token capability for both GPT-5.4 models, direct
+# and OpenRouter-hosted alike (2026-09-07, Product Owner budget correction -- CLAUDE.md's "Token
+# consumption is the v1 observability priority" and requirements Sec 4: "without unnecessarily
+# increasing the application's current per-call output budget" -- 16384 is that conservative
+# number, not GPT-5.4's own theoretical maximum). This is a *ceiling*, never a floor or a
+# consumption target: a stage's own `StageModelAssignment.max_output_tokens` (see
+# `STAGE_DEFAULT_MATRIX` below) is what actually bounds a given request, and a model virtually
+# never needs, generates, or is billed for the full registered ceiling -- OpenAI bills exactly the
+# tokens actually produced, regardless of this configured maximum.
+#
+# History: the original D-039 pass registered a smaller, now-proven-insufficient 8192 (matching
+# `openrouter_free_router.FREE_ROUTER_MAX_OUTPUT_TOKENS`, a free-router precedent this decision no
+# longer inherits). Real historical production measurements against this exact pipeline
+# (`LLMCallLog` token-usage data) subsequently showed: AC_NORMALIZE ~7650, AC_RANK ~12230, AC_MATCH
+# ~7326, AB_BUILD ~8204 output tokens -- proving 8192 was already insufficient for AC_RANK/AB_BUILD
+# and left inadequate headroom for AC_NORMALIZE/AC_MATCH. 16384 is the Product Owner's approved
+# correction: comfortably above every observed figure, and well within this model family's own
+# documented/audited ceiling (the pre-existing direct-OpenAI `gpt-5` row in this same registry is
+# separately audited at 128,000 max output tokens, D-029/Phase F) -- this decision deliberately
+# registers only 16384, never that larger number, per the Product Owner's explicit "do not inflate
+# the registry to a larger undocumented number" instruction.
+#
+# A model that cannot sustain even a stage's own configured budget still fails safely:
+# `finish_reason=length` is classified CONFIGURATION and never silently accepted
+# (`llm_provider/adapters/openai.py`'s shared parser, D-026) -- this change never introduces or
+# implies an automatic retry/fallback for that failure mode. Stage budgets should be revisited
+# later using observed `LLMCallLog` token-usage metrics from real qualification/production runs,
+# not raised speculatively ahead of one.
+GPT54_MAX_OUTPUT_TOKENS = 16384
+
+# Per-stage output-token budgets (2026-09-07, Product Owner budget correction): MEMORY_BUILD/
+# AJ_ANALYZE are deliberately left at their existing, already-sufficient values -- this correction
+# targets only the four stages historical measurements proved too tight. Both are comfortably under
+# the 16384 model-capability ceiling above, so neither stage is affected by that ceiling's increase.
+MEMORY_BUILD_OUTPUT_BUDGET = 4096
+AJ_ANALYZE_OUTPUT_BUDGET = 8192
+# AC_NORMALIZE/AC_RANK/AC_MATCH/AB_BUILD: raised to the new registered ceiling itself -- the
+# Product Owner's approved correction for the four stages proven too tight by real measurements
+# (see the ceiling constant's own docstring above for the exact historical figures).
+EXPANDED_STAGE_OUTPUT_BUDGET = 16384
 
 # The operator-approved default stage matrix (requirements Sec 1, corrected to the direct-OpenAI
-# ids): extraction/analysis stages use the cheaper Mini model at medium reasoning; matching/
-# ranking/writing stages -- where getting the judgment right matters more than raw throughput --
-# use the full model, with AC_MATCH/AC_RANK at high reasoning (judgment-heavy) and AB_BUILD at
-# medium (structured writing, not open-ended judgment).
-STAGE_DEFAULT_MATRIX: dict[str, tuple[str, str]] = {
-    StageModelAssignment.Stage.MEMORY_BUILD: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AJ_ANALYZE: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AC_NORMALIZE: (GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM),
-    StageModelAssignment.Stage.AC_MATCH: (GPT54_MODEL_ID, ReasoningEffort.HIGH),
-    StageModelAssignment.Stage.AC_RANK: (GPT54_MODEL_ID, ReasoningEffort.HIGH),
-    StageModelAssignment.Stage.AB_BUILD: (GPT54_MODEL_ID, ReasoningEffort.MEDIUM),
+# ids and, in this update, to the Product-Owner-approved per-stage output budgets): extraction/
+# analysis stages use the cheaper Mini model at medium reasoning; matching/ranking/writing stages
+# -- where getting the judgment right matters more than raw throughput -- use the full model, with
+# AC_MATCH/AC_RANK at high reasoning (judgment-heavy) and AB_BUILD at medium (structured writing,
+# not open-ended judgment). Provider/model mapping and reasoning levels are unchanged by this
+# update -- only the third (budget) element of each tuple changed, and only for four stages.
+STAGE_DEFAULT_MATRIX: dict[str, tuple[str, str, int]] = {
+    StageModelAssignment.Stage.MEMORY_BUILD: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, MEMORY_BUILD_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AJ_ANALYZE: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AJ_ANALYZE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_NORMALIZE: (
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_MATCH: (
+        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AC_RANK: (
+        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
+    StageModelAssignment.Stage.AB_BUILD: (
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+    ),
 }
 
 NO_PRIOR_ASSIGNMENT = "(none)"
@@ -90,6 +132,8 @@ class StageReassignment:
     previous_reasoning_effort: str
     new_model_id: str
     new_reasoning_effort: str
+    previous_max_output_tokens: int | str
+    new_max_output_tokens: int
 
 
 @dataclasses.dataclass
@@ -134,12 +178,14 @@ class ConfigurationReport:
             for r in self.reassigned_stages:
                 lines.append(
                     f"Stage {r.stage!r}: model {r.previous_model_id!r} -> {r.new_model_id!r}, "
-                    f"reasoning {r.previous_reasoning_effort!r} -> {r.new_reasoning_effort!r}"
+                    f"reasoning {r.previous_reasoning_effort!r} -> {r.new_reasoning_effort!r}, "
+                    f"output budget {r.previous_max_output_tokens!r} -> {r.new_max_output_tokens!r}"
                 )
         else:
             lines.append(
                 "Every implemented stage's StageModelAssignment already matches the direct-OpenAI "
-                "GPT-5.4 default matrix -- no reassignment needed."
+                "GPT-5.4 default matrix (model, reasoning, and output budget) -- no reassignment "
+                "needed."
             )
         return "\n".join(lines)
 
@@ -282,12 +328,15 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
             .select_for_update()
             .filter(stage__in=STAGE_DEFAULT_MATRIX)
         }
-        for stage, (target_model_id, target_reasoning) in STAGE_DEFAULT_MATRIX.items():
+        for stage, (target_model_id, target_reasoning, target_budget) in STAGE_DEFAULT_MATRIX.items():
             target_model = models_by_id[target_model_id]
             assignment = existing_assignments.get(stage)
             if assignment is None:
                 new_assignment = StageModelAssignment(
-                    stage=stage, model=target_model, default_reasoning_effort=target_reasoning
+                    stage=stage,
+                    model=target_model,
+                    default_reasoning_effort=target_reasoning,
+                    max_output_tokens=target_budget,
                 )
                 new_assignment.full_clean()
                 new_assignment.save()
@@ -298,6 +347,8 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
                         previous_reasoning_effort=NO_PRIOR_REASONING,
                         new_model_id=target_model_id,
                         new_reasoning_effort=target_reasoning,
+                        previous_max_output_tokens=NO_PRIOR_ASSIGNMENT,
+                        new_max_output_tokens=target_budget,
                     )
                 )
                 continue
@@ -305,6 +356,7 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
             already_converged = (
                 assignment.model_id == target_model.id
                 and assignment.default_reasoning_effort == target_reasoning
+                and assignment.max_output_tokens == target_budget
             )
             if already_converged:
                 # Idempotency requires making no further write here.
@@ -317,17 +369,22 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
                     previous_reasoning_effort=assignment.default_reasoning_effort or NO_PRIOR_REASONING,
                     new_model_id=target_model_id,
                     new_reasoning_effort=target_reasoning,
+                    previous_max_output_tokens=(
+                        assignment.max_output_tokens
+                        if assignment.max_output_tokens is not None
+                        else NO_PRIOR_ASSIGNMENT
+                    ),
+                    new_max_output_tokens=target_budget,
                 )
             )
             assignment.model = target_model
             assignment.default_reasoning_effort = target_reasoning
-            if (
-                assignment.max_output_tokens is not None
-                and assignment.max_output_tokens > GPT54_MAX_OUTPUT_TOKENS
-            ):
-                # Never silently exceed the new model's declared capability -- clamp down and let
-                # full_clean() re-verify rather than saving an inconsistent row.
-                assignment.max_output_tokens = GPT54_MAX_OUTPUT_TOKENS
+            # Explicitly converge to the canonical per-stage budget (requirements: "reproducible
+            # for a new database and idempotent for the existing database" -- never merely clamped
+            # down from whatever happened to be there before, and never left unset, which would
+            # silently fall back to the model's own full capability ceiling instead of this stage's
+            # deliberately smaller/larger approved budget).
+            assignment.max_output_tokens = target_budget
             assignment.full_clean()
             assignment.save()
 
