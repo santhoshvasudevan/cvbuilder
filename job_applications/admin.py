@@ -13,8 +13,17 @@ class JobApplicationAdmin(admin.ModelAdmin):
 
 @admin.register(StageRun)
 class StageRunAdmin(admin.ModelAdmin):
-    list_display = ("job_application", "stage", "status", "created_at", "approved_at")
-    list_filter = ("stage", "status")
+    list_display = (
+        "job_application",
+        "stage",
+        "status",
+        "provider",
+        "model",
+        "reasoning_level",
+        "created_at",
+        "approved_at",
+    )
+    list_filter = ("stage", "status", "provider")
     readonly_fields = ("created_at",)
 
 

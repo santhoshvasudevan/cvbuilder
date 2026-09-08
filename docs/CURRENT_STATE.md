@@ -4,84 +4,78 @@
 
 ## Repository State
 
-- Branch: `cvbuild2` — this is the active V2 development branch. Every future V2 milestone (starting with M2) branches from/builds on the latest `cvbuild2` commit.
+- V2 development branch: `cvbuild2`, currently at the M1 re-audit correction commit (`a7921b9`, "test: close M1 re-audit findings"). This M2 work was implemented on a dedicated branch, `m2-llm-provider-foundation`, branched from that `cvbuild2` HEAD — always re-verify with `git log -1 --oneline` and `git branch --show-current` rather than trusting this value; this document's own commit will move the current branch's HEAD forward once committed.
 - `main` is the **V1 legacy line** (currently `d5bdcea`), confirmed by an independent M1 re-audit to have diverged from `cvbuild2` at `fd02af8` with its own unrelated, incompatible M1/M2/later-milestone history. `main` is a read-only reuse source only (V2-D017) — it is never a merge target, and `cvbuild2` is never merged into it. Promoting `cvbuild2` to the repository's default branch is a distinct, future, separately-authorized decision (V2-D038).
-- Last verified HEAD (parent of this commit): the M1 re-audit correction commit ("test: close M1 re-audit findings"), a direct child of `ea4bd48` — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
 - Last verified date: 2026-09-08
 
 ## Current Milestone
 
-- Milestone: M1 — Foundation and Reuse Audit.
-- Status: **COMPLETE.** M2 (LLM Control Plane) has not started.
+- Milestone: M2 — LLM Control Plane and Operator Call Console.
+- Status: **COMPLETE** on `m2-llm-provider-foundation` (pending independent re-audit and merge into `cvbuild2`). M1 (Foundation and Reuse Audit) and its independent re-audit correction are complete on `cvbuild2`. M3A has not started.
 
 ## Verified Working
 
-- Django project foundation (`config/`), one Django app (`job_applications`), PostgreSQL-only configuration, admin, structured logging, and a minimal home view/template all run for real — not just import-checked.
-- `JobApplication`, `StageRun`, `JobApplicationStageState` models exist, migrated (`job_applications/migrations/0001_initial.py`) against a real local PostgreSQL 16 instance, and match the closed M0.2 design (`docs/ARCHITECTURE.md` §5) except `StageRun`'s provider/model fields, deferred to M2 (V2-D036).
-- Canonical stage vocabulary (`StageIdentifier`) implemented exactly as `docs/ARCHITECTURE.md` §5 defines it; a test asserts no V1 stage identifiers (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`) exist anywhere in source.
-- 50/50 automated tests pass (`make test`; 42 from the original M1 commit plus 8 added by the re-audit correction — see "M1 Independent Re-Audit" below). `manage.py check` clean. `ruff check .` clean. `makemigrations --check --dry-run` reports no drift. The exact documented `detect-secrets scan` command reports zero findings, reproducibly — its two prior findings (a labeled dev-only `SECRET_KEY` fallback literal, a test-only password literal) are narrowly allowlisted inline (`# pragma: allowlist secret`), not excluded by file/directory/rule, and a regression test proves an unannotated realistic secret is still detected. `.env` confirmed untracked by Git (tested, not just gitignored).
-- Every documented `Makefile` target was individually run and confirmed working from the actual shell in this session: `install`, `check`, `test`, `lint`, `migrate`, `makemigrations`, `migrations-check`, `secrets`, `verify`, `up`, `down`, `db-wait`, `start` (including a live HTTP request against the running dev server — home `200`, admin `302` unauthenticated), `stop`, `status`. `superuser` and `run` are thin, direct wrappers around standard Django management commands and were not separately exercised beyond confirming they invoke real commands.
-- Infra files (`docker-compose.yml`, `.env.example`, `.gitignore`, `Makefile`, `pyproject.toml`, `requirements.txt`, `templates/base.html`, `manage.py`, `config/asgi.py`/`wsgi.py`) were cherry-picked file-by-file from `main` per `docs/V2_REUSE_AUDIT.md`'s REUSE_AS_IS classification, not bulk-merged. `config/settings.py`/`urls.py` were adapted (REUSE_WITH_ADAPTATION) to M1's actual single-app scope.
+- **M1 (Django/PostgreSQL foundation):** `config/`, `job_applications` app, PostgreSQL-only configuration, admin, structured logging, minimal home view/template — all run for real. `JobApplication`/`StageRun`/`JobApplicationStageState` migrated against real PostgreSQL. Canonical stage vocabulary (`StageIdentifier`) matches `docs/ARCHITECTURE.md` §5. See `docs/DECISIONS.md` V2-D036/V2-D037/V2-D038 for the full M1 history and its independent re-audit correction.
+- **M2 (LLM provider foundation), this update:**
+  - `llm_provider` app: `LLMProvider`/`LLMModel`/`StageModelAssignment`/`LLMCallLog` match `docs/ARCHITECTURE.md` §12/§13 (two documented field-set deviations, V2-D039). `supported_reasoning_levels` is the sole source of reasoning capability (V2-D034); `LLMModel.supports_reasoning` is a derived property, never independently stored.
+  - Four real provider adapters (OpenAI, NVIDIA NIM, Gemini, OpenRouter) plus a deterministic `FakeAdapter`, all sharing one call path (`BaseLLMAdapter.generate()`: pre-flight validation → retry → Pydantic re-validation → `LLMCallLog` write). No provider SDK is imported anywhere (confirmed by source grep) — only `requests`.
+  - Pre-flight "fails before HTTP" validation (`llm_provider.validation`) checks inactive provider/model, missing/unset credential, unsupported structured output, unsupported reasoning level, and output-budget-exceeds-capability — all before any adapter's `_call_once` (the actual HTTP boundary) runs. No automatic provider/model fallback exists anywhere in this app (verified: retry re-calls only the same closure; `compare_models` never substitutes one model's result for another's).
+  - `job_applications.StageRun`'s deferred fields (`provider`, `model`, `reasoning_level`, `max_output_tokens`, `temperature` — V2-D036) are now implemented, migrated against real PostgreSQL, and null for deterministic stages.
+  - `llm_provider.services.console` (`run_stage_manually`, `run_with_model_override`, `compare_models`) plus Django admin are M2's UI surface (V2-D040); interactive per-call run/approve/edit/rerun UI is deferred to M4, the first milestone with a real `StageRun`-producing stage to attach it to.
+  - `manage.py llm_smoke_test <provider>` is the opt-in manual smoke-test command — never run automatically, reports `NOT_LIVE_VERIFIED` without any network call when no credential is configured (the case in this environment; no live provider has ever been exercised here).
+  - 171/171 automated tests pass (`make test`; 51 `job_applications` + 120 `llm_provider`). `manage.py check` clean. `ruff check .` clean. `makemigrations --check --dry-run` reports no drift. `detect-secrets scan` reports zero findings, reproducibly. Every real-adapter test mocks `requests.post` — zero live network calls anywhere in the suite.
+  - Fresh-migration verification used two disposable, isolated PostgreSQL containers (never the operational `cvbuilder_postgres_data` volume): forward migration from empty applies cleanly, a second run is a no-op, and both `llm_provider`/`job_applications` migrations unapply/reapply cleanly.
+- Every documented `Makefile` target remains individually confirmed working (see M1 history in `docs/DECISIONS.md`); `make verify`/`make secrets`/`make test`/`make check`/`make lint`/`make migrations-check` were all re-run against the M2 tree specifically.
 
 ## In Progress
 
-- Nothing. M1 is complete; M2 has not been started.
+- M2 awaits independent re-audit and, if it passes, merge into `cvbuild2` (per this repository's branch/merge convention — see `docs/HANDOVER_PROTOCOL.md`).
 
 ## Known Issues / Risks
 
-- **Local dev database reset during M1 (V2-D037):** the local Postgres Docker volume already contained a full stale V1 schema and a colliding `("job_applications", "0001_initial")` migration record from unrelated prior work against the same container name. It was reset (`docker compose down -v` + fresh `up`) before verification. This is expected, disposable local state, not source-controlled data — see V2-D037 for the full explanation. A different agent picking up this repository should not be surprised if the local Postgres volume looks "new"; that is intentional.
-- `requirements.txt`/`requirements-dev.txt` intentionally omit `pydantic`, `requests`, and `readability-lxml` (present in `main`'s equivalent files) because M1's actual code does not import them. They will be added when the milestone that needs them (M4 for URL fetch/`readability-lxml`, M2/M4+ for `pydantic` schemas, `requests` per adapter) begins — adding them now would be an unused dependency, not a needed one.
+- Real adapters (OpenAI/NVIDIA NIM/Gemini/OpenRouter) have never been exercised against a live provider in this environment — no credentials are configured. Schema translation and request construction are verified with `requests.post` mocked; this mirrors `main`'s own original M2 commit's documented limitation at the same point.
+- `requirements.txt` now includes `pydantic` and `requests` (added for M2, as anticipated in the prior version of this document). `readability-lxml` remains intentionally absent — still unneeded until M4's URL-fetch work.
 - Two non-blocking implementation choices remain open from M0.2, to be settled during their own milestones: whether `ExperienceSlot` metadata is copied at creation or resolved by reference to its source engagement record (M3A); exact stored enum naming for the AJ requirement taxonomy (M4).
+- Interactive per-call run/approve/edit/rerun UI (`requirements.md` UI-001..006) is not yet built — deliberately deferred to M4 (V2-D040), not an oversight.
 
 ## Verification
 
-Commands actually run in the M1 implementation session, in order, with results:
+Commands run against the M2 tree (`m2-llm-provider-foundation`), in order, with results:
 
 ```
-make check                          -> System check identified no issues (0 silenced).
+manage.py check                     -> System check identified no issues (0 silenced).
 make migrations-check               -> No changes detected.
-make migrate                        -> applied cleanly to a fresh local PostgreSQL 16 database.
-make test                           -> Ran 42 tests in ~0.5s. OK.
+make test                           -> Ran 171 tests in ~1.8s. OK. (51 job_applications + 120 llm_provider)
 make lint                           -> All checks passed!
-make secrets                        -> detect-secrets scan: two findings (later found not
-                                        reproducibly "zero" as originally claimed -- see
-                                        "M1 Independent Re-Audit" below).
-git diff --check --cached           -> clean, no output.
-```
-
-Plus a live-server smoke test (`make start`, `curl` against `/` and `/admin/`, `make stop`) — see "Verified Working" above for results.
-
-## M1 Independent Re-Audit
-
-An independent re-audit (range `9d91d19..ea4bd48`) verdict: **PASSED WITH NON-BLOCKING FINDINGS**. Three findings, all closed in one corrective commit (a direct child of `ea4bd48`; see V2-D038):
-
-```
-make check                          -> System check identified no issues (0 silenced).
-make migrations-check               -> No changes detected.
-make test                           -> Ran 50 tests in ~0.7s. OK.
-make lint                           -> All checks passed!
-make secrets                        -> detect-secrets scan: "results": {} (zero findings,
-                                        reproducible).
+make secrets                        -> detect-secrets scan: "results": {} (zero findings).
 make verify                         -> All verification checks passed.
 git diff --check                    -> clean, no output.
 ```
 
-1. `make secrets` did not reproduce the "zero findings" claim above — two audited false positives were narrowly allowlisted inline (`# pragma: allowlist secret`), and `DetectSecretsStillDetectsRealSecretsTests` proves detection is not weakened.
-2. The production fail-closed `SECRET_KEY` path had no test — added (`ProductionSecretKeyEnforcementTests`).
-3. `StageRun`/`JobApplicationStageState` deletion behavior (`CASCADE`/`SET_NULL`) had no test — added (`DeletionBehaviorTests`, 6 tests).
+Fresh-migration verification (isolated, disposable PostgreSQL containers, never the operational volume):
 
-The same re-audit found that `cvbuild2` cannot be fast-forward-merged into `main` — see "Repository State" above and V2-D038 for the full ancestry finding. No merge was performed.
+```
+docker run ... postgres:16-alpine (port 5435, db/user m2_audit)  -> forward migrate: all
+  migrations including llm_provider.0001_initial and job_applications.0002/0003 applied
+  cleanly; second migrate: "No migrations to apply."; migrate llm_provider zero / migrate
+  job_applications zero then migrate: unapply/reapply both clean.
+```
+
+Operational database (`cvbuilder-db-1` / volume `cvbuilder_postgres_data`) was migrated normally (not reset) and its row counts (all M1 + M2 tables: 0 rows) were verified unchanged before/after this work.
+
+For the full M1 implementation and its independent re-audit correction (three non-blocking findings, all closed), see `docs/DECISIONS.md` V2-D036 through V2-D038 — not restated here.
 
 ## Last Completed Handover
 
-- Outgoing: Claude Code, this session — M1 (Foundation and Reuse Audit) implementation.
+- Outgoing: Claude Code, this session — M2 (LLM Control Plane and Operator Call Console) implementation, on branch `m2-llm-provider-foundation`.
 - This is informational only — do not make correctness dependent on which tool wrote this. Verify the repository directly per `docs/HANDOVER_PROTOCOL.md` §B regardless of who the outgoing agent was.
 
 ## Next Recommended Action
 
-1. Begin M2 (LLM Control Plane and Operator Call Console) per `docs/IMPLEMENTATION_PLAN.md` — build/reuse `llm_provider` (provider registry, model registry with `supported_reasoning_levels` as canonical per V2-D034, `StageModelAssignment`, `LLMCallLog` referencing `job_applications.StageRun`, adapters, retry/error handling).
-2. Once `llm_provider.LLMProvider`/`LLMModel` exist, add the deferred `StageRun` fields (`provider`, `model`, `reasoning_level`, `max_output_tokens`, `temperature`) via a new migration (V2-D036).
-3. Use `docs/MILESTONE_COMPLETION_CHECKLIST.md` before declaring M2 complete.
+1. Independently re-audit M2 (this document's evidence, the actual diff, and reproduced test/verification commands) before merging `m2-llm-provider-foundation` into `cvbuild2`.
+2. If the re-audit passes, merge (fast-forward if possible) into `cvbuild2` and update this document's Repository State accordingly.
+3. Begin M3A (Candidate Knowledge and StaticResumeProfile) per `docs/IMPLEMENTATION_PLAN.md` from the resulting `cvbuild2` HEAD.
+4. Use `docs/MILESTONE_COMPLETION_CHECKLIST.md` before declaring M3A complete.
 
 ## Working Tree Expectations
 
@@ -89,4 +83,4 @@ Clean except for local, intentionally-untracked files that must never be committ
 
 ## Full Decision and Reuse History
 
-This file intentionally does not restate project history. For the full list of closed architectural decisions, see `docs/DECISIONS.md` (as of this update: V2-D001 through V2-D037). For the full `main`-branch reuse classification, see `docs/V2_REUSE_AUDIT.md`.
+This file intentionally does not restate project history. For the full list of closed architectural decisions, see `docs/DECISIONS.md` (as of this update: V2-D001 through V2-D041). For the full `main`-branch reuse classification, see `docs/V2_REUSE_AUDIT.md`.

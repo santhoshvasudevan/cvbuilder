@@ -19,7 +19,7 @@ Do not confuse these layers.
 - `.env` is not committed.
 - no Redis/Celery/SPA dependency appears without approval.
 
-**M1 status: VERIFIED.** `job_applications/tests/` (42 tests) covers Django startup, settings/environment validation, PostgreSQL configuration (including a live query against a real connection), the home view and URL routing, admin registration/reachability, and M1's architectural invariants (no legacy V1 stage identifiers or app names, `.env` not tracked by git, `.env.example` placeholder-only). Run via `make test`; `make check`, `make migrations-check`, and `make lint` are also part of `make verify`. Canonical local commands live in the root `Makefile` — see `AGENTS.md`.
+**M1 status: VERIFIED.** `job_applications/tests/` (51 tests as of the M1 re-audit correction — see `docs/CURRENT_STATE.md`) covers Django startup, settings/environment validation, PostgreSQL configuration (including a live query against a real connection), the home view and URL routing, admin registration/reachability, `StageRun`/`JobApplicationStageState` deletion behavior, and M1's architectural invariants (no legacy V1 stage identifiers or app names, `.env` not tracked by git, `.env.example` placeholder-only). Run via `make test`; `make check`, `make migrations-check`, and `make lint` are also part of `make verify`. Canonical local commands live in the root `Makefile` — see `AGENTS.md`.
 
 ### LLM provider
 - adapter routing;
@@ -33,7 +33,7 @@ Do not confuse these layers.
 - identical input snapshot used for model A/B runs;
 - `reasoning_level` rejected (at `StageModelAssignment` save time and on a per-call override) when it is not a member of the selected model's `supported_reasoning_levels` (V2-D034).
 
-Automated tests never require live credentials.
+**M2 status: VERIFIED.** `llm_provider/tests/` (120 tests) covers registry model validation/constraints/deletion-protection, pre-flight "fails before HTTP" configuration validation (inactive provider/model, missing/unset credential, unsupported structured output/reasoning, output-budget ceiling), error sanitization, retry classification (including proof that retry never substitutes a different provider/model), Gemini/OpenAI schema translation, all four real adapters' request-building and response-parsing with `requests.post` mocked (zero live calls), the `FakeAdapter` end-to-end call path (validation → retry → schema re-validation → audit log), routing (`get_adapter_for_stage`/`get_adapter_for_model`, including proof no fallback occurs across stages/models), the manual-run/model-comparison console, Django admin (including that `LLMCallLog` is add/change-locked), and the opt-in smoke-test management command's deterministic (no-credential) branches. Automated tests never require live credentials and never reach the network — every `requests.post` call site in a real-provider adapter test is mocked.
 
 ### Candidate context
 Fixtures verify that context includes:

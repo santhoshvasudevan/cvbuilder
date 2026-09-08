@@ -110,12 +110,29 @@ class StageRunTests(TestCase):
         self.assertIsNone(run.approved_at)
         self.assertEqual(run.lock_version, 0)
 
-    def test_stage_run_has_no_provider_model_fields_yet(self):
-        # V2-D036: provider/model/reasoning_level/max_output_tokens/temperature are added in M2
-        # once llm_provider.LLMProvider/LLMModel exist -- M1 must not implement M2 scope.
+    def test_stage_run_now_has_provider_model_fields(self):
+        # V2-D036 predicted this exact, deliberate change: "M2 adds the five remaining fields
+        # via a new migration once llm_provider.LLMProvider/LLMModel exist ... so its removal
+        # [of the M1 test asserting their absence] in M2 is a deliberate, visible change rather
+        # than a silent one." This test replaces
+        # test_stage_run_has_no_provider_model_fields_yet now that M2 has landed.
         field_names = {f.name for f in StageRun._meta.get_fields()}
         for name in ("provider", "model", "reasoning_level", "max_output_tokens", "temperature"):
-            self.assertNotIn(name, field_names)
+            self.assertIn(name, field_names)
+
+    def test_stage_run_provider_model_fields_are_optional(self):
+        # Null for deterministic stages (docs/ARCHITECTURE.md Section 5) -- creating a
+        # deterministic StageRun with no LLM configuration must still succeed.
+        run = StageRun.objects.create(
+            job_application=self.job,
+            stage=StageIdentifier.CANDIDATE_CONTEXT_BUILD,
+            input_snapshot={},
+        )
+        self.assertIsNone(run.provider)
+        self.assertIsNone(run.model)
+        self.assertEqual(run.reasoning_level, "")
+        self.assertIsNone(run.max_output_tokens)
+        self.assertIsNone(run.temperature)
 
     def test_deterministic_stage_run_allowed(self):
         run = StageRun.objects.create(

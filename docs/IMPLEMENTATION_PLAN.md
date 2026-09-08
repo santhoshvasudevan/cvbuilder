@@ -14,7 +14,7 @@ M0.2 — Architecture closure (reuse audit + design decisions + multi-agent hand
  |
 M1 — Foundation + reuse audit — COMPLETE
  |
-M2 — LLM control plane + operator call console
+M2 — LLM control plane + operator call console — COMPLETE
  |
 M3A — Candidate knowledge + StaticResumeProfile
  |
@@ -110,7 +110,7 @@ Build or selectively reuse the provider/model execution foundation.
 - Gemini
 - OpenRouter
 - provider registry
-- model registry, with `supported_reasoning_levels` as the canonical per-model reasoning capability (V2-D034 — `StageRun` itself is not built here, see M1/V2-D022)
+- model registry, with `supported_reasoning_levels` as the canonical per-model reasoning capability (V2-D034)
 - stage defaults
 - reasoning/token-budget defaults
 - runtime overrides
@@ -121,18 +121,21 @@ Build or selectively reuse the provider/model execution foundation.
 - run/approve/edit/rerun
 - model comparison on identical stored input
 - manual opt-in provider smoke testing
+- `StageRun`'s deferred provider/model/reasoning_level/max_output_tokens/temperature fields (V2-D036), now that `llm_provider.LLMProvider`/`LLMModel` exist
 
-### Acceptance
-- fake-adapter deterministic tests pass;
-- each provider adapter's schema translation is tested without live credentials;
-- stage default routing works;
-- runtime override works;
-- input/output token metadata is captured;
-- operator can run a stage manually;
-- `.env` credentials are not stored in DB;
-- OpenRouter behaves as a normal provider;
-- configured providers can be manually smoke-tested;
-- `reasoning_level` is rejected, both at `StageModelAssignment` save time and on a per-call override, if it is not a member of the selected model's `supported_reasoning_levels` (V2-D034).
+### Acceptance — MET (see docs/CURRENT_STATE.md for evidence)
+- fake-adapter deterministic tests pass — met, `llm_provider/tests/test_fake_adapter.py`;
+- each provider adapter's schema translation is tested without live credentials — met, `llm_provider/tests/test_real_adapter_config_guards.py` and `test_schema_translation.py` mock `requests.post`/exercise translation directly; zero live calls;
+- stage default routing works — met, `StageModelAssignment` + `get_adapter_for_stage` (`llm_provider/tests/test_adapters_routing.py`);
+- runtime override works — met, `get_adapter_for_model`/`run_with_model_override` (`llm_provider/tests/test_console.py`);
+- input/output token metadata is captured — met, `LLMCallLog` token fields, written by `BaseLLMAdapter._write_call_log`;
+- operator can run a stage manually — met, `llm_provider.services.console.run_stage_manually` (V2-D040: Django admin + this service layer is M2's UI surface; interactive per-call UI deferred to M4, see V2-D040);
+- `.env` credentials are not stored in DB — met, `LLMProvider.credential_env_variable` stores only the variable name (`llm_provider/tests/test_models.py::LLMProviderTests::test_credential_value_never_stored`);
+- OpenRouter behaves as a normal provider — met, `OpenRouterAdapter` is one more `ADAPTER_CLASSES` entry, routed/validated identically to every other provider;
+- configured providers can be manually smoke-tested — met, `manage.py llm_smoke_test <provider>` (opt-in only, never run by `make test`/`make verify`);
+- `reasoning_level` is rejected, both at `StageModelAssignment` save time and on a per-call override, if it is not a member of the selected model's `supported_reasoning_levels` (V2-D034) — met, `StageModelAssignment.clean()` and `llm_provider.validation.validate_reasoning_level`, both tested.
+
+M2 implementation note: adapters/schema translation/retry/error-taxonomy were reused, file-by-file, from `main`'s original M2 commit (`8627a93`) per `docs/V2_REUSE_AUDIT.md`'s REUSE_AS_IS classification, then adapted for V2's exact field names, the shared `job_applications` stage vocabulary, `supported_reasoning_levels` (V2-D034), and a fourth provider (OpenRouter, reused from `main`'s early `a541a0a` commit with its later data-collection-policy/`top_p` hardening deliberately dropped as out of V2's documented M2 scope). `main`'s much later, heavily-hardened `llm_provider` state (GPT-5.4 defaults, OpenRouter free-router, per-stage read timeouts, rate-limit diagnostics) was deliberately **not** reused — none of that is in `docs/ARCHITECTURE.md` §12/§13's frozen field set, and pulling it in would have been exactly the "copy the legacy V1 pipeline wholesale" this milestone's task explicitly disallowed. `docs/DECISIONS.md` V2-D039/V2-D040/V2-D041 record the specific, deliberate deviations from the literal `docs/ARCHITECTURE.md` §13 field list and the M2 UI scope boundary.
 
 ## M3A — Candidate Knowledge and StaticResumeProfile
 

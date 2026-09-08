@@ -13,7 +13,7 @@ REPO_ROOT = Path(settings.BASE_DIR)
 # CLAUDE.md; docs/ARCHITECTURE.md Section 17).
 FORBIDDEN_SUBSTRINGS = ("AC_NORMALIZE", "AC_RANK", "AC_MATCH")
 
-SOURCE_DIRS = ("config", "job_applications", "templates")
+SOURCE_DIRS = ("config", "job_applications", "llm_provider", "templates")
 
 
 class NoLegacyV1SemanticsTests(SimpleTestCase):

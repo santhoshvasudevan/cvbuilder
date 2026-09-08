@@ -293,3 +293,34 @@ This is recorded explicitly so no future agent assumes a `cvbuild2` → `main` f
 - V2 development continues on `cvbuild2`; this is the branch every future V2 milestone (starting with M2) must branch from/build on.
 - No V1 ↔ V2 merge is intended under this decision. `main` is a read-only reuse source only (`V2-D017`, `docs/V2_REUSE_AUDIT.md`), never a merge target, and `cvbuild2` is not merged into it.
 - Promoting `cvbuild2` (or its eventual successor) to the repository's default branch is a distinct, future, separately-authorized repository-transition decision — not implied or pre-approved by this entry.
+
+---
+
+## M2 Implementation Decisions
+
+## V2-D039 — LLMCallLog field naming/additions beyond docs/ARCHITECTURE.md Section 13's base list
+**Status:** APPROVED
+
+`docs/ARCHITECTURE.md` Section 13 lists `LLMCallLog`'s fields as `stage_run, provider, model, input_tokens, cached_input_tokens, output_tokens, total_tokens, latency, retry_count, sanitized_error_category`. M2's actual implementation (`llm_provider/models.py`) makes two deliberate, documented deviations from that literal list, both requested explicitly by the M2 implementation task and consistent with "no automatic provider/model fallback" (`docs/IMPLEMENTATION_PLAN.md` M2 scope boundary):
+
+- `provider`/`model` are named `requested_provider`/`requested_model`. The naming makes explicit, at the schema level, that these always identify exactly what was asked for -- there is no separate "actually used" provider/model field, because this codebase never substitutes one.
+- `resolved_model_identifier` (blank by default) and `finish_reason` (blank by default) are added. `resolved_model_identifier` is provenance only -- set when a provider echoes a concrete model identifier different from the one requested (e.g. an alias or router resolution); it is never read by any routing/selection logic, so it cannot become a hidden fallback mechanism. `finish_reason` records the provider's own completion-reason string (e.g. `"stop"`, `"length"`) for audit/debugging.
+
+Neither addition changes the artifact ownership, the FK relationships, or the "no prompt/response body" invariant `docs/ARCHITECTURE.md` Section 13 establishes -- both are scalar audit/provenance fields only.
+
+## V2-D040 — M2 UI scope: Django admin + service-layer console; interactive per-call UI deferred to M4
+**Status:** APPROVED
+
+`docs/IMPLEMENTATION_PLAN.md` M2's acceptance criteria include "operator can run a stage manually" and reference the "Operator Call Console." M2 implements this as:
+
+- Django admin registration for `LLMProvider`/`LLMModel`/`StageModelAssignment` (full CRUD, sanitized display -- `credential_env_variable` is a variable *name*, never a secret value) and `LLMCallLog` (read-only audit ledger, add/change permissions denied at the `ModelAdmin` level).
+- `llm_provider.services.console` (`run_stage_manually`, `run_with_model_override`, `compare_models`) as the callable, tested service layer that performs a manual run/model-comparison, satisfying the "operator can run a stage manually" and LLM-010/011 model-comparison acceptance criteria without live credentials.
+
+The interactive per-call UI `requirements.md` UI-001 through UI-006 describes (input inspection, output inspection, editable output, run/approve/edit/rerun buttons) is pipeline-stage UI: it needs a real `StageRun`-producing domain stage to attach to, and M2 intentionally implements no domain pipeline stage (`docs/IMPLEMENTATION_PLAN.md` M2 "Out of scope: real AJ/AC/APS/AB behavior"). Building that UI now would have nothing real to operate on. It is deferred to M4 (`AJ_ANALYZE`, the first real LLM-capable stage), which is the first milestone where a `StageRun` actually exists to inspect/approve/rerun. This is a scope-sequencing decision, not a reduction of `requirements.md` UI-001..006 -- those requirements remain in force and are expected to land in M4.
+
+## V2-D041 — job_applications.StageRun.reasoning_level duplicates ReasoningLevel's values rather than importing the enum
+**Status:** APPROVED
+
+`llm_provider.models` imports `StageIdentifier`/`LLM_CAPABLE_STAGES` from `job_applications.models` (the shared canonical stage vocabulary, V2-D022). `StageRun.reasoning_level` (the M2 deferred field added per V2-D036) needs to store one of the same `NONE`/`LOW`/`MEDIUM`/`HIGH`/`XHIGH` values `llm_provider.models.ReasoningLevel` defines (V2-D034) -- but `job_applications.models` cannot also import that class from `llm_provider.models` at class-definition time without creating a circular import between the two modules (each would need the other fully initialized before it can finish its own initialization).
+
+`job_applications.models` therefore defines a private, comment-documented tuple of the same five string values (`_REASONING_LEVEL_VALUES`) and uses it only for `StageRun.reasoning_level`'s field choices. `llm_provider.models.ReasoningLevel` remains the single canonical source of truth for what these values *mean* and which ones a given model supports (V2-D034 is unchanged); this is a storage-layer echo of the value set, not a second, independently-evolving definition, and `StageRun.reasoning_level`'s actual correctness for a given model is enforced by `llm_provider.validation.validate_reasoning_level` before any call, not by the field's `choices` constraint alone.

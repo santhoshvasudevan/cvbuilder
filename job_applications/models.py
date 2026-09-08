@@ -87,14 +87,23 @@ class JobApplication(models.Model):
         return f"{self.employer} — {self.job_title}"
 
 
+#: Mirrors llm_provider.models.ReasoningLevel's value set exactly (V2-D034 canonical scale).
+#: Duplicated here, rather than importing the class, to avoid a job_applications <-> llm_provider
+#: circular import at Python import time: llm_provider.models imports StageIdentifier/
+#: LLM_CAPABLE_STAGES from this module (V2-D022's shared stage vocabulary), so this module
+#: cannot also import a non-model symbol from llm_provider.models at class-definition time.
+#: llm_provider remains the single canonical source of truth for what these values *mean* and
+#: which ones a given model supports -- this is a storage-layer echo, not a second definition.
+_REASONING_LEVEL_VALUES = ("NONE", "LOW", "MEDIUM", "HIGH", "XHIGH")
+
+
 class StageRun(models.Model):
     """One execution attempt/version of a workflow stage (docs/ARCHITECTURE.md Section 5).
 
-    M1 implements the provider-independent fields only. ``provider``, ``model``,
-    ``reasoning_level``, ``max_output_tokens``, and ``temperature`` (docs/ARCHITECTURE.md
-    Section 5's full schema) are added by a follow-up M2 migration once llm_provider.LLMProvider
-    / llm_provider.LLMModel exist -- see V2-D036. This is an implementation-sequencing note, not
-    an architecture change.
+    M1 implemented the provider-independent fields only. M2 (V2-D036) adds ``provider``,
+    ``model``, ``reasoning_level``, ``max_output_tokens``, and ``temperature`` now that
+    llm_provider.LLMProvider/llm_provider.LLMModel exist, completing docs/ARCHITECTURE.md
+    Section 5's full schema.
     """
 
     class Status(models.TextChoices):
@@ -111,6 +120,31 @@ class StageRun(models.Model):
     stage = models.CharField(max_length=40, choices=StageIdentifier.choices)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     input_snapshot = models.JSONField(default=dict)
+    provider = models.ForeignKey(
+        "llm_provider.LLMProvider",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="stage_runs",
+        help_text="Null for deterministic stages (docs/ARCHITECTURE.md Section 5, V2-D036).",
+    )
+    model = models.ForeignKey(
+        "llm_provider.LLMModel",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="stage_runs",
+        help_text="Null for deterministic stages (docs/ARCHITECTURE.md Section 5, V2-D036).",
+    )
+    reasoning_level = models.CharField(
+        max_length=10,
+        blank=True,
+        default="",
+        choices=[(value, value) for value in _REASONING_LEVEL_VALUES],
+        help_text="Blank for deterministic stages.",
+    )
+    max_output_tokens = models.PositiveIntegerField(null=True, blank=True)
+    temperature = models.FloatField(null=True, blank=True)
     raw_structured_output = models.JSONField(null=True, blank=True)
     working_output = models.JSONField(null=True, blank=True)
     lock_version = models.PositiveIntegerField(default=0)

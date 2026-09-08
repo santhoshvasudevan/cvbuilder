@@ -9,8 +9,8 @@
 | Human-owned factual approval | FACT-001..005 | reviews / resume_builder | M6 | Gate 2 walkthrough |
 | Job tracking | §4 | job_applications | M7 | dashboard/integration tests |
 | Pipeline phase / application outcome separation | V2-D021 | job_applications | M1 | model test — VERIFIED (`JobApplicationTests.test_pipeline_phase_and_application_outcome_are_independent_fields`) |
-| StageRun / JobApplicationStageState | V2-D022 | job_applications | M1 | model/migration test — VERIFIED (migration `job_applications/0001_initial.py` applied to real PostgreSQL; model tests pass); provider/model fields deferred to M2 (V2-D036) |
-| Canonical stage vocabulary | V2-D022 | job_applications/llm_provider | M1/M2 | enum/routing test — VERIFIED for M1 (`StageIdentifierTests`, incl. no-legacy-identifier check); `StageModelAssignment` wiring remains M2 |
+| StageRun / JobApplicationStageState | V2-D022 | job_applications | M1/M2 | model/migration test — VERIFIED (migration `job_applications/0001_initial.py` applied to real PostgreSQL; model tests pass); provider/model/reasoning_level/max_output_tokens/temperature added in M2 (V2-D036, migrations `job_applications/0002_*`/`0003_*`) — VERIFIED (`StageRunTests`, fresh-DB migration) |
+| Canonical stage vocabulary | V2-D022 | job_applications/llm_provider | M1/M2 | enum/routing test — VERIFIED for M1 (`StageIdentifierTests`, incl. no-legacy-identifier check); `StageModelAssignment` wiring — M2 VERIFIED (`llm_provider.models.LLM_CAPABLE_STAGE_CHOICES` restricted to the shared vocabulary, `StageModelAssignmentTests`) |
 | Job intake | AJ-001 | job_intake | M4 | URL/paste tests |
 | Stable job requirements | AJ-002 | job_intake | M4 | schema/unit test |
 | Orthogonal requirement taxonomy (priority/domain/origin) | AJ-002, V2-D033 | job_intake | M4 | schema/enum test |
@@ -53,16 +53,16 @@
 | V2 ResumeDraft structure | §12 | resume_builder | M6 | rendering contract test |
 | Gate 2 | §14 | reviews | M6 | walkthrough |
 | Pipeline UI | UI-001..010 | owning apps/job_applications | M2-M7 | UI walkthrough/tests |
-| Provider independence | LLM-001 | llm_provider | M2 | import/routing tests |
-| Provider/model registry | LLM-002..006 | llm_provider | M2 | model/admin tests |
-| Structured output | LLM-007 | llm_provider | M2 | adapter tests |
-| Canonical per-model reasoning levels (supported_reasoning_levels, no independent supports_reasoning) | LLM-004, V2-D034 | llm_provider | M2 | model/validation test |
-| OpenRouter | LLM-008 | llm_provider | M2 | adapter/smoke test |
-| Editable URLs | LLM-009 | llm_provider | M2 | registry test |
-| Model experiments | LLM-010..011 | llm_provider | M2/M8 | same-input rerun test |
-| Secrets | LLM-012 | project-wide | M1/M2 | config/VCS review — M1 VERIFIED (`detect-secrets scan` clean; `.env` confirmed untracked by an automated test; `.env.example` contains placeholders only) |
-| Token optimization | TOKEN-001..006 | llm_provider/reporting | M2/M8 | usage reports |
-| Selective main reuse | §20 | project-wide | M1 | reuse audit — see `docs/V2_REUSE_AUDIT.md`; M1 infra reuse VERIFIED (file-by-file cherry-pick from `main`, no bulk merge) |
+| Provider independence | LLM-001 | llm_provider | M2 | import/routing tests — M2 VERIFIED (no provider SDK import anywhere in the repo; only `requests` in `llm_provider.adapters`, confirmed by source grep) |
+| Provider/model registry | LLM-002..006 | llm_provider | M2 | model/admin tests — M2 VERIFIED (`LLMProviderTests`, `LLMModelTests`, `StageModelAssignmentTests`, `test_admin.py`) |
+| Structured output | LLM-007 | llm_provider | M2 | adapter tests — M2 VERIFIED (`test_schema_translation.py`, `test_real_adapter_config_guards.py`) |
+| Canonical per-model reasoning levels (supported_reasoning_levels, no independent supports_reasoning) | LLM-004, V2-D034 | llm_provider | M2 | model/validation test — M2 VERIFIED (`LLMModel.supports_reasoning` is a derived property only; `test_clean_rejects_reasoning_levels_missing_none`, `validate_reasoning_level` tests) |
+| OpenRouter | LLM-008 | llm_provider | M2 | adapter/smoke test — M2 VERIFIED (`OpenRouterAdapter` is one `ADAPTER_CLASSES` entry among four, no special-cased pipeline logic; `OpenRouterAdapterTests`) |
+| Editable URLs | LLM-009 | llm_provider | M2 | registry test — M2 VERIFIED (`LLMProvider.base_url`, blank falls back to the adapter's `DEFAULT_BASE_URL`, no code change required to override) |
+| Model experiments | LLM-010..011 | llm_provider | M2/M8 | same-input rerun test — M2 VERIFIED for M2 scope (`compare_models`, `test_console.py`: identical stored input rerun against independent models, each writing its own `LLMCallLog`, no fallback/merge); full A/B against a real `StageRun.input_snapshot` awaits a real LLM-capable stage (M4+) |
+| Secrets | LLM-012 | project-wide | M1/M2 | config/VCS review — M1 VERIFIED (`detect-secrets scan` clean; `.env` confirmed untracked by an automated test; `.env.example` contains placeholders only); M2 VERIFIED (`LLMProvider.credential_env_variable` stores only a variable name, never a value — `test_credential_value_never_stored`; `detect-secrets scan` remains clean after M2) |
+| Token optimization | TOKEN-001..006 | llm_provider/reporting | M2/M8 | usage reports — M2 VERIFIED for TOKEN-001 only (`LLMCallLog` captures input/cached-input/output/total tokens per call); TOKEN-002..006 (compaction, reporting, tuning) remain M8 |
+| Selective main reuse | §20 | project-wide | M1/M2 | reuse audit — see `docs/V2_REUSE_AUDIT.md`; M1 infra reuse VERIFIED (file-by-file cherry-pick from `main`, no bulk merge); M2 `llm_provider` reuse VERIFIED (file-by-file from `main`'s original M2 commit `8627a93` + OpenRouter from `a541a0a`, adapted per V2-D039/040/041, no bulk merge — `docs/IMPLEMENTATION_PLAN.md` M2 implementation note) |
 | Quality benchmark methodology | V2-D028 | project-wide | M8 | `docs/QUALITY_BENCHMARK.md` |
 | Repository-native multi-agent continuity | §23, V2-D035 | project-wide | M0.2/ongoing | `AGENTS.md`, `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, `docs/MILESTONE_COMPLETION_CHECKLIST.md` present and followed |
 | Plain Django orchestration | §21 | project-wide | M1-M7 | architecture/code review |

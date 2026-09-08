@@ -156,3 +156,81 @@ An independent re-audit (`9d91d19..ea4bd48`) returned **PASSED WITH NON-BLOCKING
 3. Added `DeletionBehaviorTests` (6 tests) covering `JobApplication` → `StageRun`/`JobApplicationStageState` cascade deletion and `StageRun` → `JobApplicationStageState.current_stage_run`/`approved_stage_run` `SET_NULL` behavior.
 
 Result: 50/50 tests pass, `make verify` passes, `make secrets` is clean and reproducible, no migration was generated, no M2/provider code was introduced. The same re-audit found `cvbuild2` cannot be fast-forward-merged into `main` (`main` is a divergent V1 legacy line, not a V2 integration branch — see V2-D038 for the full finding); no merge was performed or is implied by this correction.
+
+### M2 — LLM Control Plane and Operator Call Console
+
+- [x] Milestone scope confirmed — `llm_provider` app (registry, adapters, validation, retry, errors, schema translation, console service, admin, opt-in smoke-test command) plus `job_applications.StageRun`'s five deferred fields (V2-D036); no M3+ domain/pipeline logic.
+- [x] Requirements mapped — `docs/REQUIREMENT_TRACEABILITY.md` rows for LLM-001..012, TOKEN-001, V2-D022, V2-D034, V2-D036, §20 updated to M2 VERIFIED.
+- [x] Architecture decisions respected — `docs/ARCHITECTURE.md` §12/§13 schema followed, with two documented, deliberate field-set deviations (V2-D039) and a UI-scope decision (V2-D040) and an import-cycle-avoidance decision (V2-D041), all recorded in `docs/DECISIONS.md` before this milestone was declared complete.
+- [x] Implementation complete — registry models, four real adapters (OpenAI/NVIDIA NIM/Gemini/OpenRouter) + FakeAdapter, provider-neutral request/result/error types, pre-flight "fails before HTTP" validation, retry policy, schema translation, `LLMCallLog` audit ledger, manual-run/model-comparison console, Django admin, opt-in smoke-test command, `StageRun`'s deferred fields.
+- [x] Migrations checked — `llm_provider/migrations/0001_initial.py` and `job_applications/migrations/0002_*`/`0003_*` apply cleanly to a fresh, isolated PostgreSQL database; a second `migrate` run is a no-op; both `llm_provider` and `job_applications` migrations unapply and reapply cleanly (`migrate <app> zero` then `migrate`).
+- [x] Focused tests pass — every `llm_provider/tests/*.py` module passes individually and together (120 tests).
+- [x] Milestone acceptance tests pass — see `docs/IMPLEMENTATION_PLAN.md` M2 Acceptance section, marked MET with evidence.
+- [x] No unintended network calls — every real-provider adapter test mocks `requests.post`; grep confirms no provider SDK import anywhere in the repo; the opt-in smoke-test command is never invoked by `make test`/`make verify`.
+- [x] No secrets/local files added — `detect-secrets scan` clean (new test-only credentials/passwords narrowly allowlisted inline, same mechanism as V2-D038); `LLMProvider` stores only a credential variable *name*, never a value (tested).
+- [x] `git diff` reviewed — reviewed before staging; staged file list matches the intended M2 file set exactly.
+- [x] `docs/CURRENT_STATE.md` updated — reflects verified M2 completion with command-level evidence.
+- [x] `docs/REQUIREMENT_TRACEABILITY.md` updated — M2-scoped rows marked VERIFIED.
+- [x] `docs/DECISIONS.md` / `docs/ARCHITECTURE.md` updated — V2-D039/V2-D040/V2-D041 recorded; `docs/ARCHITECTURE.md` §12/§13 annotated with M2 implementation notes.
+- [x] Known issues explicitly recorded — see `docs/CURRENT_STATE.md` Known Issues/Risks.
+- [x] Next milestone prerequisites recorded — see `docs/CURRENT_STATE.md` Next Recommended Action.
+- [x] Final `git status` understood — clean except expected untracked local files.
+- [x] Commit created only if authorized — authorized explicitly by this milestone's task instructions, on a dedicated branch (`m2-llm-provider-foundation`), never on `cvbuild2` or `main` directly.
+
+```text
+Milestone: M2 — LLM Control Plane and Operator Call Console
+Branch: m2-llm-provider-foundation (from cvbuild2 HEAD a7921b9)
+HEAD after this work: see docs/CURRENT_STATE.md (verify with `git log -1`)
+
+Scope confirmed: yes — llm_provider app + StageRun's deferred fields only, no M3+ domain logic
+
+Requirements covered: LLM-001..012, TOKEN-001 (partial, full TOKEN-002..006 remain M8),
+  V2-D022, V2-D034, V2-D036, V2-D039, V2-D040, V2-D041
+
+Files/components changed:
+  llm_provider/ (models, errors, types, retry, validation, schema_translation, adapters/*,
+    services/console, admin, management/commands/llm_smoke_test, migrations/0001_initial,
+    tests/*)
+  job_applications/models.py (StageRun deferred fields), migrations/0002_*, 0003_*,
+    admin.py (StageRun display), tests/test_models.py (deletion-behavior-adjacent additions),
+    tests/test_settings.py (llm_provider removed from NOT_YET_BUILT_APPS),
+    tests/test_architecture_invariants.py (llm_provider added to forbidden-substring scan)
+  config/settings.py (INSTALLED_APPS), requirements.txt (pydantic, requests)
+
+Migrations:
+  llm_provider/migrations/0001_initial.py (LLMProvider, LLMModel, StageModelAssignment, LLMCallLog)
+  job_applications/migrations/0002_stagerun_max_output_tokens.py,
+  job_applications/migrations/0003_stagerun_model_stagerun_provider_and_more.py
+
+Tests run:
+  make test  (.venv/bin/python manage.py test)
+Results:
+  Ran 171 tests in ~1.8s. OK. (0 failures, 0 errors) — 51 job_applications + 120 llm_provider
+
+Milestone acceptance criteria (docs/IMPLEMENTATION_PLAN.md M2): see that section, all MET with
+  evidence.
+
+Known issues:
+  Real adapters (OpenAI/NVIDIA/Gemini/OpenRouter) have never been exercised against a live
+  provider in this environment (no credentials configured) -- schema translation and request
+  construction are verified with requests.post mocked, matching main's original M2 commit's own
+  documented limitation at the time.
+  Interactive per-call run/approve/edit/rerun UI (UI-001..006) deferred to M4 (V2-D040) -- Django
+  admin + the service-layer console satisfy M2's own acceptance criteria without it.
+
+Docs updated:
+  docs/CURRENT_STATE.md: yes
+  docs/REQUIREMENT_TRACEABILITY.md: yes
+  docs/DECISIONS.md / docs/ARCHITECTURE.md: yes (V2-D039, V2-D040, V2-D041; ARCHITECTURE.md
+    §12/§13 notes)
+  docs/IMPLEMENTATION_PLAN.md: yes (M2 marked COMPLETE with evidence)
+  docs/TEST_STRATEGY.md: yes (LLM provider section marked M2 VERIFIED)
+
+Next milestone prerequisites: M3A needs candidate_memory/StaticResumeProfile; M4 (first real
+  consumer of llm_provider.StageModelAssignment) needs job_intake + a real AJ_ANALYZE StageRun.
+
+Working tree: clean except expected untracked local files (.env, .venv/, .claude/, .DS_Store)
+
+Commit: created on m2-llm-provider-foundation — explicit file staging, see commit message
+  "feat: implement V2 M2 LLM provider foundation" or equivalent
+```

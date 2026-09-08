@@ -55,11 +55,12 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    # M1 scope only (docs/IMPLEMENTATION_PLAN.md M1, V2-D036). Every other app boundary
-    # documented in docs/ARCHITECTURE.md Section 3 (job_intake, candidate_memory,
-    # candidate_context, candidate_matching, positioning_strategy, resume_builder, reviews,
-    # llm_provider) is created when its own milestone begins, not pre-scaffolded here.
+    # M1 (docs/IMPLEMENTATION_PLAN.md M1, V2-D036) and M2 (LLM provider foundation) scope only.
+    # Every other app boundary documented in docs/ARCHITECTURE.md Section 3 (job_intake,
+    # candidate_memory, candidate_context, candidate_matching, positioning_strategy,
+    # resume_builder, reviews) is created when its own milestone begins, not pre-scaffolded here.
     "job_applications",
+    "llm_provider",
 ]
 
 MIDDLEWARE = [

@@ -356,9 +356,13 @@ StageModelAssignment
 
 Runtime UI overrides do not mutate stage defaults unless explicitly saved. `StageModelAssignment.stage` is restricted to the LLM-capable subset of the canonical stage vocabulary (§5) — deterministic/workflow stages never have a `StageModelAssignment` row.
 
+**M2 implementation note:** all pre-flight "fails before HTTP" checks (inactive provider/model, missing/unset credential, unsupported structured output, unsupported reasoning level, output budget exceeding model capability) are centralized in `llm_provider.validation.validate_call_configuration`, called by both the routing entrypoint (`llm_provider.adapters.get_adapter_for_stage`/`get_adapter_for_model`, before an adapter instance is even returned) and defensively again inside `BaseLLMAdapter.generate()` (before any adapter's `_call_once` — the actual HTTP boundary — runs). Neither this function nor any other M2 code ever selects a different provider/model than the one explicitly requested.
+
 ## 13. LLMCallLog
 
 **Closed in M0.2 (V2-D022).** `StageRun` is defined in §5 and owned by `job_applications` (workflow layer), not by `llm_provider`. `llm_provider` owns only `LLMCallLog`, which records token usage, latency, retries, and safe error category for a single provider call, and references the initiating `StageRun` by FK (nullable, to support manual smoke-test calls not tied to a `StageRun`). A single `StageRun` may accumulate multiple `LLMCallLog` rows across retries; `StageRun.raw_structured_output` reflects the successful attempt.
+
+**M2 implementation note (V2-D039):** the implemented `LLMCallLog` names these fields `requested_provider`/`requested_model` (rather than `provider`/`model`) and adds `resolved_model_identifier`/`finish_reason` beyond this section's base list — see V2-D039 for the full rationale. No field on `LLMCallLog` ever stores a prompt, response body, or credential value.
 
 ## 14. Model Comparison
 
