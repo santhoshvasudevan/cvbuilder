@@ -6,10 +6,11 @@ day to route through the direct OpenAI API rather than OpenRouter).
 
 Ensures a direct OpenAI LLMProvider row (base_url https://api.openai.com/v1, credential reference
 OPENAI_API_KEY) and active `gpt-5.4-mini`/`gpt-5.4` LLMModel rows exist under it with truthful
-capability flags, and points every currently implemented StageModelAssignment at the
-operator-approved default matrix (extraction/analysis stages -> GPT-5.4 Mini at medium reasoning;
-matching/ranking stages -> GPT-5.4 at high reasoning; application-build -> GPT-5.4 at medium
-reasoning). Also ensures the OpenRouter-hosted `openai/gpt-5.4-mini`/`openai/gpt-5.4` equivalents
+capability flags (gpt-5.4-mini capped at 16384 output tokens, gpt-5.4 at 32768), and points every
+currently implemented StageModelAssignment at the operator-approved default matrix
+(extraction/analysis/normalization stages -> GPT-5.4 Mini at medium reasoning, 4096/8192/16384
+output budgets; matching/ranking/application-build stages -> GPT-5.4 at medium reasoning, 32768
+output budget). Also ensures the OpenRouter-hosted `openai/gpt-5.4-mini`/`openai/gpt-5.4` equivalents
 exist as explicit, optional, non-default per-run alternatives. Never touches `openrouter/free`,
 NVIDIA/Gemini models, or the retired Z.ai/GLM row -- those remain exactly as configured, selectable
 per-run alternatives. Safe to run repeatedly. Never run automatically -- not on migrate, runserver,

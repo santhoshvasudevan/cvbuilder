@@ -15,9 +15,11 @@ from django.test import TestCase
 
 from ..models import LLMCallLog, LLMModel, LLMProvider, ReasoningEffort, StageModelAssignment
 from ..services.gpt54_defaults import (
+    AC_NORMALIZE_OUTPUT_BUDGET,
     AJ_ANALYZE_OUTPUT_BUDGET,
     EXPANDED_STAGE_OUTPUT_BUDGET,
     GPT54_MAX_OUTPUT_TOKENS,
+    GPT54_MINI_MAX_OUTPUT_TOKENS,
     GPT54_MINI_MODEL_ID,
     GPT54_MODEL_ID,
     MEMORY_BUILD_OUTPUT_BUDGET,
@@ -39,13 +41,13 @@ EXPECTED_MATRIX = {
         GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AJ_ANALYZE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_NORMALIZE: (
-        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AC_NORMALIZE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_MATCH: (
-        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_RANK: (
-        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AB_BUILD: (
         GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
@@ -149,15 +151,17 @@ class RegistryCapabilityTests(TestCase):
             self.assertTrue(model.supports_structured_output)
             self.assertTrue(model.supports_reasoning)
 
-    def test_model_capability_matches_the_product_owner_approved_16k_ceiling(self):
-        """Product Owner budget correction (2026-09-07): both models register the approved
-        conservative 16384-token capability -- never a larger, undocumented number, and never the
-        original D-039 pass's now-proven-insufficient 8192."""
+    def test_model_capability_matches_the_product_owner_approved_split_ceiling(self):
+        """Product Owner capacity correction (2026-09-08): gpt-5.4-mini keeps the approved
+        conservative 16384-token capability; gpt-5.4 is raised to 32768 after AC_RANK truncated a
+        real run at the prior shared 16384 ceiling -- neither is a larger, undocumented number."""
         configure_gpt54_defaults(dry_run=False)
-        for model_id in (GPT54_MINI_MODEL_ID, GPT54_MODEL_ID):
-            model = _direct_model(model_id)
-            self.assertEqual(model.max_output_tokens, 16384)
-            self.assertEqual(model.max_output_tokens, GPT54_MAX_OUTPUT_TOKENS)
+        mini = _direct_model(GPT54_MINI_MODEL_ID)
+        full = _direct_model(GPT54_MODEL_ID)
+        self.assertEqual(mini.max_output_tokens, 16384)
+        self.assertEqual(mini.max_output_tokens, GPT54_MINI_MAX_OUTPUT_TOKENS)
+        self.assertEqual(full.max_output_tokens, 32768)
+        self.assertEqual(full.max_output_tokens, GPT54_MAX_OUTPUT_TOKENS)
 
     def test_display_names_are_exact(self):
         configure_gpt54_defaults(dry_run=False)

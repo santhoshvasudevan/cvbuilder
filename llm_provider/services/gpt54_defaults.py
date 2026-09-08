@@ -52,27 +52,25 @@ OPENAI_CREDENTIAL_ENV_VAR = "OPENAI_API_KEY"
 OPENROUTER_PROVIDER_NAME = "OpenRouter"
 OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Conservative *application-registered* output-token capability for both GPT-5.4 models, direct
-# and OpenRouter-hosted alike (2026-09-07, Product Owner budget correction -- CLAUDE.md's "Token
-# consumption is the v1 observability priority" and requirements Sec 4: "without unnecessarily
-# increasing the application's current per-call output budget" -- 16384 is that conservative
-# number, not GPT-5.4's own theoretical maximum). This is a *ceiling*, never a floor or a
-# consumption target: a stage's own `StageModelAssignment.max_output_tokens` (see
-# `STAGE_DEFAULT_MATRIX` below) is what actually bounds a given request, and a model virtually
-# never needs, generates, or is billed for the full registered ceiling -- OpenAI bills exactly the
-# tokens actually produced, regardless of this configured maximum.
+# Conservative *application-registered* output-token capability, direct and OpenRouter-hosted
+# alike (2026-09-08, Product Owner AC_RANK/AC_MATCH/AB_BUILD capacity correction). This is a
+# *ceiling*, never a floor or a consumption target: a stage's own `StageModelAssignment.
+# max_output_tokens` (see `STAGE_DEFAULT_MATRIX` below) is what actually bounds a given request,
+# and a model virtually never needs, generates, or is billed for the full registered ceiling --
+# OpenAI bills exactly the tokens actually produced, regardless of this configured maximum.
 #
-# History: the original D-039 pass registered a smaller, now-proven-insufficient 8192 (matching
-# `openrouter_free_router.FREE_ROUTER_MAX_OUTPUT_TOKENS`, a free-router precedent this decision no
-# longer inherits). Real historical production measurements against this exact pipeline
-# (`LLMCallLog` token-usage data) subsequently showed: AC_NORMALIZE ~7650, AC_RANK ~12230, AC_MATCH
-# ~7326, AB_BUILD ~8204 output tokens -- proving 8192 was already insufficient for AC_RANK/AB_BUILD
-# and left inadequate headroom for AC_NORMALIZE/AC_MATCH. 16384 is the Product Owner's approved
-# correction: comfortably above every observed figure, and well within this model family's own
-# documented/audited ceiling (the pre-existing direct-OpenAI `gpt-5` row in this same registry is
-# separately audited at 128,000 max output tokens, D-029/Phase F) -- this decision deliberately
-# registers only 16384, never that larger number, per the Product Owner's explicit "do not inflate
-# the registry to a larger undocumented number" instruction.
+# History: the 2026-09-07 D-040 pass raised the shared ceiling to 16384 for both models based on
+# then-available historical measurements. A real operator-driven M5 run for JobApplication 9
+# (2026-09-08) then hit AC_RANK's 16384 ceiling exactly (`finish_reason=length`, LLMCallLog id
+# 324) -- proof that 16384 was insufficient headroom for AC_RANK's actual output on real data.
+# The Product Owner's correction: split the ceiling per model -- gpt-5.4-mini stays at 16384
+# (AC_NORMALIZE, its only stage, was never observed near that ceiling), gpt-5.4 (AC_RANK/AC_MATCH/
+# AB_BUILD) is raised to 32768, a maximum ceiling headroom figure, not an expected-consumption
+# figure -- cost and actual use remain based on recorded input/output tokens
+# (`LLMCallLog.output_tokens`), never this registered maximum. Reasoning effort for AC_RANK/
+# AC_MATCH is simultaneously lowered from high to medium (Product Owner decision, same
+# correction) -- judgment quality at medium is expected to remain adequate while reducing
+# reasoning-token consumption that was competing with output budget under the same ceiling.
 #
 # A model that cannot sustain even a stage's own configured budget still fails safely:
 # `finish_reason=length` is classified CONFIGURATION and never silently accepted
@@ -80,26 +78,26 @@ OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # implies an automatic retry/fallback for that failure mode. Stage budgets should be revisited
 # later using observed `LLMCallLog` token-usage metrics from real qualification/production runs,
 # not raised speculatively ahead of one.
-GPT54_MAX_OUTPUT_TOKENS = 16384
+GPT54_MINI_MAX_OUTPUT_TOKENS = 16384
+GPT54_MAX_OUTPUT_TOKENS = 32768
 
-# Per-stage output-token budgets (2026-09-07, Product Owner budget correction): MEMORY_BUILD/
-# AJ_ANALYZE are deliberately left at their existing, already-sufficient values -- this correction
-# targets only the four stages historical measurements proved too tight. Both are comfortably under
-# the 16384 model-capability ceiling above, so neither stage is affected by that ceiling's increase.
+# Per-stage output-token budgets (2026-09-08, Product Owner AC_RANK/AC_MATCH/AB_BUILD capacity
+# correction). MEMORY_BUILD/AJ_ANALYZE/AC_NORMALIZE are unchanged (gpt-5.4-mini, comfortably under
+# its 16384 ceiling). AC_RANK/AC_MATCH/AB_BUILD (gpt-5.4) are raised to the new 32768 ceiling --
+# AC_RANK because it was observed truncating in production at 16384; AC_MATCH/AB_BUILD raised in
+# step as the same maximum-ceiling headroom decision, not because either was itself observed
+# truncating.
 MEMORY_BUILD_OUTPUT_BUDGET = 4096
 AJ_ANALYZE_OUTPUT_BUDGET = 8192
-# AC_NORMALIZE/AC_RANK/AC_MATCH/AB_BUILD: raised to the new registered ceiling itself -- the
-# Product Owner's approved correction for the four stages proven too tight by real measurements
-# (see the ceiling constant's own docstring above for the exact historical figures).
-EXPANDED_STAGE_OUTPUT_BUDGET = 16384
+AC_NORMALIZE_OUTPUT_BUDGET = 16384
+EXPANDED_STAGE_OUTPUT_BUDGET = 32768
 
 # The operator-approved default stage matrix (requirements Sec 1, corrected to the direct-OpenAI
-# ids and, in this update, to the Product-Owner-approved per-stage output budgets): extraction/
-# analysis stages use the cheaper Mini model at medium reasoning; matching/ranking/writing stages
-# -- where getting the judgment right matters more than raw throughput -- use the full model, with
-# AC_MATCH/AC_RANK at high reasoning (judgment-heavy) and AB_BUILD at medium (structured writing,
-# not open-ended judgment). Provider/model mapping and reasoning levels are unchanged by this
-# update -- only the third (budget) element of each tuple changed, and only for four stages.
+# ids, and in this update to the Product-Owner-approved gpt-5.4 stage budgets/reasoning):
+# extraction/analysis/normalization stages use the cheaper Mini model at medium reasoning;
+# matching/ranking/writing stages -- where getting the judgment right matters more than raw
+# throughput -- use the full model, all three now at medium reasoning (2026-09-08: AC_MATCH/
+# AC_RANK lowered from high). Provider/model mapping is unchanged by this update.
 STAGE_DEFAULT_MATRIX: dict[str, tuple[str, str, int]] = {
     StageModelAssignment.Stage.MEMORY_BUILD: (
         GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, MEMORY_BUILD_OUTPUT_BUDGET,
@@ -108,13 +106,13 @@ STAGE_DEFAULT_MATRIX: dict[str, tuple[str, str, int]] = {
         GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AJ_ANALYZE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_NORMALIZE: (
-        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MINI_MODEL_ID, ReasoningEffort.MEDIUM, AC_NORMALIZE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_MATCH: (
-        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AC_RANK: (
-        GPT54_MODEL_ID, ReasoningEffort.HIGH, EXPANDED_STAGE_OUTPUT_BUDGET,
+        GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
     ),
     StageModelAssignment.Stage.AB_BUILD: (
         GPT54_MODEL_ID, ReasoningEffort.MEDIUM, EXPANDED_STAGE_OUTPUT_BUDGET,
@@ -160,7 +158,7 @@ class ConfigurationReport:
             f"(id={self.openai_provider_id})",
             f"LLMModel {GPT54_MINI_MODEL_ID!r} (direct OpenAI): "
             f"{'created' if self.mini_model_created else 'existing/updated'} "
-            f"(id={self.mini_model_id}, max_output_tokens={GPT54_MAX_OUTPUT_TOKENS})",
+            f"(id={self.mini_model_id}, max_output_tokens={GPT54_MINI_MAX_OUTPUT_TOKENS})",
             f"LLMModel {GPT54_MODEL_ID!r} (direct OpenAI): "
             f"{'created' if self.full_model_created else 'existing/updated'} "
             f"(id={self.full_model_id}, max_output_tokens={GPT54_MAX_OUTPUT_TOKENS})",
@@ -191,7 +189,7 @@ class ConfigurationReport:
 
 
 def _ensure_model(
-    provider: LLMProvider, model_id: str, display_name: str
+    provider: LLMProvider, model_id: str, display_name: str, *, max_output_tokens: int
 ) -> tuple[LLMModel, bool]:
     model = LLMModel.objects.select_for_update().filter(provider=provider, model_id=model_id).first()
     created = model is None
@@ -206,7 +204,7 @@ def _ensure_model(
     model.supports_structured_output = True
     model.supports_reasoning = True
     model.supports_streaming = False
-    model.max_output_tokens = GPT54_MAX_OUTPUT_TOKENS
+    model.max_output_tokens = max_output_tokens
     model.is_active = True
     if not model.display_name:
         # Only fill in a genuinely blank display_name -- never overwrite an operator's own curated
@@ -307,18 +305,32 @@ def configure_gpt54_defaults(*, dry_run: bool = False) -> ConfigurationReport:
         openrouter_provider, openrouter_provider_created = _ensure_openrouter_provider()
 
         mini_model, mini_created = _ensure_model(
-            openai_provider, GPT54_MINI_MODEL_ID, GPT54_MINI_DISPLAY_NAME
+            openai_provider,
+            GPT54_MINI_MODEL_ID,
+            GPT54_MINI_DISPLAY_NAME,
+            max_output_tokens=GPT54_MINI_MAX_OUTPUT_TOKENS,
         )
-        full_model, full_created = _ensure_model(openai_provider, GPT54_MODEL_ID, GPT54_DISPLAY_NAME)
+        full_model, full_created = _ensure_model(
+            openai_provider,
+            GPT54_MODEL_ID,
+            GPT54_DISPLAY_NAME,
+            max_output_tokens=GPT54_MAX_OUTPUT_TOKENS,
+        )
         models_by_id = {GPT54_MINI_MODEL_ID: mini_model, GPT54_MODEL_ID: full_model}
 
         # Optional, explicitly-preserved OpenRouter-hosted alternatives -- never the default,
         # never removed if already present from the original (corrected) implementation.
         openrouter_mini_model, openrouter_mini_created = _ensure_model(
-            openrouter_provider, OPENROUTER_GPT54_MINI_MODEL_ID, GPT54_MINI_DISPLAY_NAME
+            openrouter_provider,
+            OPENROUTER_GPT54_MINI_MODEL_ID,
+            GPT54_MINI_DISPLAY_NAME,
+            max_output_tokens=GPT54_MINI_MAX_OUTPUT_TOKENS,
         )
         openrouter_full_model, openrouter_full_created = _ensure_model(
-            openrouter_provider, OPENROUTER_GPT54_MODEL_ID, GPT54_DISPLAY_NAME
+            openrouter_provider,
+            OPENROUTER_GPT54_MODEL_ID,
+            GPT54_DISPLAY_NAME,
+            max_output_tokens=GPT54_MAX_OUTPUT_TOKENS,
         )
 
         reassigned: list[StageReassignment] = []
