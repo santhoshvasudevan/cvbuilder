@@ -20,3 +20,7 @@ postgres_data/
 .DS_Store
 .vscode/
 .idea/
+
+# make start/stop app-server lifecycle files
+.cvbuilder-server.pid
+.cvbuilder-server.log
