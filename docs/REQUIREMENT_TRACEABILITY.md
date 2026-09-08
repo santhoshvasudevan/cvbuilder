@@ -64,4 +64,5 @@
 | Token optimization | TOKEN-001..006 | llm_provider/reporting | M2/M8 | usage reports |
 | Selective main reuse | §20 | project-wide | M1 | reuse audit — see `docs/V2_REUSE_AUDIT.md` |
 | Quality benchmark methodology | V2-D028 | project-wide | M8 | `docs/QUALITY_BENCHMARK.md` |
+| Repository-native multi-agent continuity | §23, V2-D035 | project-wide | M0.2/ongoing | `AGENTS.md`, `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, `docs/MILESTONE_COMPLETION_CHECKLIST.md` present and followed |
 | Plain Django orchestration | §21 | project-wide | M1-M7 | architecture/code review |

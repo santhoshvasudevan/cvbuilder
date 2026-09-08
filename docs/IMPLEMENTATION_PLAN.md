@@ -10,7 +10,7 @@ Each milestone must be independently reviewable and committable. Do not begin a 
 ```text
 M0 — V2 architecture baseline
  |
-M0.2 — Architecture closure (reuse audit + design decisions) — COMPLETE
+M0.2 — Architecture closure (reuse audit + design decisions + multi-agent handover protocol) — COMPLETE
  |
 M1 — Foundation + reuse audit
  |
@@ -81,6 +81,7 @@ Do not bulk merge.
 - admin/auth infrastructure
 - static template foundation
 - environment handling
+- root `Makefile` and `.env.example`, establishing the canonical local commands (start DB, migrate, test, lint/check, run server) that `AGENTS.md`/`docs/ENGINEERING_RULES.md` point to but do not themselves define — neither exists yet on `cvbuild2` (V2-D035)
 - local test/lint/check commands
 
 ### Out of scope

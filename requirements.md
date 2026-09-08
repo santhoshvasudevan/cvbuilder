@@ -828,6 +828,8 @@ Credentials remain in `.env`/environment variables; DB rows store credential ref
 
 ## 17. LLM Run and Audit Model
 
+`StageRun` (shown below for context) is owned by the workflow layer (`job_applications`), not by `llm_provider` — see `docs/ARCHITECTURE.md` §5 and V2-D022 for the canonical definition. It is repeated here only because `LLMCallLog` (owned by `llm_provider`) references it.
+
 ```text
 StageRun
     job_application
@@ -954,3 +956,18 @@ Use plain Django/service orchestration for V2 initially. Do not introduce LangGr
 - No unbounded self-improvement loops.
 - No requirement to use LangGraph.
 - No requirement to calculate dollar cost.
+
+## 23. Repository-Native Multi-Agent Continuity
+
+The repository must support safe continuation by a different coding agent — Claude Code, Codex, or any future tool — without access to the previous agent's conversational context (V2-D035).
+
+This is achieved through:
+
+- canonical repository documentation (this document, `docs/DECISIONS.md`, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`);
+- Git history;
+- deterministic tests;
+- `docs/CURRENT_STATE.md`, kept concise and verified rather than trusted;
+- an explicit handover protocol (`docs/HANDOVER_PROTOCOL.md`) for both clean milestone handover and emergency/mid-task handover;
+- a reproducible environment/configuration.
+
+The tool-neutral entry point is `AGENTS.md`, backed by `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, and `docs/MILESTONE_COMPLETION_CHECKLIST.md`.

@@ -236,3 +236,19 @@ Exact stored enum naming may be refined during M4 implementation, but these thre
 `LLMModel.supported_reasoning_levels` (a set/list drawn from canonical values `NONE`, `LOW`, `MEDIUM`, `HIGH`, `XHIGH`) is the single source of truth for what a model supports. Provider adapters translate these canonical values into provider-specific request parameters. A model with no reasoning capability stores `{NONE}` (or an equivalent empty/`NONE`-only representation) — there is no independently-stored `supports_reasoning` boolean that could drift from the level list; `supports_reasoning` may exist only as a derived property/helper computed from `supported_reasoning_levels`.
 
 `StageModelAssignment.default_reasoning_level` must be valid for its selected model's `supported_reasoning_levels`. Per-call UI overrides are validated against the same set. This must be settled before M1/M2 schema work, since `StageModelAssignment` and the registry admin depend on it.
+
+---
+
+## V2-D035 — Repository-native multi-agent continuity
+**Status:** APPROVED
+
+The repository must support safe continuation by a different coding agent (Claude Code, Codex, or any future tool) without access to the previous agent's conversational context. This is achieved entirely through repository-native mechanisms, never through assumed session memory:
+
+- canonical repository documentation (`requirements.md`, this document, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`);
+- Git history (branch, commits, diffs);
+- deterministic tests;
+- `docs/CURRENT_STATE.md`, kept concise and operational, verified rather than trusted;
+- an explicit handover protocol (`docs/HANDOVER_PROTOCOL.md`) covering both clean milestone handover and emergency/mid-task handover;
+- a reproducible environment/configuration (Docker/Postgres, `.env.example`, and canonical local commands, once M1 establishes them).
+
+The tool-neutral entry point for this is `AGENTS.md`, backed by `docs/ENGINEERING_RULES.md` (the detailed engineering agreement), `docs/HANDOVER_PROTOCOL.md`, and `docs/MILESTONE_COMPLETION_CHECKLIST.md`. Tool-specific files (`CLAUDE.md`) point to these rather than duplicating them, so the rules stay in one place regardless of which agent reads them.

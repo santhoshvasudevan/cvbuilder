@@ -381,3 +381,9 @@ Confirmed reusable: Docker/Postgres, environment loading, generic Django setting
 Confirmed redesign: V1's AC chain (`AC_NORMALIZE` → `AC_RANK` → `AC_MATCH`, three calls inside `candidate_matching`) plus the separate single-call `AB_BUILD` inside `resume_builder` — historically referred to together as a "four-call chain," which in fact spans two apps, not one. Also: the hard-reject factual validators (`no_fabrication.py`, `completeness.py` — see §11's HARD_INTEGRITY/SOFT_REVIEW_WARNING split), and the fixed, unbounded-roster renderer.
 
 Never bulk-merge `main`.
+
+## 18. Multi-Agent Continuity
+
+**Closed (V2-D035).** The repository must support safe continuation by a different coding agent without access to a prior agent's conversational context. This is a repository-native property, not something any single agent's working memory can provide: it is achieved through the canonical docs listed throughout this document, Git history, deterministic tests, `docs/CURRENT_STATE.md` (verified rather than trusted), and an explicit handover protocol.
+
+The tool-neutral entry point is `AGENTS.md`, backed by `docs/ENGINEERING_RULES.md` (the detailed engineering agreement — precedence rules, this architecture's invariants restated as a checklist, Git/database/testing/documentation/secrets rules), `docs/HANDOVER_PROTOCOL.md` (clean and emergency handover), and `docs/MILESTONE_COMPLETION_CHECKLIST.md`. Tool-specific files (e.g. `CLAUDE.md`) point to these rather than duplicating them.

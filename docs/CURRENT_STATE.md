@@ -1,59 +1,60 @@
-# CVBuilder V2 Current State
+# Current State
 
-**Date:** 2026-09-08  
-**Branch:** `cvbuild2`  
-**Branch baseline:** `fd02af8`
+**Do not treat this file as self-certifying.** It records the last agent's understanding at the time it was written. Verify it against the repository — `git log`, `git status`, and actual tests — before relying on it. See `docs/HANDOVER_PROTOCOL.md`.
 
-## Summary
+## Repository State
 
-The project is undergoing a V2 architectural redesign.
+- Branch: `cvbuild2`
+- Last verified HEAD: `1b7c901` ("docs: finalize CVBuilder V2 architecture") — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
+- Last verified date: 2026-09-08
 
-The current V2 direction is intentionally different from the earlier implementation:
+## Current Milestone
 
-- positioning quality is the primary generation objective;
-- final factual approval belongs to the operator;
-- Candidate Context is broader than direct matching claims;
-- AJ gains a Recruiter Decision Model;
-- AC is simplified and made more holistic;
-- APS is introduced as a first-class Positioning Strategy artifact;
-- AB becomes multi-pass: plan → draft → critique → refinement;
-- final LLM-generated ResumeDraft is limited to titles, summary, three experience bullet sections, key achievements, and skills;
-- company/date/title/location metadata is static;
-- certifications/languages are static/deferred from generation;
-- provider/model/reasoning/token settings are operator-visible for every call;
-- OpenRouter joins OpenAI/NVIDIA/Gemini as an initial provider;
-- main-branch code has been selectively reused after a completed read-only audit (`docs/V2_REUSE_AUDIT.md`).
+- Milestone: none active. Architecture closure (M0 / M0.2) is complete; M1 (Foundation and Reuse Audit implementation) has not started.
+- Status: ready to begin M1.
 
-## Implementation status
+## Verified Working
 
-**Architecture closure is complete. M1 is authorized to begin next.** `main`'s reuse potential has been fully assessed and every architecture ambiguity/gap found during and after that assessment has been closed with explicit decisions (`docs/DECISIONS.md` V2-D021 through V2-D034). Do not infer that prior `main` implementation is present on `cvbuild2` — nothing has been merged or cherry-picked yet; only documentation has been updated. No candidate source/evidence documents, application code, or migrations have been touched during architecture closure.
+- The nine canonical planning documents (`requirements.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`, `docs/RESUME_OUTPUT_STRUCTURE.md`, `CLAUDE.md`) plus `docs/V2_REUSE_AUDIT.md` and `docs/QUALITY_BENCHMARK.md` are mutually consistent as of the last verification — checked by direct cross-reading, not assumed.
+- The four candidate source documents referenced by `bootstrap_candidate_memory` on `main` (`docs/AC/AC-MEMORY_PROFILE.md`, `AC-profile_english.md`, `AC-profile_german.md`, `docs/CANDIDATE_MEMORY_SNAPSHOT.md`) are present and intact on `cvbuild2`.
 
-Resolved in the M0.2 architecture-closure follow-up pass:
+## In Progress
 
-- `candidate_context` is a distinct Django app from `candidate_memory`; `candidate_memory` remains the sole source of candidate truth, `candidate_context` only builds a job-specific projection from it (V2-D030).
-- `ExperienceSlot` selection is explicitly operator-controlled (select engagement → create/activate slot → order → edit metadata if authorized → validate exactly three) — never automatic (V2-D031).
-- `ReviewFeedback` targets a `StageRun` (nullable, plus a `gate` field) instead of a separately-maintained `Target` enum (V2-D032).
-- AJ's `JobRequirement` captures three orthogonal dimensions — `requirement_priority`, `requirement_domain`, `origin` — instead of one flat category enum (V2-D033).
-- `LLMModel.supported_reasoning_levels` is the canonical source of a model's reasoning capability; `supports_reasoning` is derived only, never independently stored (V2-D034).
+- Nothing. No application code, Django project, or migrations exist yet on `cvbuild2`.
 
-Resolved in the initial M0.2 pass:
+## Known Issues / Risks
 
-- `JobApplication` redesigned as a small, stable aggregate; per-stage execution state moved to new `StageRun`/`JobApplicationStageState` models owned by `job_applications`, not a growing `current_*` FK list (V2-D022).
-- `llm_provider` boundary clarified: it owns `LLMProvider`/`LLMModel`/`StageModelAssignment`/`LLMCallLog`/adapters only; `LLMCallLog` references the initiating `StageRun` (V2-D022).
-- One canonical stage vocabulary defined, distinguishing LLM-capable stages from deterministic/workflow stages (V2-D022).
-- Pipeline phase and application outcome confirmed/corrected as two separate enums, never merged into one status list (V2-D021).
-- `FitExperienceLevel` (AC layer) formalized as distinct from `MemoryClaim`'s experience-level classification — no forced migration (V2-D023).
-- `ExperienceSlot` modeled as a sequenced related collection with a HARD_INTEGRITY cardinality check, not fixed columns (V2-D024).
-- M3 split into M3A (Candidate Knowledge + StaticResumeProfile — largely pre-built on `main`) and M3B (CandidateContextSnapshot — confirmed 100% new work), with M3B requiring its own quality acceptance gate before AC depends on it (V2-D025).
-- Factual checking split into `HARD_INTEGRITY` (blocking) and `SOFT_REVIEW_WARNING` (advisory) classes (V2-D026).
-- APS quality acceptance criteria required to pass before M6 (AB) implementation begins (V2-D027).
-- Benchmark methodology defined in `docs/QUALITY_BENCHMARK.md`, with the Amazon GenAI Solutions Architect application as the first representative benchmark (V2-D028).
-- Historical "old four-call AC chain" description corrected: V1 had three calls (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`) in `candidate_matching` plus a separate `AB_BUILD` call in `resume_builder` (V2-D029).
-- Four candidate source documents found accidentally deleted in the working tree (`docs/AC/AC-MEMORY_PROFILE.md`, `AC-profile_english.md`, `AC-profile_german.md`, `docs/CANDIDATE_MEMORY_SNAPSHOT.md`) were confirmed present and intact.
+- No Django project, `Makefile`, or `.env.example` exists yet on `cvbuild2` — establishing them is M1 scope (see `docs/IMPLEMENTATION_PLAN.md` M1, `docs/V2_REUSE_AUDIT.md` §3 item 1). Do not assume any local dev command exists until M1 creates it.
+- Two non-blocking implementation choices remain open, to be settled during their own milestones rather than now: whether `ExperienceSlot` metadata is copied at creation or resolved by reference to its source engagement record (M3A); exact stored enum naming for the AJ requirement taxonomy (M4).
+- The `CandidateContextSnapshot` (M3B) and APS (M5) components have zero precedent on `main` and are the highest-uncertainty items in the plan — see `docs/V2_REUSE_AUDIT.md` §4.
 
-Remaining non-blocking implementation choices (do not block M1; settle during their respective milestones): whether `ExperienceSlot` metadata is copied at creation or resolved by reference to its source engagement record (M3A); exact stored enum naming for the AJ requirement taxonomy (M4).
+## Verification
 
-The next correct action is:
+Commands used to verify the state above:
 
-1. begin M1 (Foundation and Reuse Audit implementation) per the closed design in `docs/ARCHITECTURE.md` §5 and `docs/IMPLEMENTATION_PLAN.md`;
-2. cherry-pick `main` files per `docs/V2_REUSE_AUDIT.md`'s recommended reuse order, file-by-file with tests, never by bulk merge.
+```
+git branch --show-current
+git log -5 --oneline --decorate
+git status --short
+```
+
+No automated test suite exists yet — no Django app has been created on `cvbuild2`. Once M1 exists, this section should record the actual test command(s) run and their results (pass/fail counts), not just "tests pass."
+
+## Last Completed Handover
+
+- Outgoing: Claude Code, this session — architecture closure (M0.2 initial pass + follow-up pass) and multi-agent handover protocol establishment (`AGENTS.md`, `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, `docs/MILESTONE_COMPLETION_CHECKLIST.md`, this file).
+- This is informational only — do not make correctness dependent on which tool wrote this. Verify the repository directly per `docs/HANDOVER_PROTOCOL.md` §B regardless of who the outgoing agent was.
+
+## Next Recommended Action
+
+1. Begin M1 (Foundation and Reuse Audit implementation) per `docs/IMPLEMENTATION_PLAN.md` and the closed `JobApplication`/`StageRun`/`JobApplicationStageState` design in `docs/ARCHITECTURE.md` §5.
+2. Cherry-pick `main` files per `docs/V2_REUSE_AUDIT.md`'s recommended reuse order, file-by-file with tests, never by bulk merge.
+3. Use `docs/MILESTONE_COMPLETION_CHECKLIST.md` before declaring M1 complete.
+
+## Working Tree Expectations
+
+Clean except for local, intentionally-untracked files that must never be committed: `.env`, `.venv/`, `.claude/`, `.DS_Store`. If `git status --short` shows anything else, investigate before proceeding — see `docs/HANDOVER_PROTOCOL.md` §B.
+
+## Full Decision and Reuse History
+
+This file intentionally does not restate project history. For the full list of closed architectural decisions, see `docs/DECISIONS.md` (as of this update: V2-D001 through V2-D035). For the full `main`-branch reuse classification, see `docs/V2_REUSE_AUDIT.md`.
