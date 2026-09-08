@@ -273,3 +273,23 @@ This is an implementation-sequencing note, not an architecture change: `docs/ARC
 The local Docker-managed PostgreSQL volume (`cvbuilder_postgres_data`) already contained a full V1 (`main`-branch) schema and a `django_migrations` row for `("job_applications", "0001_initial")` from V1's different `JobApplication` model, left over from unrelated prior work against the same container name. Because Django matches migrations by `(app_label, name)` string only, this stale row caused `manage.py migrate` to silently report "no migrations to apply" without ever creating V2's actual `StageRun`/`JobApplicationStageState` tables.
 
 This local, disposable, non-source-controlled database was reset (`docker compose down -v` then `up -d`) before M1's real migration was applied, and re-verified against the resulting fresh schema. This is not a "discard another agent's work" situation (`docs/HANDOVER_PROTOCOL.md` §B) — the data was V1 experimentation state with no relationship to `cvbuild2`'s git history, not uncommitted work belonging to this branch or task. Recorded here so a future agent does not mistake a similarly-contaminated local database for a genuine V2 migration failure.
+
+---
+
+## M1 Independent Re-Audit — Corrections and Branch Strategy
+
+## V2-D038 — M1 re-audit findings closed; `main` confirmed as the non-mergeable V1 legacy line; V2 continues on `cvbuild2`
+**Status:** APPROVED
+
+An independent re-audit of M1 (range `9d91d19..ea4bd48`) returned **PASSED WITH NON-BLOCKING FINDINGS**: (1) the documented `make secrets` command did not reproduce the "zero findings" claim in `docs/CURRENT_STATE.md`/`docs/MILESTONE_COMPLETION_CHECKLIST.md` — it reproducibly flagged two audited false positives (the labeled dev-only `SECRET_KEY` fallback literal in `config/settings.py`, and a test-only password literal in `job_applications/tests/test_admin.py`); (2) the production-mode fail-closed path (`DEBUG=False` with no `DJANGO_SECRET_KEY` configured anywhere → `RuntimeError`) had no automated test; (3) `StageRun`/`JobApplicationStageState`'s declared `on_delete` behavior (`CASCADE` from `JobApplication`, `SET_NULL` on `JobApplicationStageState`'s `StageRun` pointers) had no automated test exercising actual deletion.
+
+All three are closed in a corrective commit that is a direct child of `ea4bd48` (see `docs/CURRENT_STATE.md` for the verified HEAD): the two false positives are resolved with narrowly-scoped, transparent `# pragma: allowlist secret` inline annotations (no file, directory, or rule-category exclusion), a regression test (`DetectSecretsStillDetectsRealSecretsTests`) proves an unannotated realistic secret written to a throwaway fixture is still flagged by the exact `make secrets` command, and both missing behaviors now have dedicated tests (`ProductionSecretKeyEnforcementTests`, `DeletionBehaviorTests`). `make verify`/`make secrets`/`git diff --check` all pass cleanly against the corrected tree; no migration was generated; no M2/provider code was introduced.
+
+Separately, the same re-audit attempted to fast-forward-merge `cvbuild2` into the repository's `main` branch and found this impossible: `main` (currently at `d5bdcea`) diverged from `cvbuild2` at `fd02af8`, before the V2 architecture freeze, and has since accumulated its own, unrelated M1 ("feat: M1 Django/PostgreSQL application foundation"), M2 ("feat: M2 LLM provider abstraction..."), and later milestones — including a `JobApplication` model still carrying the `current_jra`/`current_fit_assessment`/`current_resume_draft` pattern V2-D022 rejected, and a `candidate_matching` app still using the `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` stage chain V2-D005/V2-D029 explicitly discarded. `main` is confirmed to be the V1 legacy line described by V2-D017 ("Do not merge `main`"), not a V2 integration branch waiting at `9d91d19`.
+
+This is recorded explicitly so no future agent assumes a `cvbuild2` → `main` fast-forward is available or intended:
+
+- V1 development's legacy line remains on `main`, currently at `d5bdcea`; it is not touched by V2 work.
+- V2 development continues on `cvbuild2`; this is the branch every future V2 milestone (starting with M2) must branch from/build on.
+- No V1 ↔ V2 merge is intended under this decision. `main` is a read-only reuse source only (`V2-D017`, `docs/V2_REUSE_AUDIT.md`), never a merge target, and `cvbuild2` is not merged into it.
+- Promoting `cvbuild2` (or its eventual successor) to the repository's default branch is a distinct, future, separately-authorized repository-transition decision — not implied or pre-approved by this entry.

@@ -1,4 +1,7 @@
+import json
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 from django.conf import settings
@@ -60,6 +63,55 @@ class SecretHandlingInvariantTests(SimpleTestCase):
                     "change-me" in value or "change me" in value.lower(),
                     f"suspicious non-placeholder value in .env.example: {line!r}",
                 )
+
+
+class DetectSecretsStillDetectsRealSecretsTests(SimpleTestCase):
+    """Proves the two narrowly-scoped `# pragma: allowlist secret` annotations in
+    config/settings.py and job_applications/tests/test_admin.py (both audited false
+    positives -- a labeled dev-only fallback key and a test-only password) did not broadly
+    weaken detect-secrets. A realistic, unannotated high-entropy secret in a fresh file must
+    still be flagged by the exact scan command `make secrets` runs.
+    """
+
+    def test_unallowlisted_high_entropy_secret_is_still_flagged(self):
+        # Written to the OS temp directory, never the repo tree, so this test cannot leave a
+        # stray file behind in the working tree even if it is interrupted mid-run.
+        # Not a real credential: a synthetic, realistic-shaped secret used only to prove
+        # detect-secrets still fires on unannotated matches when written to a throwaway file.
+        # The pragma below allowlists this *source* line only (same mechanism as the other two
+        # audited false positives) -- it is a Python comment, not part of the string value, so
+        # the temp fixture file written from `secret_line` below carries no pragma and the
+        # regression test still exercises a genuinely unannotated match.
+        secret_line = (
+            'AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"'  # pragma: allowlist secret
+        )
+        fixture_content = (
+            "# Not a real credential -- synthetic fixture for a detect-secrets regression test.\n"
+            f"{secret_line}\n"
+        )
+        # The same console-script entry point `make secrets` uses (python -m detect_secrets.main
+        # produces no output under this package's CLI wiring), resolved relative to the active
+        # interpreter so it works regardless of where the virtualenv is rooted.
+        detect_secrets_bin = Path(sys.executable).with_name("detect-secrets")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fixture_path = Path(tmp_dir) / "fixture_with_a_real_looking_secret.py"
+            fixture_path.write_text(fixture_content)
+
+            result = subprocess.run(
+                [str(detect_secrets_bin), "scan", fixture_path.name],
+                cwd=tmp_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertIn(
+                fixture_path.name,
+                report["results"],
+                "detect-secrets no longer flags an unannotated high-entropy secret -- "
+                "detection has been weakened",
+            )
 
 
 class MigrationReproducibilityTests(SimpleTestCase):

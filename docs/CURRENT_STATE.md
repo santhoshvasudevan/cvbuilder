@@ -4,8 +4,9 @@
 
 ## Repository State
 
-- Branch: `cvbuild2`
-- Last verified HEAD (parent of this commit): `9d91d19` ("docs: establish multi-agent engineering and handover protocol") — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
+- Branch: `cvbuild2` — this is the active V2 development branch. Every future V2 milestone (starting with M2) branches from/builds on the latest `cvbuild2` commit.
+- `main` is the **V1 legacy line** (currently `d5bdcea`), confirmed by an independent M1 re-audit to have diverged from `cvbuild2` at `fd02af8` with its own unrelated, incompatible M1/M2/later-milestone history. `main` is a read-only reuse source only (V2-D017) — it is never a merge target, and `cvbuild2` is never merged into it. Promoting `cvbuild2` to the repository's default branch is a distinct, future, separately-authorized decision (V2-D038).
+- Last verified HEAD (parent of this commit): the M1 re-audit correction commit ("test: close M1 re-audit findings"), a direct child of `ea4bd48` — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
 - Last verified date: 2026-09-08
 
 ## Current Milestone
@@ -18,7 +19,7 @@
 - Django project foundation (`config/`), one Django app (`job_applications`), PostgreSQL-only configuration, admin, structured logging, and a minimal home view/template all run for real — not just import-checked.
 - `JobApplication`, `StageRun`, `JobApplicationStageState` models exist, migrated (`job_applications/migrations/0001_initial.py`) against a real local PostgreSQL 16 instance, and match the closed M0.2 design (`docs/ARCHITECTURE.md` §5) except `StageRun`'s provider/model fields, deferred to M2 (V2-D036).
 - Canonical stage vocabulary (`StageIdentifier`) implemented exactly as `docs/ARCHITECTURE.md` §5 defines it; a test asserts no V1 stage identifiers (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`) exist anywhere in source.
-- 42/42 automated tests pass (`make test`). `manage.py check` clean. `ruff check .` clean. `makemigrations --check --dry-run` reports no drift. `detect-secrets scan` reports zero findings. `.env` confirmed untracked by Git (tested, not just gitignored).
+- 50/50 automated tests pass (`make test`; 42 from the original M1 commit plus 8 added by the re-audit correction — see "M1 Independent Re-Audit" below). `manage.py check` clean. `ruff check .` clean. `makemigrations --check --dry-run` reports no drift. The exact documented `detect-secrets scan` command reports zero findings, reproducibly — its two prior findings (a labeled dev-only `SECRET_KEY` fallback literal, a test-only password literal) are narrowly allowlisted inline (`# pragma: allowlist secret`), not excluded by file/directory/rule, and a regression test proves an unannotated realistic secret is still detected. `.env` confirmed untracked by Git (tested, not just gitignored).
 - Every documented `Makefile` target was individually run and confirmed working from the actual shell in this session: `install`, `check`, `test`, `lint`, `migrate`, `makemigrations`, `migrations-check`, `secrets`, `verify`, `up`, `down`, `db-wait`, `start` (including a live HTTP request against the running dev server — home `200`, admin `302` unauthenticated), `stop`, `status`. `superuser` and `run` are thin, direct wrappers around standard Django management commands and were not separately exercised beyond confirming they invoke real commands.
 - Infra files (`docker-compose.yml`, `.env.example`, `.gitignore`, `Makefile`, `pyproject.toml`, `requirements.txt`, `templates/base.html`, `manage.py`, `config/asgi.py`/`wsgi.py`) were cherry-picked file-by-file from `main` per `docs/V2_REUSE_AUDIT.md`'s REUSE_AS_IS classification, not bulk-merged. `config/settings.py`/`urls.py` were adapted (REUSE_WITH_ADAPTATION) to M1's actual single-app scope.
 
@@ -34,7 +35,7 @@
 
 ## Verification
 
-Commands actually run this session, in order, with results:
+Commands actually run in the M1 implementation session, in order, with results:
 
 ```
 make check                          -> System check identified no issues (0 silenced).
@@ -42,11 +43,34 @@ make migrations-check               -> No changes detected.
 make migrate                        -> applied cleanly to a fresh local PostgreSQL 16 database.
 make test                           -> Ran 42 tests in ~0.5s. OK.
 make lint                           -> All checks passed!
-make secrets                        -> detect-secrets scan: "results": {} (zero findings).
+make secrets                        -> detect-secrets scan: two findings (later found not
+                                        reproducibly "zero" as originally claimed -- see
+                                        "M1 Independent Re-Audit" below).
 git diff --check --cached           -> clean, no output.
 ```
 
 Plus a live-server smoke test (`make start`, `curl` against `/` and `/admin/`, `make stop`) — see "Verified Working" above for results.
+
+## M1 Independent Re-Audit
+
+An independent re-audit (range `9d91d19..ea4bd48`) verdict: **PASSED WITH NON-BLOCKING FINDINGS**. Three findings, all closed in one corrective commit (a direct child of `ea4bd48`; see V2-D038):
+
+```
+make check                          -> System check identified no issues (0 silenced).
+make migrations-check               -> No changes detected.
+make test                           -> Ran 50 tests in ~0.7s. OK.
+make lint                           -> All checks passed!
+make secrets                        -> detect-secrets scan: "results": {} (zero findings,
+                                        reproducible).
+make verify                         -> All verification checks passed.
+git diff --check                    -> clean, no output.
+```
+
+1. `make secrets` did not reproduce the "zero findings" claim above — two audited false positives were narrowly allowlisted inline (`# pragma: allowlist secret`), and `DetectSecretsStillDetectsRealSecretsTests` proves detection is not weakened.
+2. The production fail-closed `SECRET_KEY` path had no test — added (`ProductionSecretKeyEnforcementTests`).
+3. `StageRun`/`JobApplicationStageState` deletion behavior (`CASCADE`/`SET_NULL`) had no test — added (`DeletionBehaviorTests`, 6 tests).
+
+The same re-audit found that `cvbuild2` cannot be fast-forward-merged into `main` — see "Repository State" above and V2-D038 for the full ancestry finding. No merge was performed.
 
 ## Last Completed Handover
 

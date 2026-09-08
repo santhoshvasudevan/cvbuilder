@@ -27,7 +27,9 @@ class AdminSiteReachableTests(TestCase):
     def setUp(self):
         User = get_user_model()
         self.superuser = User.objects.create_superuser(
-            username="admin", email="admin@example.com", password="test-pass-12345"
+            username="admin",
+            email="admin@example.com",
+            password="test-pass-12345",  # pragma: allowlist secret
         )
 
     def test_admin_index_reachable_when_authenticated(self):

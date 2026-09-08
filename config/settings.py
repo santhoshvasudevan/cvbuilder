@@ -33,7 +33,7 @@ DEBUG = _env_bool("DJANGO_DEBUG", default=True)
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 if not SECRET_KEY:
     if DEBUG:
-        SECRET_KEY = "django-insecure-dev-only-key-do-not-use-in-production"
+        SECRET_KEY = "django-insecure-dev-only-key-do-not-use-in-production"  # pragma: allowlist secret
     else:
         raise RuntimeError(
             "DJANGO_SECRET_KEY must be set in the environment when DJANGO_DEBUG is not enabled."

@@ -173,3 +173,72 @@ class JobApplicationStageStateTests(TestCase):
         JobApplicationStageState.objects.create(
             job_application=other_job, stage=StageIdentifier.AJ_ANALYZE
         )
+
+
+class DeletionBehaviorTests(TestCase):
+    """docs/ARCHITECTURE.md Section 5's on_delete choices (CASCADE for job_application FKs,
+    SET_NULL for JobApplicationStageState's current/approved StageRun pointers) are Django-ORM
+    -level behavior, not database-level ON DELETE rules (Django's default for ForeignKey), so
+    they only take effect through the ORM's delete collector -- exercised here rather than
+    inferred from the migration alone.
+    """
+
+    def setUp(self):
+        self.job = JobApplication.objects.create(
+            employer="Acme Corp",
+            job_title="Solutions Architect",
+            source_type=JobApplication.SourceType.URL,
+            source_url="https://example.com/job/1",
+        )
+        self.other_job = JobApplication.objects.create(
+            employer="Other Corp",
+            job_title="Cloud Architect",
+            source_type=JobApplication.SourceType.URL,
+            source_url="https://example.com/job/2",
+        )
+        self.run = StageRun.objects.create(
+            job_application=self.job, stage=StageIdentifier.AJ_ANALYZE, input_snapshot={}
+        )
+        self.other_run = StageRun.objects.create(
+            job_application=self.other_job, stage=StageIdentifier.AJ_ANALYZE, input_snapshot={}
+        )
+        self.state = JobApplicationStageState.objects.create(
+            job_application=self.job,
+            stage=StageIdentifier.AJ_ANALYZE,
+            current_stage_run=self.run,
+            approved_stage_run=self.run,
+        )
+        self.other_state = JobApplicationStageState.objects.create(
+            job_application=self.other_job,
+            stage=StageIdentifier.AJ_ANALYZE,
+            current_stage_run=self.other_run,
+        )
+
+    def test_deleting_job_application_cascades_to_its_stage_runs(self):
+        self.job.delete()
+        self.assertFalse(StageRun.objects.filter(id=self.run.id).exists())
+
+    def test_deleting_job_application_cascades_to_its_stage_state(self):
+        self.job.delete()
+        self.assertFalse(JobApplicationStageState.objects.filter(id=self.state.id).exists())
+
+    def test_deleting_referenced_stage_run_sets_current_stage_run_null(self):
+        self.run.delete()
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.current_stage_run)
+
+    def test_deleting_referenced_stage_run_sets_approved_stage_run_null(self):
+        self.run.delete()
+        self.state.refresh_from_db()
+        self.assertIsNone(self.state.approved_stage_run)
+
+    def test_unrelated_records_remain_intact_after_job_application_deletion(self):
+        self.job.delete()
+        self.assertTrue(JobApplication.objects.filter(id=self.other_job.id).exists())
+        self.assertTrue(StageRun.objects.filter(id=self.other_run.id).exists())
+        self.assertTrue(JobApplicationStageState.objects.filter(id=self.other_state.id).exists())
+
+    def test_unrelated_records_remain_intact_after_stage_run_deletion(self):
+        self.run.delete()
+        self.other_state.refresh_from_db()
+        self.assertEqual(self.other_state.current_stage_run_id, self.other_run.id)

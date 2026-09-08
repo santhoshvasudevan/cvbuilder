@@ -81,7 +81,7 @@ Commit: <created (hash) / not created (why)>
 - [x] Focused tests pass — all 7 test modules in `job_applications/tests/` pass individually and together.
 - [x] Milestone acceptance tests pass — see `docs/IMPLEMENTATION_PLAN.md` M1 Acceptance section, marked MET with evidence.
 - [x] No unintended network calls — no provider/adapter code exists yet in M1; nothing in the test suite reaches the network.
-- [x] No secrets/local files added — `detect-secrets scan` clean; `.env` confirmed untracked by an automated test; `.gitignore` covers `.env`/`.venv/`/`.claude/`/`.DS_Store`/caches.
+- [x] No secrets/local files added — `detect-secrets scan` clean (two audited false positives narrowly allowlisted inline per V2-D038, not excluded by file/directory/rule; a regression test proves detection is not weakened); `.env` confirmed untracked by an automated test; `.gitignore` covers `.env`/`.venv/`/`.claude/`/`.DS_Store`/caches.
 - [x] `git diff` reviewed — `git diff --check --cached` clean; staged file list matches the intended M1 file set exactly (verified by explicit enumeration before commit).
 - [x] `docs/CURRENT_STATE.md` updated — reflects verified M1 completion with command-level evidence.
 - [x] `docs/REQUIREMENT_TRACEABILITY.md` updated — M1-scoped rows marked VERIFIED.
@@ -146,3 +146,13 @@ Working tree: clean except expected untracked local files (.env, .venv/, .claude
 Commit: created — explicit file staging, see commit message "feat: implement M1 Django
   foundation (job_applications app, PostgreSQL, Makefile)" or equivalent
 ```
+
+### M1 Independent Re-Audit — Corrections (V2-D038)
+
+An independent re-audit (`9d91d19..ea4bd48`) returned **PASSED WITH NON-BLOCKING FINDINGS**. All three were closed in one corrective commit, a direct child of `ea4bd48`:
+
+1. `make secrets` did not reproduce this document's "zero findings" claim above — two audited false positives (dev-only `SECRET_KEY` fallback, test-only password) are now narrowly allowlisted inline (`# pragma: allowlist secret`); a new regression test (`DetectSecretsStillDetectsRealSecretsTests`) proves an unannotated realistic secret is still detected by the exact `make secrets` command.
+2. Added `ProductionSecretKeyEnforcementTests` covering `DEBUG=False` + no `DJANGO_SECRET_KEY` anywhere (including `.env`) → `RuntimeError`.
+3. Added `DeletionBehaviorTests` (6 tests) covering `JobApplication` → `StageRun`/`JobApplicationStageState` cascade deletion and `StageRun` → `JobApplicationStageState.current_stage_run`/`approved_stage_run` `SET_NULL` behavior.
+
+Result: 50/50 tests pass, `make verify` passes, `make secrets` is clean and reproducible, no migration was generated, no M2/provider code was introduced. The same re-audit found `cvbuild2` cannot be fast-forward-merged into `main` (`main` is a divergent V1 legacy line, not a V2 integration branch — see V2-D038 for the full finding); no merge was performed or is implied by this correction.

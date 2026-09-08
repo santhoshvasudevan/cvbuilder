@@ -1,6 +1,11 @@
+import importlib
+import os
+import sys
+from unittest import mock
+
 from django.conf import settings
 from django.db import connection
-from django.test import Client, TestCase, override_settings
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 
 # V1 app names that must not appear until their own milestone (M2 llm_provider, M3A
 # candidate_memory, M3B candidate_context, M4 job_intake, M5 candidate_matching/
@@ -82,3 +87,31 @@ class SafeErrorDefaultsTests(TestCase):
         response = self.client.get("/")
         body = response.content.decode(errors="ignore")
         self.assertNotIn(settings.SECRET_KEY, body)
+
+
+class ProductionSecretKeyEnforcementTests(SimpleTestCase):
+    """config/settings.py must fail closed: DEBUG=False with no DJANGO_SECRET_KEY configured
+    anywhere must raise RuntimeError rather than silently falling back to the dev-only insecure
+    key. `dotenv.load_dotenv` is patched to a no-op so a real local `.env` file -- present in
+    every dev checkout, never committed, and normally supplying a real key -- cannot mask the
+    condition under test. The `config.settings` module is reloaded to re-run its module-level
+    SECRET_KEY logic, and unconditionally reloaded again with the real environment restored so
+    this test cannot leave the shared module in a broken state for tests that run after it.
+    """
+
+    def test_debug_false_without_secret_key_raises_runtime_error(self):
+        settings_module = sys.modules["config.settings"]
+        env_backup = os.environ.copy()
+        try:
+            os.environ["DJANGO_DEBUG"] = "false"
+            os.environ.pop("DJANGO_SECRET_KEY", None)
+            with mock.patch("dotenv.load_dotenv", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    importlib.reload(settings_module)
+        finally:
+            os.environ.clear()
+            os.environ.update(env_backup)
+            importlib.reload(settings_module)
+        self.assertTrue(
+            settings_module.SECRET_KEY, "settings module must be fully restored after reload"
+        )
