@@ -2998,3 +2998,143 @@ paid-call-confirmation UI work above, all of which are provider-agnostic and una
   re-run `configure_gpt54_defaults` after editing `gpt54_defaults.py`'s constants back -- a plain,
   reversible registry operation; no historical `LLMCallLog`/`FitAssessment`/`ResumeDraft` row is
   ever touched by this decision or its rollback.
+
+## D-041: GPT-5.4 32K AC_RANK/AC_MATCH/AB_BUILD capacity correction, and an operator-controlled, persistent, resumable M5/M6 staged review workflow replacing the single-shot pipeline
+
+- **Status**: **ACCEPTED** (2026-09-08), Product Owner architecture mandate -- the operator
+  supplied a complete, explicit specification (provider/model/reasoning/budget matrix; the exact
+  persistent-run/stage data model shape; the six required service capabilities; input/output
+  editing and invalidation rules; the three-page M5 UI and the M6 review page; concurrency,
+  privacy, and test requirements) as a direct implementation instruction, not a request for a
+  recommendation -- mirroring how D-039's operator-supplied defaults were treated as authorized
+  rather than proposed. Implemented on branch `m5-staged-workflow` (parent `4127bf6`, itself
+  D-040's merged commit on `main`); not merged or pushed by this decision -- see the session's own
+  audit-range report for the exact commit range to independently re-verify before merge. No live
+  provider call, Gate approval, or `JobApplication`/`FitAssessment`/`ResumeDraft` mutation occurred
+  while implementing or testing this decision; every test in the new suite uses `FakeAdapter` only.
+- **Context (capacity correction)**: the real operator-driven M5 UI click for `JobApplication` 9
+  (2026-09-08, following D-040's 16384 ceiling) hit AC_RANK's budget exactly
+  (`finish_reason=length`, `LLMCallLog` id 324) -- proof that a *shared* 16384 ceiling across
+  `gpt-5.4-mini`/`gpt-5.4` was insufficient for `gpt-5.4`'s real AC_RANK output, even though it
+  cleared every *historical* figure D-040 had available. No new `FitAssessment` was persisted by
+  that failed run (fail-fast, no partial persistence).
+- **Context (staged workflow)**: `services/fit_assessment.build_fit_assessment` (M5) and
+  `services/build.build_resume_draft` (M6) each made every one of their LLM calls in a single,
+  uninterruptible Python call stack with no operator checkpoint between AC_NORMALIZE, AC_RANK, and
+  AC_MATCH -- an operator could select a model/reasoning/budget for each of the three calls in
+  advance (2026-09-07, per-run model selection), but could not inspect one stage's actual output,
+  edit it, or decide whether to proceed before the next stage's (paid) call fired. A truncation or
+  fabrication discovered only after all three calls had already run wasted the two calls that
+  preceded it and gave the operator no chance to intervene mid-sequence.
+- **Decision, part A (capacity correction)**: split the registered output-token ceiling by model
+  -- `gpt-5.4-mini` (`GPT54_MINI_MAX_OUTPUT_TOKENS`) stays at **16384** (AC_NORMALIZE, its only
+  stage, was never observed near that ceiling); `gpt-5.4` (`GPT54_MAX_OUTPUT_TOKENS`) is raised to
+  **32768** for AC_RANK/AC_MATCH/AB_BUILD. AC_RANK/AC_MATCH also move from `HIGH` to `MEDIUM`
+  reasoning in the same correction (Product Owner decision, alongside the budget raise). 32768 is a
+  maximum ceiling, never an expected-consumption figure -- cost and actual use remain based on
+  `LLMCallLog.output_tokens`, never this registered maximum. `MEMORY_BUILD`/`AJ_ANALYZE`/
+  `AC_NORMALIZE` budgets and reasoning are unchanged. Implemented entirely in
+  `llm_provider/services/gpt54_defaults.py` (`STAGE_DEFAULT_MATRIX`, `_ensure_model`'s per-model
+  ceiling parameter) -- the same idempotent, `dry_run`-capable, `full_clean()`-validated
+  configuration function as D-039/D-040, re-run via the same `configure_gpt54_defaults` management
+  command with no interface change.
+- **Decision, part B (staged workflow)**: introduce `candidate_matching.AgentCandidateRun`/
+  `AgentCandidateStage`/`AgentCandidateStageRevision` (M5) and `resume_builder.AgentBuilderRun`
+  (M6) as the persistent, DB-backed record of an in-progress review -- never encoded only in
+  browser session/flash-message/process-memory state (CLAUDE.md's "human approval as a DB
+  precondition" invariant, extended here to *every* stage boundary, not just the two Gates).
+  `AgentCandidateRun` pins `JobApplication`/`JobRequirementAnalysis`/the ACTIVE `CandidateMemory`
+  at the moment a run starts, and owns the run-level `Status` (`IN_PROGRESS`/`COMPLETED`/
+  `CANCELLED`). Each `AgentCandidateStage` (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`, one row per run
+  via a `UniqueConstraint(run, stage)`) carries its own `Status` state machine (`DRAFT` -> `READY`
+  -> `RUNNING` -> `SUCCEEDED`/`FAILED` -> `EDITED` -> `APPROVED`, or `INVALIDATED` when an upstream
+  stage is re-edited after approval), an immutable `prepared_input` plus an optional
+  `edited_input` (the *effective* input is whichever is set), an immutable `provider_output` plus
+  an editable `operator_output` and a frozen `approved_output`, the exact provider/model/
+  reasoning/budget/timeout snapshot used, an `LLMCallLog` FK, sanitized failure fields, and a
+  `lock_version` optimistic-concurrency counter. A `CheckConstraint` enforces
+  `status=APPROVED -> validation_state=VALID` at the database level, not merely in the service
+  layer. `AgentCandidateStageRevision` is a small, append-only (never deleted, never edited) child
+  table recording every input/output edit, satisfying "historical revisions remain available"
+  without needing a separate row-per-attempt model for the stage itself. `AgentBuilderRun` mirrors
+  this shape for M6's single AB_BUILD call (no multi-stage sequencing needed there).
+- **Services** (`candidate_matching.services.staged_run`, `resume_builder.services.staged_build`):
+  `start_run`/`start_ab_run` (zero-call: pin identity, create stage row(s), prepare the first
+  input), `configure_stage`/`configure_ab_run` (zero-call preview of a per-run provider/model/
+  reasoning/budget choice, via the existing `resolve_stage_model`/`get_adapter_for_stage`
+  eligibility path -- never a new selection mechanism), `edit_stage_input`/`reset_stage_input`
+  (zero-call, run-local only, rejects any requirement_id/claim_id/engagement_id the deterministic
+  preparation didn't already produce), `execute_stage`/`execute_ab_run` (locks the stage
+  `RUNNING` inside one transaction that commits *before* the provider call -- mirroring every
+  other stage's "the call itself is never inside a transaction" convention -- then makes exactly
+  one `adapter.generate()` call and persists the result), `edit_stage_output`/`edit_ab_output`
+  (zero-call, schema- plus no-fabrication-validates the edit, records a new
+  `AgentCandidateStageRevision`, and -- if the stage was already `APPROVED` -- invalidates every
+  downstream stage via `_invalidate_downstream`, clearing their prepared/provider/approved fields
+  back to a state requiring an explicit re-prepare/re-run/re-approve, never silently reusing a
+  stale downstream artifact), `approve_stage`/`approve_ab_run_and_create_draft` (re-validates
+  fresh against the current `operator_output` rather than trusting a stored flag, freezes
+  `approved_output`, and -- for AC_NORMALIZE/AC_RANK only -- deterministically prepares the next
+  stage's input via the exact same `candidate_generation.py`/`dedup.py`/`bounded_retrieval.py`
+  capping helpers `build_bounded_context` already uses, imported directly rather than
+  reimplemented), and `finalize_run` (a separate, explicit action requiring AC_MATCH `APPROVED`:
+  atomically creates the `FitAssessment` + every `RequirementAssessment` row, exactly like
+  `build_fit_assessment` did, reusing the same `validators/disposition_coverage.py` no-fabrication/
+  coverage functions). `build_fit_assessment`/`build_resume_draft` (the original, all-calls-in-one
+  functions) are unchanged and retained for the existing fake-adapter test suite and any future
+  non-interactive use -- the normal operator UI no longer calls either.
+- **Baseline chronology (D-035/D-037) independence preserved**: the deterministic engagement-
+  anchor/language-evidence layer is computed at AC_RANK-approval time (`_prepare_match_input`),
+  from the pinned `CandidateMemory` and live `CareerEngagement` state -- never from AC_RANK's own
+  selected claim_ids -- so Continental/Maruti/German-language-evidence inclusion in the persisted
+  manifest never depends on what AC_RANK happened to select (tested directly:
+  `FinalizationIntegrityTests.test_continental_and_maruti_style_engagements_do_not_depend_on_ac_rank_selection`).
+- **UI**: three pages (`/reviews/m5/<app_id>/<run_id>/{normalize,rank,match}/`) each showing the
+  pinned-artifact summary, a three-stage progress indicator (reusing the existing `.stepper`/
+  `.step` CSS pattern from `job_applications/detail.html`, with new `is-failed`/`is-invalidated`
+  states), a JSON request editor with a reset-to-prepared option, model/reasoning/budget selectors
+  (reusing `grouped_model_choices`/the existing `ReasoningEffort` enum -- no new selection
+  mechanism), an explicit confirm-dialog "Run" button naming the live paid-call exposure, a result
+  area (read-only original provider output, an editable operator-output copy, a
+  `difflib.unified_diff`-based original-vs-edited diff, sanitized `LLMCallLog` fields), and an
+  approval control worded "Approve output and prepare next stage" (AC_NORMALIZE/AC_RANK) or
+  "Approve output and create Fit Assessment" (AC_MATCH, which also triggers `finalize_run` and
+  redirects to Gate 1). `/reviews/m6/<app_id>/<run_id>/` mirrors this for the single AB_BUILD call,
+  with "Approve output and create ResumeDraft". `gate1.html`/`gate2.html`'s single-shot "Run/
+  Re-run Agent Candidate"/"Run/Re-run Agent Builder" buttons are replaced by a "Start/Continue M5
+  run"/"Start/Continue M6 review" entry point -- the UI itself can no longer trigger
+  AC_NORMALIZE/AC_RANK/AC_MATCH (or AB_BUILD-then-ResumeDraft) consecutively without an explicit
+  operator click at every stage. The pre-existing Gate 1/Gate 2 "feedback" (reject-and-re-run)
+  forms are intentionally left calling the original all-in-one functions -- an existing, separately
+  audited, already-tested review mechanism outside this decision's explicit scope; re-run
+  `LLMCallLog` correlation makes any consecutive-call sequence from that path fully attributable.
+- **Privacy/security**: no credential, authorization header, raw provider response body, or
+  provider reasoning trace is ever persisted on a stage/run row -- only the already-schema-
+  validated structured output (`.model_dump()`), the same sanitized `LLMCallLog` fields every
+  other stage already records, and a `sanitize_error_message`-passed failure summary. Every
+  mutating view action is POST-only, CSRF-protected, and re-validates `lock_version` under
+  `select_for_update()` before transitioning a stage to `RUNNING`, so a double-click or a stale
+  browser tab's resubmission is rejected with an actionable error rather than firing a second
+  provider call. A `RUNNING` stage left stuck by a process interruption is recoverable only via an
+  explicit operator action (`reconcile_stale_running_stage`), never automatically on page load.
+- **Verification**: 47 new service-layer tests (`candidate_matching/tests/test_staged_run.py`,
+  `resume_builder/tests/test_staged_build.py`) plus 20 new UI/security tests
+  (`reviews/tests/test_m5_staged_views.py`, `reviews/tests/test_m6_review_views.py`) -- FakeAdapter
+  only, zero live provider calls. Full suite (`manage.py test`, no app restriction): all passing;
+  `manage.py check`/`makemigrations --check --dry-run`/`ruff check .` all clean. Real development
+  database invariants (`JobApplication` 9 phase/pointers, `LLMCallLog` count, both Gates, the sole
+  ACTIVE `CandidateMemory`) confirmed unchanged before and after implementation -- this decision
+  and its tests create zero rows in the real database; every fixture uses isolated test data.
+- **Known scope boundary, not yet done**: no live M5/M6 run has been performed under this new
+  workflow (explicitly out of scope for this task); the branch is not merged into `main`; visual
+  browser rendering at desktop/mobile widths was reviewed via the existing responsive CSS
+  conventions and structural HTTP/HTML inspection, not a literal browser screenshot. Both are
+  disclosed openly rather than silently assumed.
+- **Rollback**: capacity correction -- identical mechanism to D-040 (reduce the two `LLMModel.
+  max_output_tokens` values, or the four `StageModelAssignment.max_output_tokens`/
+  `default_reasoning_effort` values, via the registry admin, or edit `gpt54_defaults.py`'s
+  constants and re-run `configure_gpt54_defaults`). Staged workflow -- revert `gate1.html`/
+  `gate2.html` to their pre-D-041 single-shot buttons (restores the previous UI unconditionally);
+  `AgentCandidateRun`/`AgentCandidateStage`/`AgentBuilderRun` rows are additive, `on_delete=PROTECT`
+  on every load-bearing FK, and never referenced by any pre-existing code path, so leaving the new
+  tables in place after a UI-level rollback is inert.

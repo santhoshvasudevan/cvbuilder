@@ -24,7 +24,12 @@ class Gate1ViewTests(TestCase):
     def test_get_renders_with_no_fit_assessment_yet(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "No Agent Candidate assessment exists yet.")
+        self.assertContains(response, "No Agent Candidate assessment exists yet")
+        # 2026-09-08, D-041: the single-shot "Run Agent Candidate" trigger is replaced by the
+        # staged M5 workflow's own entry point -- the UI no longer offers a button that runs
+        # AC_NORMALIZE/AC_RANK/AC_MATCH consecutively without operator interaction.
+        self.assertContains(response, "Start M5 run")
+        self.assertNotContains(response, ">Run Agent Candidate<")
 
     def test_run_ac_action_produces_an_assessment_and_redirects(self):
         with scripted_agent_candidate(valid_assessment_response()):

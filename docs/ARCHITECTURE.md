@@ -1239,3 +1239,106 @@ touch `JobApplication` 9, `JobRequirementAnalysis` 10, `FitAssessment` 9, `Resum
 §9c's own "Remaining work" note left open as a possibility: a fresh, versioned M5 run (a new
 `FitAssessment`) is required before *any* M6 build — corrected or otherwise — can run for
 `JobApplication` 9.
+
+## 9e. Operator-controlled, persistent, resumable M5/M6 staged review workflow (D-041, 2026-09-08)
+
+**Problem**: `build_fit_assessment` (M5) and `build_resume_draft` (M6) each made every LLM call in
+one uninterruptible call stack — an operator could pre-select a model/reasoning/budget for each of
+M5's three calls, but could not inspect one stage's real output, edit it, or decide whether to
+continue before the next (paid) call fired. A defect discovered only after all three calls had run
+wasted the calls that preceded it.
+
+**Fix, in one sentence**: replace the single call stack with a persistent DB record of the review
+itself — an `AgentCandidateRun` owning three `AgentCandidateStage` rows for M5, an `AgentBuilderRun`
+for M6 — so every provider call requires its own fresh, explicit operator authorization, and every
+stage's input/output is inspectable, editable, and independently approvable before the next
+deterministic-or-LLM step ever runs.
+
+**State machine** (`AgentCandidateStage.Status` / `AgentBuilderRun.Status` — M6 has no `INVALIDATED`
+state, since it has no downstream stage to invalidate):
+
+```
+DRAFT (blocked: prior stage not yet approved)
+  │  (prior stage approved -> deterministic prepare, zero calls)
+  ▼
+READY (input prepared, awaiting an explicit "Run" click)
+  │  execute_stage(): select_for_update() locks the row RUNNING *inside* one transaction
+  │  that commits before the provider call — mirrors "the call itself is never inside
+  │  a transaction" (every other stage in this codebase)
+  ▼
+RUNNING
+  │
+  ├─ success ──────────► SUCCEEDED ──┐
+  │                                  │  edit_stage_output(): zero calls, schema +
+  └─ error ───► FAILED               │  no-fabrication re-validated, new
+       │ (explicit rerun only,       │  AgentCandidateStageRevision recorded
+       │  never automatic)           ▼
+       │                          EDITED ──┐
+       │                                   │  approve_stage(): re-validates fresh
+       ▼                                   │  against operator_output, freezes
+     (back to RUNNING on rerun)            │  approved_output, prepares the *next*
+                                            │  stage's input (zero calls) — or, for
+                                            ▼  AC_MATCH, prepares nothing further
+                                        APPROVED
+                                            │
+              (an already-APPROVED stage's output edited again)
+                                            ▼
+                    every downstream stage -> INVALIDATED
+                    (prepared/provider/operator/approved fields cleared;
+                     revision history never deleted; operator must
+                     explicitly re-prepare/re-run/re-approve each one)
+```
+
+`finalize_run` is a separate, explicit action reachable only once AC_MATCH is `APPROVED`: it
+atomically creates the `FitAssessment` and every `RequirementAssessment` row (identical validators
+to `build_fit_assessment` — `disposition_coverage.sanitize_items`/`ensure_full_coverage`), updates
+`JobApplication.current_fit_assessment`, and marks the run `COMPLETED`. It never approves Gate 1
+and never triggers M6. `approve_ab_run_and_create_draft` is the M6 equivalent, gated the same way.
+
+**Deterministic processing between stages** (never inside a provider request, always zero-call):
+after AC_NORMALIZE approval, `_prepare_rank_input` runs the exact BM25 candidate-pool construction
+`candidate_generation.py`/`dedup.py`/`bounded_retrieval.py`'s own capping helper
+(`_cap_ranking_pool`, imported directly, never reimplemented) already perform for the programmatic
+path. After AC_RANK approval, `_prepare_match_input` validates every ranked claim_id against the
+pinned candidate pool (never a live re-query), caps the final selection (`_cap_selected`, same
+provenance), and computes the D-035/D-037 deterministic baseline-chronology layer — independent of
+which claims AC_RANK itself selected, so an engagement's/language claim's inclusion in the
+persisted manifest never depends on AC_RANK's own choice (see D-041's own audit note for the
+Continental/Maruti-equivalent test proving this).
+
+**Editable input vs. immutable output, precisely**:
+- `prepared_input` (deterministic, immutable once set) and `edited_input` (operator's current
+  edit, or `None`) are both run-local snapshots — never a write path to `JobRequirement`/
+  `MemoryClaim`/`CareerEngagement`/`CandidateMemory`/`JobRequirementAnalysis`. An edit may only
+  narrow a deterministically-produced id set (drop a candidate/claim/engagement), never introduce
+  one that set didn't already contain — the schema-level fabrication guard for *input* editing.
+- `provider_output` is written exactly once, at a successful `execute_stage`/`execute_ab_run`, and
+  never overwritten again by any later action.
+- `operator_output` starts as a deep copy of `provider_output` (never the same object — a
+  corrected bug during implementation: sharing object identity let an in-memory edit of one
+  silently mutate the other before either was next saved). Every edit is validated against the
+  same canonical Pydantic schema and the same no-fabrication check the provider output itself
+  passed, and recorded as a new, append-only `AgentCandidateStageRevision`/`operator_output`
+  write — never destroying the previous value, which remains visible through the revision history.
+- `approved_output` is a frozen copy of `operator_output` at the exact moment of approval —
+  re-editing after approval does not mutate this field; it moves the stage back to `EDITED` and
+  invalidates every downstream stage instead.
+
+**Provider/model configuration at every call**: `configure_stage`/`execute_stage` (and their M6
+equivalents) resolve provider/model/reasoning through the exact same `resolve_stage_model`/
+`get_adapter_for_stage`/`eligible_models_for_stage` machinery every other stage in this codebase
+uses — no parallel selection mechanism. An operator-chosen output-token budget is validated against
+the resolved model's own registered capability before being applied to the adapter's
+`effective_max_output_tokens`; it is never persisted as a new `StageModelAssignment` default.
+
+**Absence of automatic fallback**: an execution failure (`FAILED`) is rerunnable only through an
+explicit operator action; `CONFIGURATION`/`SCHEMA_VALIDATION` failures are never auto-retried with
+identical settings, mirroring every other stage's existing fail-closed contract. A `RUNNING` stage
+left stuck by a process interruption is recoverable only via an explicit
+`reconcile_stale_running_stage`/equivalent action, never automatically on a page load or refresh.
+
+**UI**: three pages (`/reviews/m5/<app_id>/<run_id>/{normalize,rank,match}/`) plus one M6 review
+page (`/reviews/m6/<app_id>/<run_id>/`) — see D-041 in `docs/DECISIONS.md` for the full page-by-page
+content and the exact routes/actions. `gate1.html`/`gate2.html`'s single-shot "Run/Re-run" buttons
+are replaced by a "Start/Continue" entry point into this workflow; the pre-existing Gate 1/Gate 2
+"feedback" (reject-and-re-run) forms are intentionally out of this decision's scope (see D-041).

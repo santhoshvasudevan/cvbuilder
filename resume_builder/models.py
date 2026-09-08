@@ -15,7 +15,10 @@ back which line of the rendered resume) without re-parsing `rendered_markdown`.
 from __future__ import annotations
 
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
+
+from llm_provider.models import LLMCallLog
 
 
 class ResumeDraft(models.Model):
@@ -149,3 +152,99 @@ class ResumeElement(models.Model):
         raise ImmutableResumeDraftError(
             "ResumeElement rows are never deleted through the normal ORM instance API."
         )
+
+
+class AgentBuilderRun(models.Model):
+    """The operator-controlled, inspect/edit/approve wrapper around the single AB_BUILD provider
+    call (2026-09-08, D-041 M6 review flow) -- mirrors `candidate_matching.AgentCandidateStage`'s
+    shape, but for M6's one stage (there is no multi-stage sequencing to model). A successful
+    provider call never creates a `ResumeDraft` by itself: only an explicit
+    `approve_ab_run_and_create_draft` action does, and only after the operator's (possibly edited)
+    output re-validates cleanly."""
+
+    class Status(models.TextChoices):
+        READY = "READY", "Ready to run"
+        RUNNING = "RUNNING", "Running"
+        SUCCEEDED = "SUCCEEDED", "Succeeded"
+        FAILED = "FAILED", "Failed"
+        EDITED = "EDITED", "Edited (operator output differs from provider output)"
+        APPROVED = "APPROVED", "Approved (ResumeDraft created)"
+
+    class ValidationState(models.TextChoices):
+        UNVALIDATED = "UNVALIDATED", "Not yet validated"
+        VALID = "VALID", "Valid"
+        INVALID = "INVALID", "Invalid"
+
+    job_application = models.ForeignKey(
+        "job_applications.JobApplication", on_delete=models.CASCADE, related_name="agent_builder_runs"
+    )
+    version = models.PositiveIntegerField()
+    based_on_fit_assessment = models.ForeignKey(
+        "candidate_matching.FitAssessment", on_delete=models.PROTECT, related_name="agent_builder_runs"
+    )
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.READY)
+
+    prepared_input = models.JSONField(null=True, blank=True)
+    edited_input = models.JSONField(null=True, blank=True)
+    input_hash = models.CharField(max_length=64, blank=True)
+
+    selected_provider = models.ForeignKey(
+        "llm_provider.LLMProvider", on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    selected_model = models.ForeignKey(
+        "llm_provider.LLMModel", on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+    selection_source = models.CharField(max_length=10, blank=True, choices=LLMCallLog.SelectionSource.choices)
+    reasoning_effort = models.CharField(max_length=10, blank=True)
+    requested_output_budget = models.PositiveIntegerField(null=True, blank=True)
+    effective_output_budget = models.PositiveIntegerField(null=True, blank=True)
+    timeout_seconds = models.PositiveIntegerField(null=True, blank=True)
+
+    provider_output = models.JSONField(null=True, blank=True)
+    provider_output_hash = models.CharField(max_length=64, blank=True)
+    operator_output = models.JSONField(null=True, blank=True)
+    approved_output = models.JSONField(null=True, blank=True)
+    approved_output_hash = models.CharField(max_length=64, blank=True)
+
+    validation_state = models.CharField(
+        max_length=12, choices=ValidationState.choices, default=ValidationState.UNVALIDATED, blank=True
+    )
+    validation_errors = models.JSONField(default=list, blank=True)
+
+    llm_call_log = models.ForeignKey(
+        "llm_provider.LLMCallLog", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="agent_builder_runs",
+    )
+    failure_category = models.CharField(max_length=20, blank=True)
+    failure_summary = models.TextField(blank=True)
+
+    resulting_resume_draft = models.ForeignKey(
+        ResumeDraft, on_delete=models.PROTECT, null=True, blank=True, related_name="agent_builder_run"
+    )
+
+    executed_at = models.DateTimeField(null=True, blank=True)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    lock_version = models.PositiveIntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_application", "version"], name="unique_ab_run_version_per_application"
+            ),
+            models.CheckConstraint(
+                check=~Q(status="APPROVED") | Q(validation_state="VALID"),
+                name="approved_ab_run_requires_valid_output",
+            ),
+        ]
+        ordering = ["job_application_id", "version"]
+
+    def __str__(self) -> str:
+        return f"AgentBuilderRun(app={self.job_application_id}, v{self.version}, {self.status})"
+
+    @property
+    def effective_input(self):
+        return self.edited_input if self.edited_input is not None else self.prepared_input

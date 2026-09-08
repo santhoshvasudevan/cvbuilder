@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}M5 -- {{ stage_title }} -- {{ application }}{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+<a href="{% url 'job_applications:detail' pk=application.pk %}">Application {{ application.pk }}</a>
+<span class="sep">/</span>
+<a href="{% url 'reviews:gate1' application_id=application.pk %}">Gate 1</a>
+<span class="sep">/</span>
+M5 run v{{ run.version }} &mdash; {{ stage_title }}
+{% endblock %}
+{% block content %}
+
+<h2>M5 Staged Run v{{ run.version }} &mdash; {{ stage_title }}</h2>
+
+{% if error %}
+<p class="error" role="alert">{{ error }}</p>
+{% endif %}
+
+<section class="card" aria-label="Application and pinned-artifact summary">
+  <h3>Pinned context</h3>
+  <dl class="kv">
+    <dt>Application</dt>
+    <dd>{{ application }} (id {{ application.pk }})</dd>
+    <dt>JobRequirementAnalysis</dt>
+    <dd>v{{ run.based_on_jra.version }} (id {{ run.based_on_jra_id }})
+      {% if is_stale %}<span class="badge badge-warning">Application's current JRA has since changed -- this run is against an older version</span>{% endif %}
+    </dd>
+    <dt>CandidateMemory</dt>
+    <dd>v{{ run.based_on_candidate_memory.version }} (pinned at run start -- frozen for this run's lifetime)</dd>
+    <dt>M5 run</dt>
+    <dd>version {{ run.version }} &middot; <span class="badge badge-neutral">{{ run.get_status_display }}</span></dd>
+  </dl>
+</section>
+
+<section aria-label="Three-stage progress indicator">
+  <div class="stepper">
+    {% for s in all_stages %}
+    <div class="step
+      {% if s.status == 'APPROVED' %}is-done
+      {% elif s.status == 'FAILED' %}is-failed
+      {% elif s.status == 'INVALIDATED' %}is-invalidated
+      {% elif s.pk == stage.pk %}is-current
+      {% elif s.status == 'DRAFT' %}is-blocked
+      {% endif %}">
+      <div class="marker" aria-hidden="true">
+        {% if s.status == 'APPROVED' %}&check;{% elif s.status == 'FAILED' %}!{% elif s.status == 'INVALIDATED' %}&#8635;{% else %}{{ forloop.counter }}{% endif %}
+      </div>
+      <div>
+        <h3>{{ s.get_stage_display }}</h3>
+        <p>Status: <span class="badge
+          {% if s.status == 'APPROVED' %}badge-success{% elif s.status == 'FAILED' %}badge-danger{% elif s.status == 'INVALIDATED' %}badge-warning{% elif s.status == 'DRAFT' %}badge-neutral{% else %}badge-neutral{% endif %}">
+          {{ s.get_status_display }}</span>
+          {% if s.pk == stage.pk %} &mdash; <strong>you are here</strong>{% endif %}
+        </p>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card" aria-label="Request editor">
+  <h3>Request input</h3>
+  <p class="lede">The exact structured input this stage's provider call will use. Editing is
+  run-local to this run only -- it never changes the underlying JobRequirement/MemoryClaim/
+  CareerEngagement/CandidateMemory/JobRequirementAnalysis records.</p>
+
+  {% if stage.prepared_input == None %}
+  <p class="empty-state">Blocked -- the preceding stage has not yet been approved.</p>
+  {% else %}
+  {% if is_input_edited %}<p><span class="badge badge-warning">Edited (differs from the deterministically-prepared input)</span></p>{% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="edit_input">
+    <input type="hidden" name="lock_version" value="{{ stage.lock_version }}">
+    <label for="edited_input_json">Effective input (editable JSON)</label>
+    <textarea id="edited_input_json" name="edited_input_json" class="json-editor" {% if stage.status not in "READY,FAILED" %}readonly{% endif %}>{{ effective_input_json }}</textarea>
+    {% if stage.status == 'READY' or stage.status == 'FAILED' %}
+    <p>
+      <button type="submit" class="btn btn-secondary">Save edited input</button>
+      {% if is_input_edited %}
+      <button type="submit" class="btn btn-secondary" name="action" value="reset_input" formnovalidate>Reset to prepared input</button>
+      {% endif %}
+    </p>
+    {% endif %}
+  </form>
+  {% endif %}
+</section>
+
+<section class="card" aria-label="Model configuration and execution control">
+  <h3>Model configuration and execution</h3>
+  {% if stage.status == 'RUNNING' %}
+  <p class="empty-state">This stage is currently RUNNING. If it appears stuck (e.g. the process
+  was interrupted), an operator can explicitly reset it below -- never done automatically.</p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="reconcile">
+    <input type="hidden" name="lock_version" value="{{ stage.lock_version }}">
+    <button type="submit" class="btn btn-secondary">Reset stuck RUNNING stage to FAILED</button>
+  </form>
+  {% elif stage.status == 'READY' or stage.status == 'FAILED' %}
+  <form method="post" onsubmit="return confirm('This makes one live provider call for {{ stage.stage }}, which may use a paid provider depending on the model selected below. Continue?');">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="run">
+    <input type="hidden" name="lock_version" value="{{ stage.lock_version }}">
+    <div class="confirm-exposure">Running this stage makes one external, potentially paid, provider call.</div>
+    <div class="field-row">
+      <label for="model">Provider / model</label>
+      <select id="model" name="model">
+        <option value="">(use current default)</option>
+        {% for group_label, options in model_choices.groups %}
+        <optgroup label="{{ group_label }}">
+          {% for pk, label in options %}
+          <option value="{{ pk }}" {% if model_choices.current == pk %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-row">
+      <label for="reasoning">Reasoning effort</label>
+      <select id="reasoning" name="reasoning">
+        <option value="">(use current default)</option>
+        {% for value, label in reasoning_choices.choices %}
+        <option value="{{ value }}" {% if reasoning_choices.current == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-row">
+      <label for="output_budget">Output-token budget (blank = model/stage default; must stay within model capability)</label>
+      <input type="number" id="output_budget" name="output_budget" min="1" value="{{ stage.effective_output_budget|default:'' }}">
+    </div>
+    <dl class="kv">
+      <dt>Effective timeout</dt>
+      <dd>{{ stage.timeout_seconds|default:"(built-in default)" }} seconds</dd>
+      <dt>Selection source</dt>
+      <dd><span class="badge badge-neutral">{{ stage.get_selection_source_display|default:"DEFAULT" }}</span></dd>
+    </dl>
+    <button type="submit" class="btn">Run {{ stage.stage }}</button>
+  </form>
+  {% elif stage.status == 'DRAFT' %}
+  <p class="empty-state">Blocked -- the preceding stage has not yet been approved.</p>
+  {% else %}
+  <p>Already executed this attempt -- see the result below. Editing the input and clicking "Run
+  {{ stage.stage }}" again is only available after a FAILED attempt (explicit rerun).</p>
+  {% endif %}
+</section>
+
+{% if stage.status != 'DRAFT' and stage.status != 'READY' or stage.provider_output %}
+<section class="card" aria-label="Result">
+  <h3>Result</h3>
+  <dl class="kv">
+    <dt>Status</dt>
+    <dd><span class="badge {% if stage.status == 'FAILED' %}badge-danger{% elif stage.status == 'APPROVED' %}badge-success{% else %}badge-neutral{% endif %}">{{ stage.get_status_display }}</span></dd>
+    {% if stage.llm_call_log_id %}
+    <dt>LLMCallLog id</dt>
+    <dd>{{ stage.llm_call_log_id }}</dd>
+    {% endif %}
+    <dt>Requested / resolved model</dt>
+    <dd>{{ stage.selected_model|default:"?" }} <span class="badge badge-neutral">{{ stage.get_selection_source_display|default:"DEFAULT" }}</span></dd>
+    {% if stage.llm_call_log %}
+    <dt>Tokens</dt>
+    <dd>input {{ stage.llm_call_log.input_tokens|default:"?" }} &middot; output {{ stage.llm_call_log.output_tokens|default:"?" }} &middot; total {{ stage.llm_call_log.total_tokens|default:"?" }}</dd>
+    <dt>Latency</dt>
+    <dd>{{ stage.llm_call_log.latency_ms|default:"?" }} ms &middot; retries {{ stage.llm_call_log.retry_count }}</dd>
+    <dt>Finish reason</dt>
+    <dd>{{ stage.llm_call_log.finish_reason|default:"?" }}</dd>
+    {% if stage.llm_call_log.rate_limit_diagnostics %}
+    <dt>Rate-limit diagnostics</dt>
+    <dd>{{ stage.llm_call_log.rate_limit_diagnostics }}</dd>
+    {% endif %}
+    {% endif %}
+  </dl>
+
+  {% if stage.status == 'FAILED' %}
+  <p><span class="badge badge-danger">{{ stage.failure_category }}</span> {{ stage.failure_summary }}</p>
+  {% endif %}
+
+  {% if stage.provider_output %}
+  <h4>Original provider output (read-only, immutable)</h4>
+  <textarea class="json-editor" readonly>{{ provider_output_json }}</textarea>
+
+  <h4>Operator output (editable copy)</h4>
+  {% if stage.validation_state == 'INVALID' %}
+  <p role="alert"><span class="badge badge-danger">Validation failed</span></p>
+  <ul>
+    {% for e in stage.validation_errors %}<li class="error">{{ e }}</li>{% endfor %}
+  </ul>
+  {% elif stage.validation_state == 'VALID' %}
+  <p><span class="badge badge-success">Valid</span></p>
+  {% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="edit_output">
+    <input type="hidden" name="lock_version" value="{{ stage.lock_version }}">
+    <label for="edited_output_json">Operator output (editable JSON)</label>
+    <textarea id="edited_output_json" name="edited_output_json" class="json-editor" {% if stage.status == 'APPROVED' %}readonly{% endif %}>{{ operator_output_json }}</textarea>
+    {% if stage.status != 'APPROVED' %}
+    <p><button type="submit" class="btn btn-secondary">Save edited output and validate</button></p>
+    {% endif %}
+  </form>
+
+  {% if diff_text %}
+  <h4>Diff: original provider output vs. operator output</h4>
+  <div class="diff-block">{% for line in diff_text.splitlines %}{% if line|first == '+' %}<span class="diff-add">{{ line }}</span>
+{% elif line|first == '-' %}<span class="diff-del">{{ line }}</span>
+{% else %}{{ line }}
+{% endif %}{% endfor %}</div>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="approve">
+    <input type="hidden" name="lock_version" value="{{ stage.lock_version }}">
+    <button type="submit" class="btn" {% if stage.validation_state != 'VALID' or stage.status == 'APPROVED' %}disabled aria-disabled="true"{% endif %}>
+      {% if is_match %}Approve output and create Fit Assessment{% else %}Approve output and prepare next stage{% endif %}
+    </button>
+  </form>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if stage.status == 'APPROVED' and next_stage_url_name %}
+<p><a class="btn" href="{% url next_stage_url_name application_id=application.pk run_id=run.pk %}">Continue to next stage</a></p>
+{% endif %}
+
+<p><a href="{% url 'reviews:gate1' application_id=application.pk %}">&larr; Back to Gate 1</a></p>
+
+{% endblock %}

@@ -458,6 +458,46 @@ of 1339); `manage.py check`/`makemigrations --check --dry-run` (confirmed no sch
 generated -- a pure data/configuration correction)/`ruff check .` all clean. No provider call was
 made for this correction.
 
+**GPT-5.4 32K capacity correction and operator-controlled M5/M6 staged review workflow (2026-09-08,
+D-041, branch `m5-staged-workflow`)**: the capacity correction (split `gpt-5.4-mini`/`gpt-5.4`
+ceilings, `AC_RANK`/`AC_MATCH` reasoning lowered to medium) reuses the exact same test shape as
+D-040 (`llm_provider/tests/test_gpt54_budget_correction.py`, rewritten for the new per-model
+ceiling) -- deterministic only, `requests` never imported or patched. The staged-workflow
+architecture adds 67 new deterministic tests across two layers, all `FakeAdapter`-only, zero live
+provider calls:
+- **Service layer** (`candidate_matching/tests/test_staged_run.py`, 39 tests;
+  `resume_builder/tests/test_staged_build.py`, 8 tests): the full happy path (start -> execute ->
+  approve for each of AC_NORMALIZE/AC_RANK/AC_MATCH, then `finalize_run`) proving exactly one
+  `LLMCallLog` row per executed stage and zero on every other action; input-edit run-locality and
+  canonical-record non-mutation; fabricated/cross-pool claim-id rejection on both input and output
+  edits; provider-output immutability (including a real bug found and fixed during this work --
+  `execute_stage` originally stored `operator_output` as the *same object* as `provider_output`,
+  so an in-place mutation of one silently corrupted the other in memory before either was next
+  saved/reloaded; fixed with an explicit `copy.deepcopy`, and a dedicated test now asserts the two
+  diverge correctly after an edit); downstream invalidation on a post-approval edit, with revision
+  history proven to survive it; the D-035/D-037 baseline-chronology independence-from-AC_RANK-
+  selection property (a Continental-organisation-style engagement's anchor claim, and a German-
+  language-style claim, both confirmed present in the persisted manifest even when AC_RANK's own
+  ranking response selects nothing); atomic, single-`FitAssessment`/`ResumeDraft` finalization,
+  including a forced mid-transaction failure proving no partial row survives; and optimistic-
+  concurrency (`lock_version`) rejection of a stale/duplicate action.
+- **UI/security layer** (`reviews/tests/test_m5_staged_views.py`, 13 tests;
+  `reviews/tests/test_m6_review_views.py`, 7 tests): CSRF actually enforced (via
+  `Client(enforce_csrf_checks=True)`, not merely a template tag's presence); GET/save-input/save-
+  output/approve actions proven to never invoke the adapter, only the "run" action does; a
+  duplicate submission (same, now-stale `lock_version`) rejected with a re-rendered error page, not
+  a second call; a page refresh after a successful run proven not to repeat it; failure diagnostics
+  proven not to leak a raw header/credential string; the historical `FitAssessment`/its rendered
+  Gate 1 heading proven absent from a fresh, in-progress M5 run's own page; and full finalize-and-
+  redirect-to-Gate-1 / approve-and-redirect-to-Gate-2 integration tests. Two pre-existing gate1/
+  gate2 view tests were updated for the new empty-state copy (the single-shot "Run/Re-run" buttons
+  are removed from both templates; the assertion now checks for their *absence* alongside the new
+  "Start M5 run"/"Start M6 review" entry point). Full suite after this work: all tests passing (no
+  regression in any of the 1,431 pre-existing tests); `manage.py check`/`makemigrations --check
+  --dry-run`/`ruff check .` all clean. No live M5/M6 run was performed, and no
+  `JobApplication`/`FitAssessment`/`ResumeDraft`/`CandidateMemory`/Gate row was touched, at any
+  point while writing or running this test suite.
+
 **What Phase 1 does NOT attempt to test automatically**: the *quality* of any LLM-generated
 content (e.g. "is this a good resume," "did AJ correctly identify implied seniority signals").
 That is a manual review activity at each milestone's acceptance walkthrough, not a unit test —

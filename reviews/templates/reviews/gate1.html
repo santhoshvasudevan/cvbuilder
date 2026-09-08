@@ -49,14 +49,10 @@ requirement normalization (AC_NORMALIZE), relevance ranking (AC_RANK), and fit a
   {% include "llm_provider/_stage_card.html" with card=stage_cards.AC_MATCH %}
 </div>
 
+{% include "reviews/_m5_entry_point.html" %}
+
 {% if not fit_assessment %}
-<p class="empty-state">No Agent Candidate assessment exists yet.</p>
-<form method="post" onsubmit="return confirm('This runs Agent Candidate now -- up to three live LLM calls (normalization, ranking, fit assessment), which may use a paid provider depending on the model selected below. Continue?');">
-  {% csrf_token %}
-  <input type="hidden" name="action" value="run_ac">
-  {% include "reviews/_ac_model_selectors.html" %}
-  <button type="submit" class="btn">Run Agent Candidate</button>
-</form>
+<p class="empty-state">No Agent Candidate assessment exists yet -- start an M5 run above.</p>
 {% else %}
 
 {% if is_stale %}
@@ -117,13 +113,6 @@ Candidate below.</p>
 {% else %}
 <p>Not available.</p>
 {% endif %}
-
-<form method="post" onsubmit="return confirm('This re-runs Agent Candidate now -- up to three live LLM calls, which may use a paid provider depending on the model selected below. This creates a new assessment version; the current one is preserved for audit. Continue?');">
-  {% csrf_token %}
-  <input type="hidden" name="action" value="run_ac">
-  {% include "reviews/_ac_model_selectors.html" %}
-  <button type="submit" class="btn btn-secondary">Re-run Agent Candidate</button>
-</form>
 
 <form method="post">
   {% csrf_token %}

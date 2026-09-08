@@ -1,6 +1,29 @@
 # Current State
 
-Last updated: 2026-09-07 (D-040, **ACCEPTED**, Product Owner output-token budget correction: a
+Last updated: 2026-09-08 (D-041, **ACCEPTED**, implemented on branch `m5-staged-workflow` --
+**not yet merged into `main`**: a real operator-driven M5 click for `JobApplication` 9 hit D-040's
+16384-token ceiling exactly at AC_RANK (`finish_reason=length`, `LLMCallLog` id 324), so this
+decision (a) splits the registered output-token ceiling by model -- `gpt-5.4-mini` stays at 16384
+(its only stage, AC_NORMALIZE), `gpt-5.4` is raised to 32768 for AC_RANK/AC_MATCH/AB_BUILD, with
+AC_RANK/AC_MATCH also moving from `high` to `medium` reasoning -- and (b) replaces the single-shot
+`build_fit_assessment`/`build_resume_draft` UI trigger with a persistent, resumable,
+operator-controlled staged workflow: three individually-authorized M5 pages
+(`/reviews/m5/<app_id>/<run_id>/{normalize,rank,match}/`, backed by new
+`AgentCandidateRun`/`AgentCandidateStage`/`AgentCandidateStageRevision` models) and one M6 review
+page (`/reviews/m6/<app_id>/<run_id>/`, backed by a new `AgentBuilderRun` model). Every provider
+call now requires its own explicit "Run" click; input is inspectable/editable (run-local only,
+never touching canonical records) before each call; output is immutable-original-plus-editable-
+operator-copy-plus-diff before an explicit approval; editing an already-approved stage invalidates
+every downstream stage rather than silently reusing stale results; `FitAssessment`/`ResumeDraft`
+creation is a separate, explicit finalization action. `gate1.html`/`gate2.html`'s old "Run/Re-run"
+buttons are removed in favor of a "Start/Continue" entry point into this workflow. 67 new tests
+(service + UI/security layers), FakeAdapter only; full suite passing; `manage.py check`/
+`makemigrations --check --dry-run`/`ruff check .` clean. No live M5/M6 run performed under this new
+workflow in this task (explicitly out of scope); `JobApplication` 9/`FitAssessment` 9/`ResumeDraft`
+4/`CandidateMemory` 7 untouched. See "Operator-controlled M5/M6 staged review workflow (2026-09-08,
+D-041)" below and `docs/DECISIONS.md`'s D-041 entry for full detail, including the exact audit
+range for an independent re-audit before merge.
+Previously, also 2026-09-07 (D-040, **ACCEPTED**, Product Owner output-token budget correction: a
 preflight audit ahead of the first operator-driven M5 UI run for `JobApplication` 9 found the
 D-039 registry's 8192-token output ceiling already exceeded by real historical `LLMCallLog`
 measurements for `AC_RANK` (~12230) and `AB_BUILD` (~8204), with inadequate headroom for
@@ -145,6 +168,54 @@ matches; 9 static-type mappings `REJECTED`; 944 global claims intentionally unma
 per-job workflow, freshness enforcement across the whole chain, and the dashboard) remains **not
 implemented** -- confirmed: no `job_applications` dashboard list/detail view exists, and no
 cross-app integration beyond the pointer-based freshness checks M5/M6 already enforce individually.
+
+## Operator-controlled M5/M6 staged review workflow (2026-09-08, D-041) -- IMPLEMENTED, deterministically tested; branch NOT YET MERGED into main
+
+Full detail: `docs/DECISIONS.md`'s D-041 entry, and `docs/ARCHITECTURE.md` §9e (state diagram).
+Summary:
+
+- **Branch/parent**: `m5-staged-workflow`, parent `4127bf6` (D-040's merged commit, itself `main`'s
+  HEAD at the time this branch was created). Not merged or pushed by this work.
+- **Capacity correction**: `gpt-5.4-mini`'s registered output-token capability stays at 16384
+  (`GPT54_MINI_MAX_OUTPUT_TOKENS`); `gpt-5.4`'s is raised to 32768 (`GPT54_MAX_OUTPUT_TOKENS`) for
+  AC_RANK/AC_MATCH/AB_BUILD, triggered by a real operator-driven M5 click for `JobApplication` 9
+  hitting D-040's shared 16384 ceiling exactly at AC_RANK (`finish_reason=length`, `LLMCallLog` id
+  324). AC_RANK/AC_MATCH also move from `high` to `medium` reasoning in the same correction.
+  MEMORY_BUILD (4096)/AJ_ANALYZE (8192)/AC_NORMALIZE (16384) are unchanged. Implemented via the
+  same idempotent `manage.py configure_gpt54_defaults` mechanism, no interface change.
+- **New persistent models**: `candidate_matching.AgentCandidateRun`/`AgentCandidateStage`/
+  `AgentCandidateStageRevision` (M5, migration `candidate_matching.0004_...`) and
+  `resume_builder.AgentBuilderRun` (M6, migration `resume_builder.0002_agentbuilderrun`).
+- **New services**: `candidate_matching.services.staged_run` (`start_run`/`configure_stage`/
+  `edit_stage_input`/`reset_stage_input`/`execute_stage`/`edit_stage_output`/`approve_stage`/
+  `finalize_run`/`cancel_run`/`reconcile_stale_running_stage`) and
+  `resume_builder.services.staged_build` (the M6 equivalents). `build_fit_assessment`/
+  `build_resume_draft` (the original all-calls-in-one functions) are unchanged and retained for
+  the existing fake-adapter test suite and any future non-interactive use -- the normal operator UI
+  no longer calls either.
+- **New routes/UI**: `/reviews/m5/<app_id>/start/` (POST-only), `/reviews/m5/<app_id>/<run_id>/
+  {normalize,rank,match}/` (GET+POST), `/reviews/m5/<app_id>/<run_id>/cancel/` (POST-only),
+  `/reviews/m6/<app_id>/start/` (POST-only), `/reviews/m6/<app_id>/<run_id>/` (GET+POST). New
+  templates: `reviews/m5_stage.html`, `reviews/m6_review.html`,
+  `reviews/_m5_entry_point.html`, `reviews/_m6_entry_point.html`. `gate1.html`/`gate2.html`'s old
+  single-shot "Run/Re-run Agent Candidate"/"Run/Re-run Agent Builder" buttons are removed; the
+  pre-existing Gate 1/Gate 2 "feedback" (reject-and-re-run) forms are intentionally unchanged
+  (existing, separately-tested mechanism, outside this decision's scope).
+- **Tests**: 67 new tests total -- `candidate_matching/tests/test_staged_run.py` (39),
+  `resume_builder/tests/test_staged_build.py` (8), `reviews/tests/test_m5_staged_views.py` (13),
+  `reviews/tests/test_m6_review_views.py` (7). Plus two existing gate1/gate2 view tests updated for
+  the new empty-state copy. FakeAdapter only in every new test. Full suite (`manage.py test`, no
+  app restriction): all passing. `manage.py check`/`makemigrations --check --dry-run`/
+  `ruff check .` all clean.
+- **Real database invariants confirmed unchanged**: `JobApplication` 9 (phase, `current_jra_id`,
+  `current_fit_assessment_id`, `current_resume_draft_id`), `LLMCallLog` count, `FitAssessment` 9,
+  `ResumeDraft` 4, `CandidateMemory` 7 (sole ACTIVE), both Gates -- this task creates zero rows in
+  the real development database; every test uses isolated test data, and no live M5/M6 run,
+  Gate approval, or provider call was made while implementing or testing it.
+- **Not done in this task** (explicitly out of scope): no live M5/M6 run under the new workflow;
+  branch not merged; visual browser rendering at desktop/mobile widths was reviewed via the
+  existing responsive CSS conventions and structural HTTP/HTML inspection, not a literal
+  screenshot -- both disclosed in D-041 rather than assumed complete.
 
 ## Product Owner output-token budget correction (2026-09-07, D-040) -- IMPLEMENTED, deterministically tested, APPLIED to the real development database
 
@@ -1949,8 +2020,12 @@ console -- see "Paid GPT-5.4 model defaults..." above) is **ACCEPTED AND IMPLEME
 the real local development database. D-040 (Product Owner output-token budget correction -- 16384
 registered capability, AC_NORMALIZE/AC_RANK/AC_MATCH/AB_BUILD raised to 16384, see "Product Owner
 output-token budget correction..." above) is **ACCEPTED AND IMPLEMENTED**, applied to the real
-local development database. Live qualification under the current defaults remains deliberately
-deferred to the operator-driven M5/M6 run.
+local development database. D-041 (gpt-5.4 raised to a 32768 ceiling for AC_RANK/AC_MATCH/AB_BUILD
+after a real AC_RANK truncation at 16384, plus the operator-controlled, persistent, resumable M5/M6
+staged review workflow replacing the single-shot pipeline -- see "Operator-controlled M5/M6 staged
+review workflow..." above) is **ACCEPTED AND IMPLEMENTED on branch `m5-staged-workflow`, NOT YET
+MERGED into `main`**. Live qualification under the current defaults, and any live run of the new
+staged workflow, both remain deliberately deferred to a future operator-driven session.
 
 ## Deterministic static-profile boundary (D-019, 2026-09-03)
 

@@ -4,6 +4,7 @@ from django.contrib import messages
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
+from candidate_matching.models import AgentCandidateRun
 from candidate_matching.services.fit_assessment import AgentCandidateError
 from candidate_matching.services.fit_assessment import (
     ConcurrentModificationError as FitAssessmentConcurrentModificationError,
@@ -28,6 +29,7 @@ from llm_provider.services.model_selection import (
     parse_requested_model_id,
     parse_requested_reasoning_effort,
 )
+from resume_builder.models import AgentBuilderRun
 from resume_builder.services.build import (
     ConcurrentModificationError as ResumeDraftConcurrentModificationError,
 )
@@ -215,6 +217,15 @@ def gate1_view(request, application_id: int):
     )
     retrieval_manifest = fit_assessment.retrieval_manifest if fit_assessment is not None else None
 
+    active_m5_run = (
+        AgentCandidateRun.objects.filter(
+            job_application=application, status=AgentCandidateRun.Status.IN_PROGRESS
+        )
+        .order_by("-version")
+        .first()
+    )
+    active_m5_run_next_url = _m5_next_stage_url(active_m5_run) if active_m5_run else None
+
     return render(
         request,
         "reviews/gate1.html",
@@ -233,8 +244,21 @@ def gate1_view(request, application_id: int):
             "reasoning_stages": _stage_reasoning_choices(GATE1_MODEL_STAGES),
             "submitted_reasoning": submitted_reasoning,
             "stage_cards": _stage_cards(application, GATE1_MODEL_STAGES),
+            "active_m5_run": active_m5_run,
+            "active_m5_run_next_url": active_m5_run_next_url,
         },
     )
+
+
+def _m5_next_stage_url(run: AgentCandidateRun) -> str:
+    """The URL of `run`'s first not-yet-approved stage -- what "Continue M5 run" links to."""
+    from django.urls import reverse
+
+    slug_by_stage = {"AC_NORMALIZE": "m5_normalize", "AC_RANK": "m5_rank", "AC_MATCH": "m5_match"}
+    stage = run.stages.exclude(status="APPROVED").order_by("stage_order").first() or run.stages.order_by(
+        "stage_order"
+    ).first()
+    return reverse(f"reviews:{slug_by_stage[stage.stage]}", args=[run.job_application_id, run.pk])
 
 
 @require_http_methods(["GET", "POST"])
@@ -332,6 +356,12 @@ def gate2_view(request, application_id: int):
     feedback_history = ReviewFeedback.objects.filter(
         job_application=application, gate=ReviewFeedback.Gate.GATE_2
     )
+    active_ab_run = (
+        AgentBuilderRun.objects.filter(job_application=application)
+        .exclude(status=AgentBuilderRun.Status.APPROVED)
+        .order_by("-version")
+        .first()
+    )
 
     return render(
         request,
@@ -349,5 +379,6 @@ def gate2_view(request, application_id: int):
             "reasoning_stages": _stage_reasoning_choices(GATE2_MODEL_STAGES),
             "submitted_reasoning_ab": submitted_reasoning_ab,
             "stage_cards": _stage_cards(application, GATE2_MODEL_STAGES),
+            "active_ab_run": active_ab_run,
         },
     )

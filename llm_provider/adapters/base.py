@@ -122,12 +122,12 @@ class BaseLLMAdapter(ABC):
             else:
                 result.content = validated
 
-        self._write_call_log(request, result)
+        result.call_log_id = self._write_call_log(request, result)
         return result
 
-    def _write_call_log(self, request: NormalizedLLMRequest, result: NormalizedLLMResult) -> None:
+    def _write_call_log(self, request: NormalizedLLMRequest, result: NormalizedLLMResult) -> int:
         usage = result.usage or TokenUsage()
-        LLMCallLog.objects.create(
+        call_log = LLMCallLog.objects.create(
             provider=self.llm_model.provider,
             model=self.llm_model,
             stage=request.stage,
@@ -146,3 +146,4 @@ class BaseLLMAdapter(ABC):
             error_message=result.error.message if result.error else "",
             rate_limit_diagnostics=result.error.rate_limit_diagnostics if result.error else None,
         )
+        return call_log.pk

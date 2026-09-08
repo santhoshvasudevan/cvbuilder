@@ -19,7 +19,12 @@ class Gate2ViewTests(TestCase):
     def test_get_renders_with_no_draft_yet(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "No Agent Builder draft exists yet.")
+        self.assertContains(response, "No Agent Builder draft exists yet")
+        # 2026-09-08, D-041: the single-shot "Run Agent Builder" trigger is replaced by the M6
+        # review workflow's own entry point -- a successful provider call no longer automatically
+        # creates a ResumeDraft from this page.
+        self.assertContains(response, "Start M6 review")
+        self.assertNotContains(response, ">Run Agent Builder<")
 
     def test_run_ab_action_produces_a_draft_and_redirects(self):
         with scripted_generation(valid_generation_response(self.engagement_id, self.claim_id)):

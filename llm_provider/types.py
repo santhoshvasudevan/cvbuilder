@@ -64,6 +64,12 @@ class NormalizedLLMResult:
     # response shape doesn't report them.
     resolved_model: str | None = None
     finish_reason: str | None = None
+    # The primary key of the LLMCallLog row `BaseLLMAdapter._write_call_log` wrote for this call
+    # (2026-09-08, M5 staged workflow) -- set unconditionally by `generate()` for both success and
+    # error results, since a call log row is always written either way. Lets a caller (e.g.
+    # `candidate_matching.services.staged_run.execute_stage`) link its own persisted record to the
+    # exact audit row without a separate, racy lookup query.
+    call_log_id: int | None = None
 
     @property
     def is_error(self) -> bool:

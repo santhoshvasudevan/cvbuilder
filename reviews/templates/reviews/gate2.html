@@ -29,14 +29,10 @@ resolve this at Gate 1 first.</p>
   {% include "llm_provider/_stage_card.html" with card=stage_cards.AB_BUILD %}
 </div>
 
+{% include "reviews/_m6_entry_point.html" %}
+
 {% if not draft %}
-<p class="empty-state">No Agent Builder draft exists yet.</p>
-<form method="post" onsubmit="return confirm('This runs Agent Builder now -- a live LLM call, which may use a paid provider depending on the model selected below. Continue?');">
-  {% csrf_token %}
-  <input type="hidden" name="action" value="run_ab">
-  {% include "reviews/_ab_model_selector.html" %}
-  <button type="submit" class="btn">Run Agent Builder</button>
-</form>
+<p class="empty-state">No Agent Builder draft exists yet -- start an M6 review above.</p>
 {% else %}
 
 {% if is_stale %}
@@ -79,13 +75,6 @@ the cited claim is not specifically mapped to the engagement this bullet is file
   </tbody>
 </table>
 </div>
-
-<form method="post" onsubmit="return confirm('This re-runs Agent Builder now -- a live LLM call, which may use a paid provider. This creates a new draft version; the current one is preserved for audit. Continue?');">
-  {% csrf_token %}
-  <input type="hidden" name="action" value="run_ab">
-  {% include "reviews/_ab_model_selector.html" %}
-  <button type="submit" class="btn btn-secondary">Re-run Agent Builder</button>
-</form>
 
 <form method="post">
   {% csrf_token %}

@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}M6 Review -- {{ application }}{% endblock %}
+{% block breadcrumbs %}
+<a href="{% url 'job_applications:dashboard' %}">Dashboard</a>
+<span class="sep">/</span>
+<a href="{% url 'job_applications:detail' pk=application.pk %}">Application {{ application.pk }}</a>
+<span class="sep">/</span>
+<a href="{% url 'reviews:gate2' application_id=application.pk %}">Gate 2</a>
+<span class="sep">/</span>
+M6 review v{{ run.version }}
+{% endblock %}
+{% block content %}
+
+<h2>M6 Review &mdash; Application Build (AB_BUILD) v{{ run.version }}</h2>
+
+{% if error %}
+<p class="error" role="alert">{{ error }}</p>
+{% endif %}
+
+<section class="card">
+  <dl class="kv">
+    <dt>Application</dt><dd>{{ application }} (id {{ application.pk }})</dd>
+    <dt>Based on FitAssessment</dt><dd>v{{ run.based_on_fit_assessment.version }}</dd>
+    <dt>Status</dt><dd><span class="badge badge-neutral">{{ run.get_status_display }}</span></dd>
+  </dl>
+</section>
+
+<section class="card" aria-label="Request editor">
+  <h3>Request input</h3>
+  <p class="lede">The exact structured input AB_BUILD will use. Editing is run-local only -- it
+  never changes the underlying FitAssessment/MemoryClaim/CareerEngagement records.</p>
+  {% if is_input_edited %}<p><span class="badge badge-warning">Edited</span></p>{% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="edit_input">
+    <input type="hidden" name="lock_version" value="{{ run.lock_version }}">
+    <textarea name="edited_input_json" class="json-editor" {% if run.status != 'READY' and run.status != 'FAILED' %}readonly{% endif %}>{{ effective_input_json }}</textarea>
+    {% if run.status == 'READY' or run.status == 'FAILED' %}
+    <p>
+      <button type="submit" class="btn btn-secondary">Save edited input</button>
+      {% if is_input_edited %}<button type="submit" class="btn btn-secondary" name="action" value="reset_input" formnovalidate>Reset to prepared input</button>{% endif %}
+    </p>
+    {% endif %}
+  </form>
+</section>
+
+<section class="card" aria-label="Model configuration and execution">
+  <h3>Model configuration and execution</h3>
+  {% if run.status == 'READY' or run.status == 'FAILED' %}
+  <form method="post" onsubmit="return confirm('This makes one live provider call for AB_BUILD, which may use a paid provider depending on the model selected below. Continue?');">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="run">
+    <input type="hidden" name="lock_version" value="{{ run.lock_version }}">
+    <div class="confirm-exposure">Running this makes one external, potentially paid, provider call.</div>
+    <div class="field-row">
+      <label for="model">Provider / model</label>
+      <select id="model" name="model">
+        <option value="">(use current default)</option>
+        {% for group_label, options in model_groups %}
+        <optgroup label="{{ group_label }}">
+          {% for pk, label in options %}<option value="{{ pk }}" {% if run.selected_model_id == pk %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field-row">
+      <label for="reasoning">Reasoning effort</label>
+      <select id="reasoning" name="reasoning">
+        <option value="">(use current default)</option>
+        {% for value, label in reasoning_choices %}<option value="{{ value }}" {% if run.reasoning_effort == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field-row">
+      <label for="output_budget">Output-token budget (blank = default; must stay within model capability)</label>
+      <input type="number" id="output_budget" name="output_budget" min="1" value="{{ run.effective_output_budget|default:'' }}">
+    </div>
+    <dl class="kv">
+      <dt>Effective timeout</dt><dd>{{ run.timeout_seconds|default:"(built-in default)" }} seconds</dd>
+      <dt>Selection source</dt><dd><span class="badge badge-neutral">{{ run.get_selection_source_display|default:"DEFAULT" }}</span></dd>
+    </dl>
+    <button type="submit" class="btn">Run AB_BUILD</button>
+  </form>
+  {% else %}
+  <p>Already executed this attempt -- see the result below.</p>
+  {% endif %}
+</section>
+
+{% if run.provider_output %}
+<section class="card" aria-label="Result">
+  <h3>Result</h3>
+  <dl class="kv">
+    <dt>Status</dt><dd><span class="badge {% if run.status == 'FAILED' %}badge-danger{% elif run.status == 'APPROVED' %}badge-success{% else %}badge-neutral{% endif %}">{{ run.get_status_display }}</span></dd>
+    {% if run.llm_call_log_id %}<dt>LLMCallLog id</dt><dd>{{ run.llm_call_log_id }}</dd>{% endif %}
+    <dt>Model</dt><dd>{{ run.selected_model|default:"?" }}</dd>
+    {% if run.llm_call_log %}
+    <dt>Tokens</dt><dd>input {{ run.llm_call_log.input_tokens|default:"?" }} &middot; output {{ run.llm_call_log.output_tokens|default:"?" }} &middot; total {{ run.llm_call_log.total_tokens|default:"?" }}</dd>
+    <dt>Finish reason</dt><dd>{{ run.llm_call_log.finish_reason|default:"?" }}</dd>
+    {% endif %}
+  </dl>
+
+  <h4>Original provider output (read-only, immutable)</h4>
+  <textarea class="json-editor" readonly>{{ provider_output_json }}</textarea>
+
+  <h4>Operator output (editable copy)</h4>
+  {% if run.validation_state == 'INVALID' %}
+  <p><span class="badge badge-danger">Validation failed</span></p>
+  <ul>{% for e in run.validation_errors %}<li class="error">{{ e }}</li>{% endfor %}</ul>
+  {% elif run.validation_state == 'VALID' %}
+  <p><span class="badge badge-success">Valid</span></p>
+  {% endif %}
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="edit_output">
+    <input type="hidden" name="lock_version" value="{{ run.lock_version }}">
+    <textarea name="edited_output_json" class="json-editor" {% if run.status == 'APPROVED' %}readonly{% endif %}>{{ operator_output_json }}</textarea>
+    {% if run.status != 'APPROVED' %}<p><button type="submit" class="btn btn-secondary">Save edited output and validate</button></p>{% endif %}
+  </form>
+
+  {% if diff_text %}
+  <h4>Diff: original provider output vs. operator output</h4>
+  <div class="diff-block">{% for line in diff_text.splitlines %}{% if line|first == '+' %}<span class="diff-add">{{ line }}</span>
+{% elif line|first == '-' %}<span class="diff-del">{{ line }}</span>
+{% else %}{{ line }}
+{% endif %}{% endfor %}</div>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="approve">
+    <input type="hidden" name="lock_version" value="{{ run.lock_version }}">
+    <button type="submit" class="btn" {% if run.validation_state != 'VALID' or run.status == 'APPROVED' %}disabled aria-disabled="true"{% endif %}>Approve output and create ResumeDraft</button>
+  </form>
+</section>
+{% endif %}
+
+<p><a href="{% url 'reviews:gate2' application_id=application.pk %}">&larr; Back to Gate 2</a></p>
+{% endblock %}

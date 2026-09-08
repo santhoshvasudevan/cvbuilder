@@ -1,0 +1,27 @@
+{% comment %}
+Operator-controlled, persistent, resumable M5 staged workflow entry point (2026-09-08, D-041):
+the single place gate1.html offers to start or continue an AgentCandidateRun. Never a form that
+triggers AC_NORMALIZE/AC_RANK/AC_MATCH consecutively -- each of the three stage pages requires its
+own explicit "Run" click. Context: `active_m5_run` (an AgentCandidateRun or None) and
+`active_m5_run_next_url` (the URL of its first not-yet-approved stage), both set by gate1_view.
+{% endcomment %}
+<section class="card" aria-label="M5 staged run">
+  <h3>Agent Candidate (M5) -- staged workflow</h3>
+  {% if active_m5_run %}
+  <p>An M5 run (version {{ active_m5_run.version }}) is in progress.</p>
+  <p>
+    <a class="btn" href="{{ active_m5_run_next_url }}">Continue M5 run v{{ active_m5_run.version }}</a>
+    <form method="post" action="{% url 'reviews:m5_cancel' application_id=application.pk run_id=active_m5_run.pk %}" style="display:inline;" onsubmit="return confirm('Cancel this in-progress M5 run? Its stage history is preserved for audit, but it cannot be resumed.');">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-secondary">Cancel this run</button>
+    </form>
+  </p>
+  {% else %}
+  <p class="lede">Each provider call (AC_NORMALIZE, AC_RANK, AC_MATCH) runs on its own page and
+  requires its own explicit authorization -- nothing runs automatically.</p>
+  <form method="post" action="{% url 'reviews:m5_start' application_id=application.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="btn">{% if fit_assessment %}Start a new M5 run{% else %}Start M5 run{% endif %}</button>
+  </form>
+  {% endif %}
+</section>

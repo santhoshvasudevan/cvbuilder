@@ -396,6 +396,21 @@ day)" subsection in `docs/DECISIONS.md` and the corresponding update in `docs/CU
 
 ## M5 — Agent Candidate, matching, and Human Review Gate 1
 
+**Status update (2026-09-08, D-041, branch `m5-staged-workflow`, NOT YET MERGED)**: Gate 1's
+single-shot "Run/Re-run Agent Candidate" action (all three AC_NORMALIZE/AC_RANK/AC_MATCH calls in
+one uninterruptible pass) is replaced by a persistent, resumable, operator-controlled staged
+workflow -- three individually-authorized pages
+(`/reviews/m5/<app_id>/<run_id>/{normalize,rank,match}/`), each requiring its own explicit "Run"
+click, with inspectable/editable input and output before an explicit per-stage approval, and a
+separate explicit finalization action creating the `FitAssessment`. New models
+(`AgentCandidateRun`/`AgentCandidateStage`/`AgentCandidateStageRevision`) and services
+(`candidate_matching.services.staged_run`); `build_fit_assessment` (the original all-in-one
+function) is retained for the existing fake-adapter test suite/future non-interactive use. See
+`docs/DECISIONS.md` D-041 and `docs/ARCHITECTURE.md` §9e (state diagram) for full detail. No
+change to M5's underlying retrieval/assessment/validator logic -- the staged services reuse the
+exact same `normalize.py`/`rank.py`/`assess.py`/`candidate_generation.py`/`baseline_chronology.py`
+functions, never a parallel implementation.
+
 **Status update (2026-09-07, D-039)**: Gate 1's operator-facing execution/inspection UI (model +
 reasoning-effort selectors, per-stage attempt-history cards, required-comments-on-rejection,
 paid-call confirmation) reached the completeness this milestone's HITL-004/005/006 requirements
@@ -459,6 +474,17 @@ underlying retrieval/assessment/validator logic.
   something a unit test can fully guarantee.
 
 ## M6 — Agent Builder and Human Review Gate 2
+
+**Status update (2026-09-08, D-041, branch `m5-staged-workflow`, NOT YET MERGED)**: Gate 2's
+single-shot "Run/Re-run Agent Builder" action is replaced by an operator-controlled review page
+(`/reviews/m6/<app_id>/<run_id>/`) -- inspect/edit the AB_BUILD input before running, run exactly
+once per explicit click, then inspect/edit/diff/validate its structured output before an explicit
+"Approve output and create ResumeDraft" action; a successful provider call no longer creates a
+`ResumeDraft` by itself. New model (`AgentBuilderRun`) and service module
+(`resume_builder.services.staged_build`); `build_resume_draft` (the original all-in-one function)
+is retained for the existing fake-adapter test suite/future non-interactive use. See
+`docs/DECISIONS.md` D-041 for full detail. No change to M6's underlying generation/validator/
+rendering logic.
 
 **Status update (2026-09-07, D-039)**: Gate 2 received the same operator-facing execution/
 inspection completeness as Gate 1 (model + reasoning-effort selector, AB_BUILD stage-attempt card,

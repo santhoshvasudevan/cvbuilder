@@ -1,0 +1,21 @@
+{% comment %}
+Operator-controlled M6 (AB_BUILD) inspect/edit/approve entry point (2026-09-08, D-041). A
+successful provider call never creates a ResumeDraft by itself -- only explicit approval on the
+review page does. Context: `active_ab_run` (an AgentBuilderRun not yet APPROVED, or None), set by
+gate2_view.
+{% endcomment %}
+<section class="card" aria-label="M6 review">
+  <h3>Agent Builder (M6) -- review workflow</h3>
+  {% if active_ab_run %}
+  <p>An AB_BUILD review (version {{ active_ab_run.version }}) is in progress.</p>
+  <p><a class="btn" href="{% url 'reviews:m6_review' application_id=application.pk run_id=active_ab_run.pk %}">Continue M6 review v{{ active_ab_run.version }}</a></p>
+  {% else %}
+  <p class="lede">Inspect and, if needed, edit AB_BUILD's structured input before running, then
+  explicitly approve its (possibly-edited) structured output before a ResumeDraft is created --
+  nothing is created merely because the provider responded successfully.</p>
+  <form method="post" action="{% url 'reviews:m6_start' application_id=application.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="btn">{% if draft %}Start a new M6 review{% else %}Start M6 review{% endif %}</button>
+  </form>
+  {% endif %}
+</section>
