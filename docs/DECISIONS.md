@@ -1,375 +1,238 @@
-# Architectural Decisions
+# CVBuilder V2 Architectural Decisions
 
-Status vocabulary used below:
+**Status vocabulary:** PROPOSED / APPROVED / SUPERSEDED  
+**Date:** 2026-09-08
 
-- **PROPOSED** — a recommendation made during analysis; not yet approved by the product owner.
-- **APPROVED** — explicitly approved by the product owner (Santhosh). Approval dates are recorded.
-- **SUPERSEDED** — a previously APPROVED decision later replaced; the old entry is kept (not
-  deleted) with a pointer to what replaced it.
+These V2 decisions replace conflicting V1 planning assumptions once approved by the product owner.
 
-**2026-09-02 — product-owner review of the M0 baseline.** D-001 through D-013 were reviewed;
-several were approved with modification, and one new decision (D-014) was added and approved.
-Where a decision was approved with modification, this file keeps the original recommendation for
-context and adds the approved decision underneath it — the original text is not deleted, so the
-reasoning trail stays legible.
+## V2-D001 — Positioning-first objective
+**Status:** PROPOSED
 
-None of these decisions modify `requirements.md` except where `requirements.md` itself was
-explicitly amended by the product owner (see its Amendment Log) — in those cases this file and
-`requirements.md` describe the same approved decision from two angles (rationale here,
-requirement text there).
+Optimize generation for recruiter positioning, synthesis, differentiation, narrative coherence, and persuasive relevance. Evidence/provenance informs generation but must not over-constrain it.
+
+## V2-D002 — Operator owns final factual approval
+**Status:** PROPOSED
+
+The operator is the factual authority at Human Gate 2. Potentially weak or inferred wording is warned/reviewed rather than automatically rejected. Static facts remain deterministic.
+
+## V2-D003 — Keep MemoryClaims, broaden candidate context
+**Status:** PROPOSED
+
+Retain MemoryClaims where useful, but introduce `CandidateContextSnapshot` with five buckets: direct match, differentiators, career narrative, foundations, gaps/constraints.
+
+## V2-D004 — Minimum sufficient context
+**Status:** PROPOSED
+
+Retrieval targets minimum sufficient context, not the minimum count of matching claims.
+
+## V2-D005 — Simplify AC
+**Status:** PROPOSED
+
+Do not preserve V1's AC chain (`AC_NORMALIZE → AC_RANK → AC_MATCH`, three calls inside `candidate_matching`) by default, and do not fold `AB_BUILD` (a separate single call inside `resume_builder`) into AC. Use deterministic selection + one `AC_ASSESS` call. Add an extra context call only if measured need appears. (Historical phrasing corrected by V2-D029 — see below.)
+
+## V2-D006 — RecruiterDecisionModel
+**Status:** PROPOSED
+
+AJ produces both structured requirements and a recruiter/hiring-manager decision model.
+
+## V2-D007 — APS first-class artifact
+**Status:** PROPOSED
+
+Add Agent Positioning Strategy between AC and AB. APS is a durable, editable, versioned artifact.
+
+## V2-D008 — Multi-pass AB
+**Status:** PROPOSED
+
+AB uses plan, structured draft, deterministic warnings, recruiter critique, and one controlled refinement. Optional evaluator remains advisory.
+
+## V2-D009 — Exactly three generated experience sections
+**Status:** PROPOSED
+
+Current candidate has exactly three primary experience slots. Company name, role title, location, and dates are static operator-maintained content. LLM generates only tailored bullets.
+
+## V2-D010 — Limited initial ResumeDraft schema
+**Status:** PROPOSED
+
+Generated initial V2 sections:
+- three title options + recommended title
+- professional summary
+- three experience-section bullet collections
+- key achievements
+- skills
+
+`selected_projects`, certifications, and languages are deferred from LLM generation.
+
+## V2-D011 — StaticResumeProfile
+**Status:** PROPOSED
+
+Create static content for experience metadata and later certifications/languages. Static values always override accidental model-generated duplicates.
+
+## V2-D012 — Human-controlled LLM calls
+**Status:** PROPOSED
+
+Every major LLM call is individually inspectable/runnable with input, provider, model, reasoning level, output-token budget, output, token usage, edit/rerun/approve.
+
+## V2-D013 — Provider registry includes OpenRouter
+**Status:** PROPOSED
+
+Initial provider set: OpenAI Direct, NVIDIA NIM, Gemini, OpenRouter. Provider base URLs and credential references are registry-driven.
+
+## V2-D014 — Stage-level model economics
+**Status:** PROPOSED
+
+Tune provider/model/reasoning/token defaults by measured stage quality and token consumption. Quality per token is the objective.
+
+## V2-D015 — PostgreSQL workflow truth
+**Status:** PROPOSED
+
+Durable pipeline/artifact/approval state remains in PostgreSQL. No paused orchestration graph is authoritative.
+
+## V2-D016 — No LangGraph by default
+**Status:** PROPOSED
+
+Plain Django/service orchestration remains initial V2 choice. Future framework adoption requires a concrete measured need.
+
+## V2-D017 — Selective reuse from `main`
+**Status:** PROPOSED
+
+Do not merge `main`. Perform a read-only reuse audit and selectively cherry-pick/copy stable architecture-neutral components.
+
+## V2-D018 — Advisory factual warnings
+**Status:** PROPOSED
+
+Deterministic checks may flag static metadata conflicts, suspicious metrics, duplicate claims, weak evidence, chronology concerns, and unsupported technologies. They are operator warnings except where deterministic static metadata integrity is at risk.
+
+## V2-D019 — Bounded self-evaluation
+**Status:** PROPOSED
+
+Default automatic iteration is one `Draft → Critique → Refinement`. More iterations require explicit operator action.
+
+## V2-D020 — Benchmark against expert-assisted output
+**Status:** PROPOSED
+
+The project is not considered content-quality complete until representative CVBuilder outputs reach approximately 90% of expert-assisted reference quality.
 
 ---
 
-## D-001: Orchestration mechanism
+## M0.2 — Architecture Closure Decisions
 
-- **Status**: **APPROVED WITH FUTURE RE-EVALUATION** (2026-09-02)
-- **Requirement**: STACK-006
-- **Issue**: whether pipeline steps run as a plain ordered sequence of Django-view-triggered
-  service functions, or as a LangGraph graph.
-- **Original recommendation**: plain service-function sequence; requirements.md itself says not to
-  adopt LangGraph by default.
-- **Approved decision**: use ordinary Django application/service orchestration for v1. Do **not**
-  use LangGraph as the workflow runtime for v1. The durable business state already belongs in
-  PostgreSQL — `JobApplication` lifecycle, stage artifacts, artifact versions, approvals, feedback,
-  freshness, current-version pointers — and a second authoritative workflow-state representation
-  through LangGraph checkpoints must not be created alongside it.
-- **Preserve for later**: keep clean stage-service boundaries so that LangGraph, LangChain agents,
-  the OpenAI Agents SDK, or another orchestration/runtime could be evaluated later without
-  redesigning the domain model.
-- **Re-evaluation checkpoint**: an explicit architecture review is scheduled for **after the
-  integrated workflow is functioning (approximately Milestone M7)**. At that checkpoint,
-  reconsider an orchestration framework only if concrete needs have appeared, such as: dynamic
-  agent routing, parallel branches, tool-calling loops, long-running autonomous execution,
-  resumability after process failure, agent-to-agent delegation, significantly more pipeline
-  stages, or complex conditional execution. **Observability alone is not sufficient reason to
-  adopt LangGraph** — observability is designed independently of the orchestration framework (see
-  D-001's companion note in `docs/ARCHITECTURE.md` §7 on tracing/LangSmith compatibility). Do not
-  introduce LangChain, LangGraph, LangSmith, the OpenAI Agents SDK, or another agent framework
-  during M1/M2 merely for future possibilities.
-- **Consequence**: pipeline steps are ordinary Python functions/service classes invoked from
-  Django views; no new dependency, no checkpoint store to reason about, until/unless the M7
-  checkpoint concludes otherwise.
+The decisions below close specific ambiguities/gaps identified in `docs/V2_REUSE_AUDIT.md`. Each is **APPROVED** (product-owner-directed at M0.2) and takes precedence over any earlier PROPOSED text it corrects.
 
-## D-002: CandidateMemory revision semantics
+## V2-D021 — Pipeline phase and application outcome remain distinct enums
+**Status:** APPROVED
 
-- **Status**: **APPROVED WITH MODIFICATION** (2026-09-02)
-- **Requirement**: MEM-006
-- **Issue**: does supplying new markdown create a new revision by reprocessing *all* currently
-  active source documents into a fresh claim snapshot, or append incrementally?
-- **Original recommendation**: full-snapshot revisioning — reprocess everything every time.
-- **Approved decision**: **snapshot + incremental processing.** A `CandidateMemory` revision still
-  represents one complete logical snapshot, but building a new revision does not require
-  reprocessing every source document from scratch:
-  1. Source documents are identified by an immutable content hash.
-  2. Unchanged source documents do not need another LLM extraction.
-  3. Claims derived from unchanged source content may be carried forward into the new logical
-     snapshot.
-  4. Their `confirmation_status` may remain `confirmed` when provenance and claim identity are
-     demonstrably unchanged.
-  5. New source documents are processed through Memory Build.
-  6. Changed source documents are reprocessed.
-  7. Claims arising from new/changed source material begin `unconfirmed`.
-  8. Previous `CandidateMemory` revisions remain immutable.
-  9. If safe claim identity cannot be established after source content changes, require operator
-     reconfirmation rather than silently carrying confirmation forward. Conservative trust
-     behavior is preferred over convenience.
-- **Rationale**: reduces unnecessary LLM use and unnecessary repetitive human review while
-  preserving the versioned-memory trust model — the concern the original recommendation was
-  trying to protect (reviewer workload) is what this modification directly fixes.
-- **Consequence**: implementation needs a claim-identity strategy (see D-003's content-hash +
-  location fields) precise enough to say "this claim's provenance is demonstrably unchanged" — a
-  real design task for Milestone M3, not a trivial diff.
+`JobApplication.pipeline_phase` (`NEW`/`ANALYSIS`/`POSITIONING`/`PREPARATION`/`READY`) and `JobApplication.application_outcome` (`NOT_APPLIED`/`APPLIED`/`INTERVIEWING`/`REJECTED`) are two separate fields/enums, never presented as one combined operator-facing status list. This corrects a self-contradiction in an earlier `requirements.md` draft that listed both inside a single list while also stating they "remain separate."
 
-## D-003: MemoryClaim provenance representation
+## V2-D022 — StageRun and JobApplicationStageState belong to job_applications; llm_provider owns only the LLM registry and call log
+**Status:** APPROVED
 
-- **Status**: **APPROVED WITH MODIFICATION** (2026-09-02)
-- **Requirement**: MEM-003
-- **Issue**: how a `MemoryClaim` points back to its source.
-- **Original recommendation**: FK + stored verbatim quote only, no line/offset pointer.
-- **Approved decision**: provenance must **not** be quote-only. For v1, at minimum:
-  - FK to an immutable/versioned `MemorySourceDocument`.
-  - The source document's immutable content hash (e.g. `content_sha256`).
-  - The stored source quote/excerpt (supports human review).
-  - Source location: start/end line numbers, as the preferred v1 source-location mechanism
-    (supports deterministic traceability/navigation).
+`JobApplication` does not accumulate a growing set of `current_*` foreign keys, one per pipeline artifact. Instead, `job_applications` (workflow layer) owns `StageRun` (one execution attempt/version of a workflow stage, LLM-backed or deterministic) and `JobApplicationStageState` (per `JobApplication` + stage: current and approved `StageRun`). Domain artifacts (`JobAnalysis`, `CandidateContextSnapshot`, `CandidateAssessment`, `PositioningStrategy`, `ResumeContentPlan`, `ResumeDraft`, `RecruiterCritique`) are owned by their own apps and each references the `StageRun` that produced them.
 
-  ```
-  MemorySourceDocument
-      id
-      filename
-      raw_content
-      content_sha256
-      revision/version identity
+`llm_provider` owns `LLMProvider`, `LLMModel`, `StageModelAssignment`, `LLMCallLog`, and provider adapters only — it does not own `StageRun`. `LLMCallLog` references the initiating `StageRun` by a nullable FK (nullable to support standalone/manual smoke-test calls not tied to any `StageRun`). This is a deliberate, accepted exception to the general rule that `llm_provider` has no dependency on pipeline apps.
 
-  MemoryClaim
-      id
-      claim_text
-      source_document_id
-      source_quote
-      source_start_line
-      source_end_line
-      confirmation_status
-  ```
+One canonical stage vocabulary, owned by `job_applications`, is shared by `StageRun`, `JobApplicationStageState`, and `StageModelAssignment`. `StageModelAssignment` applies only to the LLM-capable subset of that vocabulary: `AJ_ANALYZE`, `AC_ASSESS`, `APS_POSITION`, `AB_PLAN`, `AB_DRAFT`, `AB_CRITIQUE`, `AB_REFINE`, `QUALITY_EVAL`. Deterministic/workflow stages — `CANDIDATE_CONTEXT_BUILD`, `VALIDATE_DRAFT`, `VALIDATE_REFINED`, `GATE_1`, `GATE_2`, `RENDER` — use `StageRun` for input/output/audit but never have a `StageModelAssignment` row. Candidate Memory ingestion (V1's `MEMORY_BUILD`) remains outside this vocabulary since it is candidate-scoped, not `JobApplication`-scoped, and keeps its own `CandidateMemory` revision lifecycle.
 
-  The document hash proves which immutable source content the location/quote belongs to. Loose
-  semantic similarity must not be used as the primary provenance mechanism.
-- **Consequence**: this is also the mechanism D-002's "claim identity demonstrably unchanged" test
-  relies on — the two decisions are implemented together in Milestone M3.
+## V2-D023 — FitExperienceLevel is distinct from MemoryClaim's experience-level classification
+**Status:** APPROVED
 
-## D-004: URL fetching strategy for v1
+AC-005's experience-level enum (`AWARENESS`/`LEARNING`/`PROTOTYPE`/`HANDS_ON`/`PRODUCTION`/`ARCHITECTURE`/`LEADERSHIP`) is formalized as a dedicated `FitExperienceLevel` enum used only on `RequirementFit`. It is a distinct concept from `candidate_memory.MemoryClaim`'s own source/claim-level experience classification, which describes what the source evidence itself shows rather than AC's judgment of demonstrated level against a specific requirement. No database enum migration or value-mapping between the two is required or intended.
 
-- **Status**: **APPROVED IN PRINCIPLE** (2026-09-02)
-- **Requirement**: AJ-006
-- **Approved decision**: HTTP fetch → main-content extraction → quality/usability check → either
-  continue, or explicitly report an unusable fetch and present the pasted-text fallback.
-  Pasted-text intake remains a first-class path. Do **not** introduce Playwright/headless-browser
-  infrastructure in v1.
-- **Deferred to M4**: the exact extraction library is **not** frozen during M0/M1 — it is selected
-  and documented as an implementation dependency when Milestone M4 starts, not before.
-- **Consequence**: M1/M2 add no fetch/extraction dependency; that dependency choice is scoped to
-  M4's own commit, keeping earlier milestones' dependency footprint smaller.
+## V2-D024 — ExperienceSlot is a sequenced related collection with a validation-enforced cardinality
+**Status:** APPROVED
 
-## D-005: Structured-output representation across providers
+`ExperienceSlot` is modeled as a related, ordered collection (FK to `StaticResumeProfile`, `sequence`, `is_primary`, `is_active`), not as three hardcoded database columns. The "exactly three" requirement (STATIC-001) is enforced as a `HARD_INTEGRITY` deterministic check (V2-D026) requiring exactly three `ExperienceSlot` rows with `is_primary=True, is_active=True` before AB-2 (Draft) may run. This keeps the cardinality a business rule rather than a schema shape, so it can be changed later without a model migration if the candidate's career history grows.
 
-- **Status**: **APPROVED** (2026-09-02)
-- **Requirement**: LLM-007
-- **Approved decision**: Pydantic models are the canonical structured-output contract.
-  Provider-specific schema translation belongs **entirely inside** `llm_provider`. Pipeline/domain
-  code must never contain Gemini/OpenAI/NVIDIA-specific schema workarounds. The returned provider
-  result is validated again against the canonical Pydantic model before becoming trusted
-  application data (i.e., a round-trip: canonical schema out, provider-specific translation in the
-  adapter, re-validation against the same canonical model on the way back in).
-- **Consequence**: confirms `docs/ARCHITECTURE.md` §3's adapter design as approved, not merely
-  proposed — M2 implements it as specified there.
+## V2-D025 — M3 splits into M3A (Candidate Knowledge + StaticResumeProfile) and M3B (CandidateContextSnapshot)
+**Status:** APPROVED
 
-## D-006: Freshness/staleness mechanism
+The reuse audit confirmed the static-profile half of M3 is largely pre-built on `main` (`CareerEngagement`, `static_profile_boundary.py`), while the five-bucket `CandidateContextSnapshot` has zero precedent anywhere on `main`. Treating these as one undifferentiated M3 milestone understated the risk/effort of the context-snapshot half. M3A (Candidate Knowledge, `StaticResumeProfile`, `ExperienceSlot`) and M3B (`CandidateContextSnapshot`, five buckets, token-aware compaction) are tracked as distinct sub-milestones in `docs/IMPLEMENTATION_PLAN.md`. M3B requires its own quality acceptance tests (real evidence that all five buckets are populated and career breadth is retained) before AC is allowed to depend on it.
 
-- **Status**: **APPROVED WITH MODIFICATION** (2026-09-02)
-- **Requirement**: HITL-007
-- **Original recommendation**: block-on-stale, detected via an `updated_at` snapshot comparison.
-- **Approved decision**: the **block-on-stale, operator-visible behavior is approved as-is** —
-  silent regeneration remains prohibited. However, freshness must be determined **primarily by
-  immutable upstream artifact identity/version references, not `updated_at` timestamps**. Example:
-  `FitAssessment.based_on_jra_id` must equal `JobApplication.current_jra_id`;
-  `ResumeDraft.based_on_fit_assessment_id` must equal
-  `JobApplication.current_fit_assessment_id`. If these identities differ, the downstream artifact
-  is stale — do not silently regenerate; show the operator that upstream context changed and
-  require an explicit next action. Timestamps may remain audit metadata but must not be the
-  fundamental freshness identity.
-- **Consequence**: this decision is what makes `JobApplication`'s current-version pointers
-  (D-012) load-bearing, not just a UI convenience — freshness correctness depends on them.
+## V2-D026 — Deterministic factual checks split into HARD_INTEGRITY and SOFT_REVIEW_WARNING
+**Status:** APPROVED
 
-## D-007: Exact resume markdown template
+FACT-003's "warnings, not automatic rejection" is refined into two explicit classes:
 
-- **Status**: **RESOLVED FOR V1 CONTENT STRUCTURE** (2026-09-02)
-- **Requirement**: FUT-001
-- **Resolution**: the product owner supplied a resume-content reference. Its factual content is
-  **not** hard-coded anywhere in this repository — it is a structural/content-design reference
-  only. The resolution is captured as a structured resume representation (produced by Agent
-  Builder before any markdown exists) plus a deterministic v1 markdown rendering contract, fully
-  specified in `docs/RESUME_OUTPUT_STRUCTURE.md`. Every factual structured element carries
-  `supporting_memory_claim_ids` (and, where relevant, `matched_job_requirement_ids`); markdown is
-  rendered only after the structured representation passes the no-fabrication validator (D-014).
-- **Consequence**: Milestone M6's previous hard blocker is resolved — M6 can proceed against
-  `docs/RESUME_OUTPUT_STRUCTURE.md` (see `docs/IMPLEMENTATION_PLAN.md`).
+- **HARD_INTEGRITY** (fails closed, blocks the draft): malformed structured output, references to a nonexistent claim/experience-slot/object, invalid schema, incorrect required experience-slot cardinality, or any attempt to replace static company/title/date/location metadata.
+- **SOFT_REVIEW_WARNING** (surfaced, never blocks): weak support, transferable wording, inferred positioning, possible overstatement, suspicious metrics, technology-depth uncertainty, or wording requiring operator confirmation.
 
-## D-008: Token/cost visibility
+Only `SOFT_REVIEW_WARNING` items are advisory. This also resolves how V1's `no_fabrication.py`/`completeness.py` checks are reused: the check logic (claim-ID existence, engagement-correctness, bullet-count caps) is retained, but reclassified case-by-case as `HARD_INTEGRITY` or `SOFT_REVIEW_WARNING` rather than uniformly raising and discarding the whole draft. Human Gate 2 remains the final factual authority.
 
-- **Status**: **APPROVED WITH REPRIORITIZATION** (2026-09-02)
-- **Requirement**: NFR-004
-- **Original recommendation**: add pricing fields to `LLMModel` and compute/store `cost_usd` on
-  `LLMCallLog` at call time, positioned as a Milestone M2 concern.
-- **Approved decision**: the product owner is primarily interested in **token consumption**, not
-  provider pricing, at this stage. V1 must record and report, per LLM call: provider, model,
-  pipeline stage, input tokens where reported, cached input tokens where reported, output tokens
-  where reported, total tokens where meaningful/reported, latency, retry count, sanitized
-  success/error category. The system must be able to aggregate token consumption per
-  `JobApplication`, per pipeline stage, per provider, and per model. **Dollar-cost calculation is
-  optional/deferred** and must **not** be a blocker for Milestone M2. The `LLMModel`/`LLMCallLog`
-  design must allow pricing metadata to be added later without reworking `LLMCallLog`. If pricing
-  support is added later, the operator manually configures model pricing, and historical cost uses
-  pricing snapshotted at call time rather than recalculating against a changed future price (this
-  part of the original recommendation is preserved, just deferred in priority, not discarded).
-- **Consequence**: `LLMModel` does not need pricing fields at M2; `LLMCallLog`'s token fields
-  (input/cached-input/output/total) are the M2 requirement, and pricing fields are additive later
-  with no schema rework.
+## V2-D027 — APS requires explicit quality acceptance criteria before AB implementation
+**Status:** APPROVED
 
-## D-009: Provider/model capability representation
+APS has no precedent anywhere on `main` and, along with `CandidateContextSnapshot`, is the highest-judgment new component in V2. `docs/IMPLEMENTATION_PLAN.md` M5 and `docs/TEST_STRATEGY.md` define explicit APS quality acceptance criteria (clear candidate thesis, convincing lead/support/de-emphasize strategy, credible title options, retained gaps), evaluated before AB (which consumes APS) is implemented — not deferred to M8's general benchmarking pass.
 
-- **Status**: **APPROVED** (2026-09-02, unchanged — low ambiguity, confirmed as originally
-  proposed)
-- **Requirement**: LLM-005
-- **Decision**: simple boolean/integer flags exactly as requirements.md §9.2 names — structured-
-  output support, streaming support, reasoning/thinking support, max output tokens. No richer
-  capability schema.
+## V2-D028 — Quality benchmark methodology defined in docs/QUALITY_BENCHMARK.md
+**Status:** APPROVED
 
-## D-010: Stage artifact versioning semantics
+A dedicated benchmark methodology document compares expert-assisted reference resumes, V1 agent output, and V2 output across positioning, differentiation, JD alignment, specificity, completeness, career narrative, seniority positioning, technical credibility, recruiter impact, generic wording, and factual correction burden. The initial Amazon GenAI Solutions Architect application is recorded as the first representative benchmark case, using only source content actually available — no fabricated benchmark inputs.
 
-- **Status**: **APPROVED** (2026-09-02) — consolidates the former D-010 and D-013 into one
-  mechanism
-- **Requirement**: DATA-004, DATA-005, DATA-007
-- **Approved decision**: `JobRequirementAnalysis`, `FitAssessment`, and `ResumeDraft` are
-  **append-only/versioned stage artifacts**. Feedback/regeneration creates a new version; previous
-  versions remain available for audit. Approved/reviewed historical artifacts are never
-  overwritten. (The former D-013, which proposed versioning `ResumeDraft` specifically as a
-  separate concern, is folded into this single decision rather than kept as a parallel mechanism —
-  one versioning rule for all three stage artifacts.)
-- **Consequence**: `JobApplication` (D-012) is what tracks "current version" for each of the
-  three, via `current_jra`, `current_fit_assessment`, `current_resume_draft` pointers, rather than
-  scattered `is_current` flags on each versioned row where practical.
+## V2-D029 — Correct historical description of V1's AC/AB call chain
+**Status:** APPROVED
 
-## D-011: Application lifecycle / abandonment
+Earlier V2 planning text described a single "old four-call AC chain" (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`/`AC_BUILD`). The reuse audit confirms this spans two apps: three calls (`AC_NORMALIZE`, `AC_RANK`, `AC_MATCH`) inside `candidate_matching`, plus one separate call (`AB_BUILD`) inside `resume_builder` — there is no `AC_BUILD` stage in `candidate_matching`. All canonical V2 documents are corrected to describe this accurately; see `docs/V2_REUSE_AUDIT.md` for the confirmed mapping.
 
-- **Status**: **APPROVED, FOLDED INTO DASHBOARD LIFECYCLE** (2026-09-02)
-- **Issue**: the original proposal was a standalone `abandoned` flag.
-- **Approved decision**: the standalone "abandoned" proposal is superseded by the broader
-  `JobApplication` lifecycle/dashboard design (requirements.md new §17): a `pipeline_phase`
-  (`NEW`/`ANALYSIS`/`PREPARATION`/`READY`) crossed with an `application_outcome`
-  (`NOT_APPLIED`/`APPLIED`/`INTERVIEWING`/`REJECTED`), rather than one overloaded artifact status.
-  If a distinct "abandoned" concept is still useful once this two-dimensional model is in use, it
-  is retained as an explicit terminal/manual lifecycle state within that model (e.g. as an
-  additional `application_outcome` value) rather than a separate overlapping field — this
-  refinement is left to Milestone M4/M7 implementation, not decided further here, to avoid
-  inventing a state the dashboard design doesn't clearly need yet.
-- **Consequence**: no separate `abandoned` boolean is added to the schema now; the dashboard
-  model in D-012/requirements.md §17 is the single source of lifecycle truth.
+---
 
-## D-012: JobApplication aggregate
+## Architecture Closure Decisions (follow-up pass)
 
-- **Status**: **APPROVED** (2026-09-02)
-- **Requirement**: derived from §8 (originally flagged as an added entity requiring approval);
-  now also the explicit basis for the new dashboard requirement (requirements.md §17).
-- **Approved decision**: `JobApplication` is the aggregate/root entity for one tracked
-  vacancy/application. It groups the versioned chain of `JobRequirementAnalysis` →
-  `FitAssessment` → `ResumeDraft` (per D-010) via current-version pointers
-  (`current_jra`, `current_fit_assessment`, `current_resume_draft`), preferred over scattered
-  `is_current` flags where practical. It is also the natural owner of the dashboard lifecycle
-  (`pipeline_phase`, `application_outcome` — see D-011 and requirements.md §17).
-- **Consequence**: `job_applications` is a real app in the architecture (not a pending proposal —
-  see `docs/ARCHITECTURE.md`), and should be established early enough (Milestone M1/M4) that later
-  stage models naturally belong to it rather than retrofitting the aggregate at M7.
+The five decisions below close the remaining open architecture questions listed in `docs/CURRENT_STATE.md` and `docs/V2_REUSE_AUDIT.md` after the initial M0.2 pass. Each is **APPROVED** (product-owner-directed).
 
-## D-013: (superseded — merged into D-010)
+## V2-D030 — candidate_context is a distinct Django app; candidate_memory remains the source of candidate truth
+**Status:** APPROVED
 
-- **Status**: **SUPERSEDED by D-010** (2026-09-02)
-- This entry originally proposed versioning `ResumeDraft` as its own mechanism. The product owner
-  directed that it be consolidated into D-010 rather than kept as a separate mechanism for one
-  artifact type. See D-010 for the current, single versioning decision covering
-  `JobRequirementAnalysis`, `FitAssessment`, and `ResumeDraft` alike.
+`candidate_context` is a distinct Django/domain app in V2, not an optional submodule of `candidate_memory` (this replaces the earlier hedge in `docs/ARCHITECTURE.md` §3 that it "may live inside `candidate_memory`").
 
-## D-014: Structured AJ → AC → AB traceability
+`candidate_memory` owns durable candidate knowledge: candidate source documents, `MemoryClaim`s, Candidate Profile, operator corrections/preferences, `CareerEngagement`-equivalent data, and `StaticResumeProfile`/`ExperienceSlot` source data.
 
-- **Status**: **APPROVED** (2026-09-02) — new decision, added during product-owner review
-- **Requirement**: new explicit product requirement; see requirements.md new §16. Purpose: make
-  the no-concealment and no-fabrication invariants **structurally** enforceable, not solely
-  dependent on prompting quality.
-- **Approved decision**:
-  - **Agent Jobber** assigns a stable identifier (`JR-001`, `JR-002`, ...) to every material job
-    requirement extracted, categorized (mandatory/preferred/responsibility/ATS-signal/implied
-    expectation), stable within its immutable `JobRequirementAnalysis` version.
-  - **Agent Candidate** produces, for every relevant `JobRequirement`, an explicit
-    `RequirementAssessment` (`requirement_id`, `disposition` ∈ {`MATCH`,`PARTIAL`,`GAP`,`UNKNOWN`},
-    `supporting_memory_claim_ids`, `explanation`, `gap_or_limitation`) rather than only free-form
-    strengths/gaps text. Absence of evidence must never silently become `MATCH`; only `confirmed`
-    `MemoryClaim`s may support a `MATCH`/`PARTIAL`.
-  - **Agent Builder** produces structured `ResumeElement`s (`text`, `supporting_memory_claim_ids`,
-    `matched_job_requirement_ids`) for every factual output before any markdown is rendered (see
-    D-007/`docs/RESUME_OUTPUT_STRUCTURE.md`). The no-fabrication validator checks referenced-claim
-    existence, confirmation, eligibility, and context-scoping, and that every factual element
-    carries evidence — **not** exact/near-text or embedding-similarity matching, which are
-    explicitly excluded as the fundamental truth test. Human review remains mandatory for whether
-    generated wording fairly represents the underlying evidence; the machine invariant only
-    guarantees evidence attachment and eligibility.
-- **Consequence**: this is a real schema/validation addition across `job_intake`,
-  `candidate_matching`, and `resume_builder` (Milestones M4, M5, M6 respectively) — not a
-  documentation-only change. It directly strengthens NFR-001 and NFR-002 from "prompted for" to
-  "validated."
+`candidate_context` owns the job-specific projection: `CandidateContextSnapshot`, the five context buckets, retrieval/selection logic, token-aware compaction, context quality validation, and the context inspection/edit workflow.
 
-## D-015: Operator-approved Candidate Memory bootstrap, content classification, and reference export
+`CandidateContextSnapshot` consumes `candidate_memory` and the current job/AJ artifacts as inputs but must never become a source of candidate truth in its own right — corrections, confirmations, and factual edits are made in `candidate_memory`, not in a context snapshot.
 
-- **Status**: **APPROVED** (2026-09-02) — new decision, added during M0.1 product-owner review.
-  Governs the topics below as one decision; where a topic is a direct extension of an existing
-  decision it is cross-referenced rather than re-decided from scratch.
-- **Requirement**: extends MEM-001..006 (requirements.md §4); see also D-002 (revision semantics)
-  and D-003 (provenance representation), both of which this decision builds on rather than
-  supersedes.
+## V2-D031 — ExperienceSlot selection is explicitly operator-controlled
+**Status:** APPROVED
 
-### Bootstrap sources (new)
+The system does not automatically choose which three career engagements become the resume's primary experience slots. `StaticResumeProfile` contains an ordered, related `ExperienceSlot` collection (V2-D024). The operator selects `CareerEngagement`-equivalent source records (owned by `candidate_memory`, V2-D030) and creates/activates exactly three primary `ExperienceSlot`s with explicit sequence/order.
 
-- Three committed markdown files are **operator-approved source evidence**:
-  `docs/AC/AC-MEMORY_PROFILE.md`, `docs/AC/AC-profile_english.md`, `docs/AC/AC-profile_german.md`.
-- Source precedence/order: `AC-MEMORY_PROFILE.md` is the primary curated profile and
-  highest-precedence source for limitations, safe wording, and profile policy;
-  `AC-profile_english.md` is operator-approved English evidence and expression corpus;
-  `AC-profile_german.md` is operator-approved German evidence and expression corpus.
-- Non-conflicting factual claims correctly extracted and deterministically traceable to these
-  sources may begin `confirmed` during the initial bootstrap. Any contradictory claim must remain
-  ineligible and unconfirmed (`BLOCKED_CONFLICT` or equivalent) until the operator resolves it in
-  the UI. Source approval does **not** allow a malformed, unsupported, incorrectly classified, or
-  non-traceable LLM extraction to become confirmed — approval status of the *source* never
-  substitutes for validation of the *extraction*.
+Each `ExperienceSlot` contains/references static operator-owned metadata: company, position title, location, start date, end date/present, and sequence. Whether this metadata is copied onto `ExperienceSlot` or resolved by reference to its source `CareerEngagement`-equivalent record is an M3A implementation detail, not fixed here.
 
-### Canonical language (new)
+Exactly three active primary `ExperienceSlot`s remains a `HARD_INTEGRITY` prerequisite for resume generation (V2-D024/V2-D026) — this decision does not change the cardinality rule, only how slots come to exist.
 
-- English is the canonical language for stored `MemoryClaim` facts. German-language evidence may
-  support the same canonical English claim (see `MemoryClaimSupport` in
-  `docs/ARCHITECTURE.md` §4). German resume wording is generated only for the relevant selected
-  claims when required — the complete memory does not need to be translated on every build. A
-  separate stored translation table is optional, not mandatory, for v1; the default is
-  translate-on-demand for selected claims.
+The M3A UI mechanism supports this flow: select engagement → create/activate slot → order (1/2/3) → edit static metadata if authorized → validate exactly three.
 
-### Revision semantics (extends D-002, does not replace it)
+## V2-D032 — ReviewFeedback targets a StageRun, not a Target enum
+**Status:** APPROVED
 
-- D-002's snapshot + incremental model applies unchanged: unchanged source documents (matched by
-  content hash) are not reprocessed; new/changed documents are (re)processed; conservative
-  reconfirmation applies when claim identity can't be safely established across a change. D-015
-  adds nothing new here beyond naming the three bootstrap files as the initial source set this
-  model runs against.
+`ReviewFeedback` does not introduce separate enum values for `AB_PLAN`/`AB_DRAFT`/`AB_CRITIQUE`/`AB_REFINE` (or any other per-stage target). Feedback becomes stage-specific through the workflow model instead:
 
-### Provenance (extends D-003, does not replace it)
+```text
+ReviewFeedback
+    job_application     (FK)
+    stage_run           (FK -> StageRun, nullable)
+    gate                (GATE_1 / GATE_2)
+    comment
+    created_at
+```
 
-- D-003's guarantees (immutable source identity, SHA-256, exact quotation, deterministic line
-  range, no semantic-similarity provenance) are preserved unchanged. D-015 extends the
-  *cardinality*: a canonical claim may have multiple exact supporting passages (see
-  `MemoryClaimSupport`, `docs/ARCHITECTURE.md` §4), rather than the single-FK model originally
-  sketched — needed because German corroborating evidence and English primary evidence for the
-  same canonical claim are different passages in different documents.
+`StageRun.stage` (the canonical stage vocabulary, V2-D022) already identifies the exact stage/run/version/model execution a piece of feedback concerns, so a separately-evolving `ReviewFeedback.Target` enum is unnecessary and would drift from the real stage vocabulary over time. `stage_run` is nullable to allow aggregate Gate 1/Gate 2 feedback that is not about one specific LLM run; `gate` identifies the review scope in that case.
 
-### Job title vs. positioning (new)
+## V2-D033 — AJ requirement taxonomy uses orthogonal dimensions, not one overloaded category enum
+**Status:** APPROVED
 
-- Actual job titles (factual role-history evidence, e.g. "System Engineer" at Continental) and
-  suggested target/resume titles (positioning guidance, e.g. "Senior Solutions Architect" as a
-  suggested title for a specific application) serve different purposes and must not be conflated.
-  There is no general rule that actual employment titles "win" over suggested titles, or
-  vice versa — they answer different questions (what happened vs. how to position it). A suggested
-  target title must never be presented as a historical employment title unless separately
-  supported as fact.
+Job requirements have independent dimensions that V1's single flat category conflated. V2's `JobRequirement` captures at least three separate dimensions:
 
-### Operational memory vs. reference export (new)
+```text
+requirement_priority:  MANDATORY | PREFERRED | CONTEXTUAL
+requirement_domain:    TECHNICAL | DOMAIN | LEADERSHIP | CUSTOMER_FACING |
+                        RESPONSIBILITY | EDUCATION_CERTIFICATION | OTHER
+origin:                EXPLICIT | IMPLIED
+```
 
-- PostgreSQL Candidate Memory is the operational memory; the three markdown files remain immutable
-  evidence sources. `docs/CANDIDATE_MEMORY_SNAPSHOT.md` is a concise human-readable export/
-  reference, not an authoritative evidence source and not default runtime LLM context. The
-  snapshot must never be re-ingested as Candidate Memory evidence.
+Exact stored enum naming may be refined during M4 implementation, but these three separate dimensions are now the architectural contract — no field collapses priority, domain, and origin into one enum. `RecruiterDecisionModel` (AJ-003) may rank requirements across these dimensions. `RequirementFit` (AC) continues to reference requirements only by their stable `JR-NNN` ID, so this change is invisible to AC's schema.
 
-### No vector database for v1 (new)
+## V2-D034 — supported_reasoning_levels is the canonical source of a model's reasoning capability
+**Status:** APPROVED
 
-- No vector database or embedding-based memory is required for v1. PostgreSQL structured retrieval
-  plus a bounded LLM relevance-ranking step is sufficient. `pgvector` remains a possible future
-  optimization only if measured retrieval quality requires it — not adopted now, not a default to
-  revisit without evidence of a real retrieval-quality problem.
+`LLMModel.supported_reasoning_levels` (a set/list drawn from canonical values `NONE`, `LOW`, `MEDIUM`, `HIGH`, `XHIGH`) is the single source of truth for what a model supports. Provider adapters translate these canonical values into provider-specific request parameters. A model with no reasoning capability stores `{NONE}` (or an equivalent empty/`NONE`-only representation) — there is no independently-stored `supports_reasoning` boolean that could drift from the level list; `supports_reasoning` may exist only as a derived property/helper computed from `supported_reasoning_levels`.
 
-### Bootstrap mechanism (new)
-
-- Initial bootstrap is an explicit, repeatable Django management command (conceptually
-  `bootstrap_candidate_memory --primary <path> --english <path> --german <path>`), implemented in
-  Milestone M3 — **not** automatic import during startup, migration, or deployment. Ongoing
-  additions/corrections go through the M3 Candidate Memory UI, creating a new immutable
-  `OPERATOR_UPDATE` source document and a new `CandidateMemory` revision (per D-002's snapshot +
-  incremental model) — direct database editing is not the normal update workflow.
-
-- **Consequence**: this is a real, non-trivial design and implementation scope inside Milestone
-  M3 (see `docs/IMPLEMENTATION_PLAN.md` M3), not a documentation-only change. It is the governing
-  decision for the domain-model refinement in `docs/ARCHITECTURE.md` §4
-  (`MemoryClaimSupport`, `CandidateRule`, `MemoryConflict`, and the strengthened `CandidateMemory`/
-  `MemorySourceDocument`/`MemoryClaim` fields).
+`StageModelAssignment.default_reasoning_level` must be valid for its selected model's `supported_reasoning_levels`. Per-call UI overrides are validated against the same set. This must be settled before M1/M2 schema work, since `StageModelAssignment` and the registry admin depend on it.
