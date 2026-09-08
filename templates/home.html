@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}CVBuilder V2 — Home{% endblock %}
+
+{% block breadcrumbs %}Home{% endblock %}
+
+{% block content %}
+  <h2>CVBuilder V2 — Foundation</h2>
+  <p class="lede">
+    The M1 Django/PostgreSQL foundation is running. The job-tracking dashboard (M7) and the
+    rest of the pipeline are not implemented yet. Use <a href="{% url 'admin:index' %}">the
+    admin site</a> to inspect JobApplication, StageRun, and JobApplicationStageState records.
+  </p>
+{% endblock %}

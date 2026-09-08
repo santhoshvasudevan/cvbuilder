@@ -126,6 +126,8 @@ JobApplicationStageState
     unique_together: (job_application, stage)
 ```
 
+**Implementation note (V2-D036):** M1 implements `StageRun`'s provider-independent fields only (`job_application`, `stage`, `status`, `input_snapshot`, `raw_structured_output`, `working_output`, `lock_version`, `created_at`, `approved_at`). `provider`, `model`, `reasoning_level`, `max_output_tokens`, and `temperature` are added by an M2 migration once `llm_provider.LLMProvider`/`LLMModel` exist — this is a sequencing detail, not a change to the target schema below.
+
 `StageRun` represents one execution attempt/version of a workflow stage — LLM-backed or deterministic. The same stored `input_snapshot` can be re-run against a different provider/model/reasoning override to produce another, independent `StageRun` (satisfying LLM-010/011's model-comparison requirement) without losing prior attempts. `JobApplicationStageState` tracks, per `JobApplication` + stage, which `StageRun` is currently selected for downstream use and which one (if any) has been approved at a Human Gate.
 
 Domain artifacts owned by their own apps (`JobAnalysis` in `job_intake`, `CandidateContextSnapshot` in `candidate_context`, `CandidateAssessment` in `candidate_matching`, `PositioningStrategy` in `positioning_strategy`, `ResumeContentPlan`/`ResumeDraft`/`RecruiterCritique` in `resume_builder`) each hold a FK to the `StageRun` that produced them, rather than `JobApplication` holding a direct pointer to each artifact. To find "the current resume draft for this JobApplication," resolve `JobApplicationStageState` for `(job_application, AB_DRAFT)` → its `current_stage_run` → the `ResumeDraft` referencing that `StageRun`.

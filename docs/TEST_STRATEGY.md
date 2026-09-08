@@ -19,6 +19,8 @@ Do not confuse these layers.
 - `.env` is not committed.
 - no Redis/Celery/SPA dependency appears without approval.
 
+**M1 status: VERIFIED.** `job_applications/tests/` (42 tests) covers Django startup, settings/environment validation, PostgreSQL configuration (including a live query against a real connection), the home view and URL routing, admin registration/reachability, and M1's architectural invariants (no legacy V1 stage identifiers or app names, `.env` not tracked by git, `.env.example` placeholder-only). Run via `make test`; `make check`, `make migrations-check`, and `make lint` are also part of `make verify`. Canonical local commands live in the root `Makefile` — see `AGENTS.md`.
+
 ### LLM provider
 - adapter routing;
 - provider/model registry;

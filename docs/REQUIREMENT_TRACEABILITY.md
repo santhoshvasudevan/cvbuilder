@@ -8,9 +8,9 @@
 | Expert-quality positioning | GOAL | whole pipeline | M5-M8 | benchmark vs expert-assisted reference |
 | Human-owned factual approval | FACT-001..005 | reviews / resume_builder | M6 | Gate 2 walkthrough |
 | Job tracking | §4 | job_applications | M7 | dashboard/integration tests |
-| Pipeline phase / application outcome separation | V2-D021 | job_applications | M1 | model test |
-| StageRun / JobApplicationStageState | V2-D022 | job_applications | M1 | model/migration test |
-| Canonical stage vocabulary | V2-D022 | job_applications/llm_provider | M1/M2 | enum/routing test |
+| Pipeline phase / application outcome separation | V2-D021 | job_applications | M1 | model test — VERIFIED (`JobApplicationTests.test_pipeline_phase_and_application_outcome_are_independent_fields`) |
+| StageRun / JobApplicationStageState | V2-D022 | job_applications | M1 | model/migration test — VERIFIED (migration `job_applications/0001_initial.py` applied to real PostgreSQL; model tests pass); provider/model fields deferred to M2 (V2-D036) |
+| Canonical stage vocabulary | V2-D022 | job_applications/llm_provider | M1/M2 | enum/routing test — VERIFIED for M1 (`StageIdentifierTests`, incl. no-legacy-identifier check); `StageModelAssignment` wiring remains M2 |
 | Job intake | AJ-001 | job_intake | M4 | URL/paste tests |
 | Stable job requirements | AJ-002 | job_intake | M4 | schema/unit test |
 | Orthogonal requirement taxonomy (priority/domain/origin) | AJ-002, V2-D033 | job_intake | M4 | schema/enum test |
@@ -60,9 +60,9 @@
 | OpenRouter | LLM-008 | llm_provider | M2 | adapter/smoke test |
 | Editable URLs | LLM-009 | llm_provider | M2 | registry test |
 | Model experiments | LLM-010..011 | llm_provider | M2/M8 | same-input rerun test |
-| Secrets | LLM-012 | project-wide | M1/M2 | config/VCS review |
+| Secrets | LLM-012 | project-wide | M1/M2 | config/VCS review — M1 VERIFIED (`detect-secrets scan` clean; `.env` confirmed untracked by an automated test; `.env.example` contains placeholders only) |
 | Token optimization | TOKEN-001..006 | llm_provider/reporting | M2/M8 | usage reports |
-| Selective main reuse | §20 | project-wide | M1 | reuse audit — see `docs/V2_REUSE_AUDIT.md` |
+| Selective main reuse | §20 | project-wide | M1 | reuse audit — see `docs/V2_REUSE_AUDIT.md`; M1 infra reuse VERIFIED (file-by-file cherry-pick from `main`, no bulk merge) |
 | Quality benchmark methodology | V2-D028 | project-wide | M8 | `docs/QUALITY_BENCHMARK.md` |
 | Repository-native multi-agent continuity | §23, V2-D035 | project-wide | M0.2/ongoing | `AGENTS.md`, `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, `docs/MILESTONE_COMPLETION_CHECKLIST.md` present and followed |
 | Plain Django orchestration | §21 | project-wide | M1-M7 | architecture/code review |

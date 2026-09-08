@@ -68,3 +68,81 @@ Working tree: <clean / describe intentional uncommitted state>
 
 Commit: <created (hash) / not created (why)>
 ```
+
+## Completed Milestones
+
+### M1 — Foundation and Reuse Audit
+
+- [x] Milestone scope confirmed — `job_applications` app only (`JobApplication`/`StageRun`/`JobApplicationStageState`), Django/PostgreSQL foundation, no domain logic from later milestones (V2-D036).
+- [x] Requirements mapped — `docs/REQUIREMENT_TRACEABILITY.md` rows for V2-D021/D022/V2-D035, LLM-012 marked VERIFIED for M1.
+- [x] Architecture decisions respected — `docs/ARCHITECTURE.md` §5 schema followed exactly except the deferred `StageRun` provider/model fields (V2-D036, recorded, tested).
+- [x] Implementation complete — models, admin, one URL/view, templates, settings, all Makefile-documented commands.
+- [x] Migrations checked — `0001_initial.py` applies cleanly to a fresh PostgreSQL database; `makemigrations --check --dry-run` reports no drift.
+- [x] Focused tests pass — all 7 test modules in `job_applications/tests/` pass individually and together.
+- [x] Milestone acceptance tests pass — see `docs/IMPLEMENTATION_PLAN.md` M1 Acceptance section, marked MET with evidence.
+- [x] No unintended network calls — no provider/adapter code exists yet in M1; nothing in the test suite reaches the network.
+- [x] No secrets/local files added — `detect-secrets scan` clean; `.env` confirmed untracked by an automated test; `.gitignore` covers `.env`/`.venv/`/`.claude/`/`.DS_Store`/caches.
+- [x] `git diff` reviewed — `git diff --check --cached` clean; staged file list matches the intended M1 file set exactly (verified by explicit enumeration before commit).
+- [x] `docs/CURRENT_STATE.md` updated — reflects verified M1 completion with command-level evidence.
+- [x] `docs/REQUIREMENT_TRACEABILITY.md` updated — M1-scoped rows marked VERIFIED.
+- [x] `docs/DECISIONS.md` / `docs/ARCHITECTURE.md` updated — V2-D036 (M1 app scope + deferred `StageRun` fields) and V2-D037 (local DB reset) recorded; `docs/ARCHITECTURE.md` §5 annotated with a pointer to V2-D036.
+- [x] Known issues explicitly recorded — see `docs/CURRENT_STATE.md` Known Issues/Risks (local DB reset, trimmed `requirements.txt`, two open M3A/M4 implementation choices carried forward from M0.2).
+- [x] Next milestone prerequisites recorded — M2 needs `llm_provider.LLMProvider`/`LLMModel` before `StageRun`'s deferred fields can be added; recorded in `docs/CURRENT_STATE.md` Next Recommended Action.
+- [x] Final `git status` understood — clean except expected untracked local files.
+- [x] Commit created only if authorized — authorized explicitly by this milestone's task instructions.
+
+```text
+Milestone: M1 — Foundation and Reuse Audit
+Branch: cvbuild2
+HEAD after this work: see docs/CURRENT_STATE.md (verify with `git log -1`)
+
+Scope confirmed: yes — job_applications app only, no later-milestone domain logic
+
+Requirements covered: V2-D021, V2-D022, V2-D024 (ExperienceSlot cardinality not yet
+  applicable in M1), V2-D035, V2-D036, V2-D037, LLM-012
+
+Files/components changed:
+  config/ (settings, urls, asgi, wsgi, __init__)
+  job_applications/ (models, admin, views, urls, apps, migrations/0001_initial, tests/*)
+  templates/ (base.html adapted from main, home.html new)
+  docker-compose.yml, .env.example, .gitignore, Makefile, pyproject.toml,
+  requirements.txt, requirements-dev.txt, manage.py
+
+Migrations:
+  job_applications/0001_initial.py (JobApplication, StageRun, JobApplicationStageState)
+
+Tests run:
+  make test  (.venv/bin/python manage.py test)
+Results:
+  Ran 42 tests in ~0.5s. OK. (0 failures, 0 errors)
+
+Milestone acceptance criteria (docs/IMPLEMENTATION_PLAN.md M1):
+  application runs — met — make start; curl / -> 200, curl /admin/ -> 302
+  Postgres works — met — migrate applied to real local PostgreSQL 16, tables verified
+  admin works — met — JobApplication/StageRun/JobApplicationStageState registered, reachable
+  tests/check/lint pass — met — 42/42 tests, check clean, ruff clean
+  reuse decisions documented — met — docs/V2_REUSE_AUDIT.md; infra files cherry-picked
+  JobApplication/StageRun/JobApplicationStageState schema matches M0.2 design — met,
+    with StageRun provider/model fields deferred to M2 (V2-D036, explicit and tested)
+  no accidental V1 pipeline semantics — met — automated source scan test
+
+Known issues:
+  Local Postgres dev volume contained stale V1 schema; reset before verification (V2-D037).
+  requirements.txt intentionally omits pydantic/requests/readability-lxml (unused in M1).
+
+Docs updated:
+  docs/CURRENT_STATE.md: yes
+  docs/REQUIREMENT_TRACEABILITY.md: yes
+  docs/DECISIONS.md / docs/ARCHITECTURE.md: yes (V2-D036, V2-D037; ARCHITECTURE.md §5 note)
+  docs/IMPLEMENTATION_PLAN.md: yes (M1 marked COMPLETE with evidence)
+  docs/TEST_STRATEGY.md: yes (Foundation section marked VERIFIED)
+
+Next milestone prerequisites: M2 needs llm_provider.LLMProvider/LLMModel to exist before
+  StageRun's deferred fields (provider/model/reasoning_level/max_output_tokens/temperature)
+  can be added via migration.
+
+Working tree: clean except expected untracked local files (.env, .venv/, .claude/, .DS_Store)
+
+Commit: created — explicit file staging, see commit message "feat: implement M1 Django
+  foundation (job_applications app, PostgreSQL, Makefile)" or equivalent
+```

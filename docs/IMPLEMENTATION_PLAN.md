@@ -12,7 +12,7 @@ M0 — V2 architecture baseline
  |
 M0.2 — Architecture closure (reuse audit + design decisions + multi-agent handover protocol) — COMPLETE
  |
-M1 — Foundation + reuse audit
+M1 — Foundation + reuse audit — COMPLETE
  |
 M2 — LLM control plane + operator call console
  |
@@ -88,14 +88,16 @@ Do not bulk merge.
 - real AJ/AC/APS/AB behavior
 - live provider calls
 
-### Acceptance
-- application runs;
-- Postgres works;
-- admin works;
-- tests/check/lint pass;
-- reuse decisions documented (`docs/V2_REUSE_AUDIT.md`);
-- `JobApplication`/`StageRun`/`JobApplicationStageState` schema matches the closed M0.2 design, not a growing `current_*` FK list;
-- no accidental import of old V1 pipeline semantics (in particular, no `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` stage identifiers).
+### Acceptance — MET (see docs/CURRENT_STATE.md for evidence)
+- application runs — verified via `make start` + live HTTP requests (home `200`, admin `302` unauthenticated);
+- Postgres works — migrations applied against a real local PostgreSQL 16 instance (Docker), verified table-by-table;
+- admin works — `JobApplication`/`StageRun`/`JobApplicationStageState` registered and reachable, verified by test and live request;
+- tests/check/lint pass — 42/42 tests, `manage.py check` clean, `ruff check .` clean;
+- reuse decisions documented (`docs/V2_REUSE_AUDIT.md`) — infra files (`docker-compose.yml`, `.env.example`, `.gitignore`, `Makefile`, `pyproject.toml`, `requirements.txt`, `templates/base.html`, `manage.py`, `config/asgi.py`/`wsgi.py`) cherry-picked from `main` per the audit's REUSE_AS_IS classification; `config/settings.py`/`urls.py` adapted (REUSE_WITH_ADAPTATION) to M1's actual app set;
+- `JobApplication`/`StageRun`/`JobApplicationStageState` schema matches the closed M0.2 design, not a growing `current_*` FK list — `StageRun`'s provider/model fields are deferred to M2 per V2-D036 (implementation-sequencing, not an architecture change);
+- no accidental import of old V1 pipeline semantics (in particular, no `AC_NORMALIZE`/`AC_RANK`/`AC_MATCH` stage identifiers) — enforced by an automated test that scans the actual source tree.
+
+M1 implementation note: only `job_applications` was implemented in M1 (V2-D036); the other app boundaries listed above are created when their own milestone begins. The local PostgreSQL dev database was found to contain a stale V1 schema from unrelated prior work and was reset before verification — see V2-D037.
 
 ## M2 — LLM Control Plane and Operator Call Console
 

@@ -251,4 +251,25 @@ The repository must support safe continuation by a different coding agent (Claud
 - an explicit handover protocol (`docs/HANDOVER_PROTOCOL.md`) covering both clean milestone handover and emergency/mid-task handover;
 - a reproducible environment/configuration (Docker/Postgres, `.env.example`, and canonical local commands, once M1 establishes them).
 
+
 The tool-neutral entry point for this is `AGENTS.md`, backed by `docs/ENGINEERING_RULES.md` (the detailed engineering agreement), `docs/HANDOVER_PROTOCOL.md`, and `docs/MILESTONE_COMPLETION_CHECKLIST.md`. Tool-specific files (`CLAUDE.md`) point to these rather than duplicating them, so the rules stay in one place regardless of which agent reads them.
+
+---
+
+## M1 Implementation Decisions
+
+## V2-D036 — M1 implements only `job_applications`; StageRun's provider/model fields are added in M2
+**Status:** APPROVED
+
+M1 implements exactly one Django app, `job_applications`, containing `JobApplication`, `StageRun`, and `JobApplicationStageState`. Every other app boundary documented in `docs/ARCHITECTURE.md` §3 (`job_intake`, `candidate_memory`, `candidate_context`, `candidate_matching`, `positioning_strategy`, `resume_builder`, `reviews`, `llm_provider`) is created when its own milestone begins, not pre-scaffolded now — pre-creating empty app shells ahead of their milestone would be exactly the kind of speculative abstraction the M1 task explicitly disallowed.
+
+This has one direct schema consequence: `docs/ARCHITECTURE.md` §5's full `StageRun` schema includes `provider` (FK → `llm_provider.LLMProvider`), `model` (FK → `llm_provider.LLMModel`), `reasoning_level`, `max_output_tokens`, and `temperature`. Since `llm_provider` does not exist in M1, `StageRun` cannot carry real foreign keys to it yet. M1's `StageRun` therefore implements only the provider-independent fields — `job_application`, `stage`, `status`, `input_snapshot`, `raw_structured_output`, `working_output`, `lock_version`, `created_at`, `approved_at`. M2 adds the five remaining fields via a new migration once `llm_provider.LLMProvider`/`LLMModel` exist.
+
+This is an implementation-sequencing note, not an architecture change: `docs/ARCHITECTURE.md` §5's target schema for `StageRun` is unchanged. A test in `job_applications/tests/test_models.py` (`test_stage_run_has_no_provider_model_fields_yet`) asserts the M1-scoped field set explicitly, so its removal in M2 is a deliberate, visible change rather than a silent one.
+
+## V2-D037 — M1 local Postgres database reset (stale V1 schema found and cleared)
+**Status:** APPROVED
+
+The local Docker-managed PostgreSQL volume (`cvbuilder_postgres_data`) already contained a full V1 (`main`-branch) schema and a `django_migrations` row for `("job_applications", "0001_initial")` from V1's different `JobApplication` model, left over from unrelated prior work against the same container name. Because Django matches migrations by `(app_label, name)` string only, this stale row caused `manage.py migrate` to silently report "no migrations to apply" without ever creating V2's actual `StageRun`/`JobApplicationStageState` tables.
+
+This local, disposable, non-source-controlled database was reset (`docker compose down -v` then `up -d`) before M1's real migration was applied, and re-verified against the resulting fresh schema. This is not a "discard another agent's work" situation (`docs/HANDOVER_PROTOCOL.md` §B) — the data was V1 experimentation state with no relationship to `cvbuild2`'s git history, not uncommitted work belonging to this branch or task. Recorded here so a future agent does not mistake a similarly-contaminated local database for a genuine V2 migration failure.

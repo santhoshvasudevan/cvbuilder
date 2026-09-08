@@ -5,56 +5,64 @@
 ## Repository State
 
 - Branch: `cvbuild2`
-- Last verified HEAD: `1b7c901` ("docs: finalize CVBuilder V2 architecture") — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
+- Last verified HEAD (parent of this commit): `9d91d19` ("docs: establish multi-agent engineering and handover protocol") — this document's own commit will move HEAD forward once committed; always re-verify with `git log -1 --oneline` rather than trusting this value.
 - Last verified date: 2026-09-08
 
 ## Current Milestone
 
-- Milestone: none active. Architecture closure (M0 / M0.2) is complete; M1 (Foundation and Reuse Audit implementation) has not started.
-- Status: ready to begin M1.
+- Milestone: M1 — Foundation and Reuse Audit.
+- Status: **COMPLETE.** M2 (LLM Control Plane) has not started.
 
 ## Verified Working
 
-- The nine canonical planning documents (`requirements.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`, `docs/RESUME_OUTPUT_STRUCTURE.md`, `CLAUDE.md`) plus `docs/V2_REUSE_AUDIT.md` and `docs/QUALITY_BENCHMARK.md` are mutually consistent as of the last verification — checked by direct cross-reading, not assumed.
-- The four candidate source documents referenced by `bootstrap_candidate_memory` on `main` (`docs/AC/AC-MEMORY_PROFILE.md`, `AC-profile_english.md`, `AC-profile_german.md`, `docs/CANDIDATE_MEMORY_SNAPSHOT.md`) are present and intact on `cvbuild2`.
+- Django project foundation (`config/`), one Django app (`job_applications`), PostgreSQL-only configuration, admin, structured logging, and a minimal home view/template all run for real — not just import-checked.
+- `JobApplication`, `StageRun`, `JobApplicationStageState` models exist, migrated (`job_applications/migrations/0001_initial.py`) against a real local PostgreSQL 16 instance, and match the closed M0.2 design (`docs/ARCHITECTURE.md` §5) except `StageRun`'s provider/model fields, deferred to M2 (V2-D036).
+- Canonical stage vocabulary (`StageIdentifier`) implemented exactly as `docs/ARCHITECTURE.md` §5 defines it; a test asserts no V1 stage identifiers (`AC_NORMALIZE`/`AC_RANK`/`AC_MATCH`) exist anywhere in source.
+- 42/42 automated tests pass (`make test`). `manage.py check` clean. `ruff check .` clean. `makemigrations --check --dry-run` reports no drift. `detect-secrets scan` reports zero findings. `.env` confirmed untracked by Git (tested, not just gitignored).
+- Every documented `Makefile` target was individually run and confirmed working from the actual shell in this session: `install`, `check`, `test`, `lint`, `migrate`, `makemigrations`, `migrations-check`, `secrets`, `verify`, `up`, `down`, `db-wait`, `start` (including a live HTTP request against the running dev server — home `200`, admin `302` unauthenticated), `stop`, `status`. `superuser` and `run` are thin, direct wrappers around standard Django management commands and were not separately exercised beyond confirming they invoke real commands.
+- Infra files (`docker-compose.yml`, `.env.example`, `.gitignore`, `Makefile`, `pyproject.toml`, `requirements.txt`, `templates/base.html`, `manage.py`, `config/asgi.py`/`wsgi.py`) were cherry-picked file-by-file from `main` per `docs/V2_REUSE_AUDIT.md`'s REUSE_AS_IS classification, not bulk-merged. `config/settings.py`/`urls.py` were adapted (REUSE_WITH_ADAPTATION) to M1's actual single-app scope.
 
 ## In Progress
 
-- Nothing. No application code, Django project, or migrations exist yet on `cvbuild2`.
+- Nothing. M1 is complete; M2 has not been started.
 
 ## Known Issues / Risks
 
-- No Django project, `Makefile`, or `.env.example` exists yet on `cvbuild2` — establishing them is M1 scope (see `docs/IMPLEMENTATION_PLAN.md` M1, `docs/V2_REUSE_AUDIT.md` §3 item 1). Do not assume any local dev command exists until M1 creates it.
-- Two non-blocking implementation choices remain open, to be settled during their own milestones rather than now: whether `ExperienceSlot` metadata is copied at creation or resolved by reference to its source engagement record (M3A); exact stored enum naming for the AJ requirement taxonomy (M4).
-- The `CandidateContextSnapshot` (M3B) and APS (M5) components have zero precedent on `main` and are the highest-uncertainty items in the plan — see `docs/V2_REUSE_AUDIT.md` §4.
+- **Local dev database reset during M1 (V2-D037):** the local Postgres Docker volume already contained a full stale V1 schema and a colliding `("job_applications", "0001_initial")` migration record from unrelated prior work against the same container name. It was reset (`docker compose down -v` + fresh `up`) before verification. This is expected, disposable local state, not source-controlled data — see V2-D037 for the full explanation. A different agent picking up this repository should not be surprised if the local Postgres volume looks "new"; that is intentional.
+- `requirements.txt`/`requirements-dev.txt` intentionally omit `pydantic`, `requests`, and `readability-lxml` (present in `main`'s equivalent files) because M1's actual code does not import them. They will be added when the milestone that needs them (M4 for URL fetch/`readability-lxml`, M2/M4+ for `pydantic` schemas, `requests` per adapter) begins — adding them now would be an unused dependency, not a needed one.
+- Two non-blocking implementation choices remain open from M0.2, to be settled during their own milestones: whether `ExperienceSlot` metadata is copied at creation or resolved by reference to its source engagement record (M3A); exact stored enum naming for the AJ requirement taxonomy (M4).
 
 ## Verification
 
-Commands used to verify the state above:
+Commands actually run this session, in order, with results:
 
 ```
-git branch --show-current
-git log -5 --oneline --decorate
-git status --short
+make check                          -> System check identified no issues (0 silenced).
+make migrations-check               -> No changes detected.
+make migrate                        -> applied cleanly to a fresh local PostgreSQL 16 database.
+make test                           -> Ran 42 tests in ~0.5s. OK.
+make lint                           -> All checks passed!
+make secrets                        -> detect-secrets scan: "results": {} (zero findings).
+git diff --check --cached           -> clean, no output.
 ```
 
-No automated test suite exists yet — no Django app has been created on `cvbuild2`. Once M1 exists, this section should record the actual test command(s) run and their results (pass/fail counts), not just "tests pass."
+Plus a live-server smoke test (`make start`, `curl` against `/` and `/admin/`, `make stop`) — see "Verified Working" above for results.
 
 ## Last Completed Handover
 
-- Outgoing: Claude Code, this session — architecture closure (M0.2 initial pass + follow-up pass) and multi-agent handover protocol establishment (`AGENTS.md`, `docs/ENGINEERING_RULES.md`, `docs/HANDOVER_PROTOCOL.md`, `docs/MILESTONE_COMPLETION_CHECKLIST.md`, this file).
+- Outgoing: Claude Code, this session — M1 (Foundation and Reuse Audit) implementation.
 - This is informational only — do not make correctness dependent on which tool wrote this. Verify the repository directly per `docs/HANDOVER_PROTOCOL.md` §B regardless of who the outgoing agent was.
 
 ## Next Recommended Action
 
-1. Begin M1 (Foundation and Reuse Audit implementation) per `docs/IMPLEMENTATION_PLAN.md` and the closed `JobApplication`/`StageRun`/`JobApplicationStageState` design in `docs/ARCHITECTURE.md` §5.
-2. Cherry-pick `main` files per `docs/V2_REUSE_AUDIT.md`'s recommended reuse order, file-by-file with tests, never by bulk merge.
-3. Use `docs/MILESTONE_COMPLETION_CHECKLIST.md` before declaring M1 complete.
+1. Begin M2 (LLM Control Plane and Operator Call Console) per `docs/IMPLEMENTATION_PLAN.md` — build/reuse `llm_provider` (provider registry, model registry with `supported_reasoning_levels` as canonical per V2-D034, `StageModelAssignment`, `LLMCallLog` referencing `job_applications.StageRun`, adapters, retry/error handling).
+2. Once `llm_provider.LLMProvider`/`LLMModel` exist, add the deferred `StageRun` fields (`provider`, `model`, `reasoning_level`, `max_output_tokens`, `temperature`) via a new migration (V2-D036).
+3. Use `docs/MILESTONE_COMPLETION_CHECKLIST.md` before declaring M2 complete.
 
 ## Working Tree Expectations
 
-Clean except for local, intentionally-untracked files that must never be committed: `.env`, `.venv/`, `.claude/`, `.DS_Store`. If `git status --short` shows anything else, investigate before proceeding — see `docs/HANDOVER_PROTOCOL.md` §B.
+Clean except for local, intentionally-untracked files that must never be committed: `.env`, `.venv/`, `.claude/`, `.DS_Store`, `.ruff_cache/`. If `git status --short` shows anything else, investigate before proceeding — see `docs/HANDOVER_PROTOCOL.md` §B.
 
 ## Full Decision and Reuse History
 
-This file intentionally does not restate project history. For the full list of closed architectural decisions, see `docs/DECISIONS.md` (as of this update: V2-D001 through V2-D035). For the full `main`-branch reuse classification, see `docs/V2_REUSE_AUDIT.md`.
+This file intentionally does not restate project history. For the full list of closed architectural decisions, see `docs/DECISIONS.md` (as of this update: V2-D001 through V2-D037). For the full `main`-branch reuse classification, see `docs/V2_REUSE_AUDIT.md`.
