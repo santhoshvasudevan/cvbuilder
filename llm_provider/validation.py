@@ -12,6 +12,7 @@ substitutes a different provider or model.
 
 from __future__ import annotations
 
+import math
 import os
 
 from .errors import (
@@ -20,10 +21,13 @@ from .errors import (
     MissingCredentialConfigurationError,
     MissingCredentialValueError,
     StageBudgetExceededError,
+    TemperatureOutOfRangeError,
+    TemperatureReasoningConflictError,
     UnsupportedReasoningLevelError,
     UnsupportedStructuredOutputError,
+    UnsupportedTemperatureError,
 )
-from .models import LLMModel, LLMProvider, ReasoningLevel
+from .models import MAX_TEMPERATURE, MIN_TEMPERATURE, LLMModel, LLMProvider, ReasoningLevel
 
 
 def validate_provider_active(provider: LLMProvider) -> None:
@@ -74,12 +78,32 @@ def validate_output_budget(model: LLMModel, requested_max_output_tokens: int | N
         raise StageBudgetExceededError(str(model), requested_max_output_tokens, model.max_output_tokens)
 
 
+def validate_temperature_supported(
+    model: LLMModel, temperature: float | None, reasoning_level: str = ReasoningLevel.NONE
+) -> None:
+    """V2-D042: reject before HTTP when `temperature` is set but the model doesn't support it,
+    is combined with a reasoning level the model forbids it with, or falls outside the canonical
+    permitted numeric range. `None` (unset) always passes -- a model that doesn't support
+    temperature is still callable as long as the caller doesn't request one.
+    """
+    if temperature is None:
+        return
+    if not math.isfinite(temperature) or not (MIN_TEMPERATURE <= temperature <= MAX_TEMPERATURE):
+        raise TemperatureOutOfRangeError(temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)
+    if not model.supports_temperature:
+        raise UnsupportedTemperatureError(str(model))
+    reasoning_active = reasoning_level and reasoning_level != ReasoningLevel.NONE
+    if reasoning_active and not model.supports_temperature_with_reasoning:
+        raise TemperatureReasoningConflictError(str(model), reasoning_level)
+
+
 def validate_call_configuration(
     *,
     provider: LLMProvider,
     model: LLMModel,
     reasoning_level: str = ReasoningLevel.NONE,
     max_output_tokens: int | None = None,
+    temperature: float | None = None,
     require_structured_output: bool = True,
 ) -> None:
     """Run every applicable pre-flight check, in a fixed order, before any HTTP call is
@@ -93,3 +117,4 @@ def validate_call_configuration(
     validate_structured_output_supported(model, required=require_structured_output)
     validate_reasoning_level(model, reasoning_level)
     validate_output_budget(model, max_output_tokens)
+    validate_temperature_supported(model, temperature, reasoning_level)

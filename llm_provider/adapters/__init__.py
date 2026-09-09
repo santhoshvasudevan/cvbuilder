@@ -44,6 +44,7 @@ def get_adapter_for_stage(stage: str, *, stage_run=None) -> BaseLLMAdapter:
         model=llm_model,
         reasoning_level=assignment.default_reasoning_level,
         max_output_tokens=assignment.default_max_output_tokens,
+        temperature=assignment.default_temperature,
     )
     adapter_cls = ADAPTER_CLASSES[llm_model.provider.adapter_type]
     return adapter_cls(llm_model, stage_run=stage_run)

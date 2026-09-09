@@ -118,11 +118,11 @@ class OpenAIAdapter(BaseLLMAdapter):
             )
         except requests.Timeout as exc:
             return NormalizedLLMResult(
-                error=NormalizedLLMError.from_exception(LLMErrorCategory.TIMEOUT, exc)
+                error=NormalizedLLMError.from_network_exception(LLMErrorCategory.TIMEOUT, exc)
             )
         except requests.RequestException as exc:
             return NormalizedLLMResult(
-                error=NormalizedLLMError.from_exception(LLMErrorCategory.PROVIDER_INTERNAL, exc)
+                error=NormalizedLLMError.from_network_exception(LLMErrorCategory.PROVIDER_INTERNAL, exc)
             )
 
         return parse_openai_style_chat_completion(response)

@@ -52,6 +52,7 @@ class BaseLLMAdapter(ABC):
                 model=self.llm_model,
                 reasoning_level=request.reasoning_level,
                 max_output_tokens=request.max_output_tokens,
+                temperature=request.temperature,
             )
         except ConfigurationError as exc:
             result = NormalizedLLMResult(

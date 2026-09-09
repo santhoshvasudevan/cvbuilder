@@ -45,6 +45,17 @@ class LLMModelTests(TestCase):
         self.assertEqual(model.supported_reasoning_levels, [ReasoningLevel.NONE])
         self.assertFalse(model.supports_reasoning)
 
+    def test_temperature_capability_fields_default_to_true(self):
+        # LLMModel.objects.create bypasses the factory's explicit defaults -- assert the model
+        # field defaults themselves (V2-D042), not just what the factory happens to pass.
+        model = LLMModel.objects.create(
+            provider=self.provider,
+            model_identifier="defaults-check",
+            supported_reasoning_levels=[ReasoningLevel.NONE],
+        )
+        self.assertTrue(model.supports_temperature)
+        self.assertTrue(model.supports_temperature_with_reasoning)
+
     def test_supports_reasoning_is_derived_from_levels(self):
         model = make_model(
             self.provider, supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.HIGH]
@@ -150,6 +161,89 @@ class StageModelAssignmentTests(TestCase):
 
         with self.assertRaises(ProtectedError):
             self.model.delete()
+
+    def test_clean_allows_valid_temperature(self):
+        temperature_model = make_model(
+            self.provider, model_identifier="temp-ok", supports_temperature=True
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.NONE,
+            default_temperature=0.7,
+        )
+        assignment.full_clean()  # must not raise
+
+    def test_clean_rejects_temperature_when_model_does_not_support_it(self):
+        temperature_model = make_model(
+            self.provider, model_identifier="temp-off", supports_temperature=False
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.NONE,
+            default_temperature=0.7,
+        )
+        with self.assertRaises(ValidationError):
+            assignment.full_clean()
+
+    def test_clean_rejects_temperature_combined_with_forbidden_reasoning(self):
+        temperature_model = make_model(
+            self.provider,
+            model_identifier="temp-no-reasoning-combo",
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.MEDIUM],
+            supports_temperature=True,
+            supports_temperature_with_reasoning=False,
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.MEDIUM,
+            default_temperature=0.7,
+        )
+        with self.assertRaises(ValidationError):
+            assignment.full_clean()
+
+    def test_clean_allows_temperature_combined_with_permitted_reasoning(self):
+        temperature_model = make_model(
+            self.provider,
+            model_identifier="temp-reasoning-combo-ok",
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.MEDIUM],
+            supports_temperature=True,
+            supports_temperature_with_reasoning=True,
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.MEDIUM,
+            default_temperature=0.7,
+        )
+        assignment.full_clean()  # must not raise
+
+    def test_clean_rejects_out_of_range_temperature(self):
+        temperature_model = make_model(
+            self.provider, model_identifier="temp-range", supports_temperature=True
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.NONE,
+            default_temperature=2.5,
+        )
+        with self.assertRaises(ValidationError):
+            assignment.full_clean()
+
+    def test_clean_allows_null_temperature_regardless_of_capability(self):
+        temperature_model = make_model(
+            self.provider, model_identifier="temp-null", supports_temperature=False
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=temperature_model,
+            default_reasoning_level=ReasoningLevel.NONE,
+            default_temperature=None,
+        )
+        assignment.full_clean()  # must not raise
 
 
 class LLMCallLogTests(TestCase):

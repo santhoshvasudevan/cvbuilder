@@ -14,10 +14,13 @@ from llm_provider.errors import (
     MissingCredentialConfigurationError,
     MissingCredentialValueError,
     StageBudgetExceededError,
+    TemperatureOutOfRangeError,
+    TemperatureReasoningConflictError,
     UnsupportedReasoningLevelError,
     UnsupportedStructuredOutputError,
+    UnsupportedTemperatureError,
 )
-from llm_provider.models import ReasoningLevel
+from llm_provider.models import MAX_TEMPERATURE, MIN_TEMPERATURE, ReasoningLevel
 from llm_provider.validation import (
     validate_call_configuration,
     validate_credential_configured,
@@ -27,6 +30,7 @@ from llm_provider.validation import (
     validate_provider_active,
     validate_reasoning_level,
     validate_structured_output_supported,
+    validate_temperature_supported,
 )
 
 from .factories import make_fake_provider, make_model, make_provider
@@ -121,6 +125,92 @@ class OutputBudgetTests(TestCase):
         validate_output_budget(model, 999_999)  # must not raise
 
 
+class TemperatureValidationTests(TestCase):
+    """V2-D042: temperature must fail before HTTP when unsupported, combined with a reasoning
+    level the model forbids it with, or out of the canonical numeric range."""
+
+    def test_temperature_supported_model_accepts_valid_temperature(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        validate_temperature_supported(model, 0.7)  # must not raise
+
+    def test_none_temperature_always_passes_regardless_of_capability(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=False)
+        validate_temperature_supported(model, None)  # must not raise
+
+    def test_unsupported_model_rejects_temperature(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=False)
+        with self.assertRaises(UnsupportedTemperatureError):
+            validate_temperature_supported(model, 0.7)
+
+    def test_reasoning_combination_rejected_when_model_forbids_it(self):
+        provider = make_provider()
+        model = make_model(
+            provider,
+            supports_temperature=True,
+            supports_temperature_with_reasoning=False,
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.HIGH],
+        )
+        with self.assertRaises(TemperatureReasoningConflictError):
+            validate_temperature_supported(model, 0.5, ReasoningLevel.HIGH)
+
+    def test_reasoning_combination_accepted_when_model_allows_it(self):
+        provider = make_provider()
+        model = make_model(
+            provider,
+            supports_temperature=True,
+            supports_temperature_with_reasoning=True,
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.HIGH],
+        )
+        validate_temperature_supported(model, 0.5, ReasoningLevel.HIGH)  # must not raise
+
+    def test_reasoning_none_never_triggers_the_reasoning_conflict_even_if_forbidden(self):
+        provider = make_provider()
+        model = make_model(
+            provider, supports_temperature=True, supports_temperature_with_reasoning=False
+        )
+        validate_temperature_supported(model, 0.5, ReasoningLevel.NONE)  # must not raise
+
+    def test_lower_bound_is_accepted(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        validate_temperature_supported(model, MIN_TEMPERATURE)  # must not raise
+
+    def test_upper_bound_is_accepted(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        validate_temperature_supported(model, MAX_TEMPERATURE)  # must not raise
+
+    def test_below_lower_bound_rejected_before_http(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        with self.assertRaises(TemperatureOutOfRangeError):
+            validate_temperature_supported(model, MIN_TEMPERATURE - 0.01)
+
+    def test_above_upper_bound_rejected_before_http(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        with self.assertRaises(TemperatureOutOfRangeError):
+            validate_temperature_supported(model, MAX_TEMPERATURE + 0.01)
+
+    def test_non_finite_values_rejected(self):
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=True)
+        for bad_value in (float("inf"), float("-inf"), float("nan")):
+            with self.assertRaises(TemperatureOutOfRangeError):
+                validate_temperature_supported(model, bad_value)
+
+    def test_range_checked_before_capability_check(self):
+        # An out-of-range value must fail as TemperatureOutOfRangeError even on a model that
+        # also doesn't support temperature at all -- the numeric-range check is unconditional.
+        provider = make_provider()
+        model = make_model(provider, supports_temperature=False)
+        with self.assertRaises(TemperatureOutOfRangeError):
+            validate_temperature_supported(model, MAX_TEMPERATURE + 5)
+
+
 class ValidateCallConfigurationOrderingTests(TestCase):
     """`validate_call_configuration` runs every check in a fixed order and fails on the first
     one that fails -- this class exercises that each individual failure class is reachable
@@ -157,6 +247,25 @@ class ValidateCallConfigurationOrderingTests(TestCase):
         validate_call_configuration(
             provider=provider, model=model, reasoning_level=ReasoningLevel.MEDIUM, max_output_tokens=1000
         )  # must not raise
+
+    def test_fully_valid_configuration_with_temperature_passes(self):
+        provider = make_fake_provider(enabled=True)
+        model = make_model(
+            provider,
+            enabled=True,
+            supports_structured_output=True,
+            supported_reasoning_levels=[ReasoningLevel.NONE],
+            supports_temperature=True,
+        )
+        validate_call_configuration(
+            provider=provider, model=model, reasoning_level=ReasoningLevel.NONE, temperature=0.7
+        )  # must not raise
+
+    def test_fails_on_unsupported_temperature_via_combined_entrypoint(self):
+        provider = make_fake_provider(enabled=True)
+        model = make_model(provider, enabled=True, supports_temperature=False)
+        with self.assertRaises(UnsupportedTemperatureError):
+            validate_call_configuration(provider=provider, model=model, temperature=0.5)
 
     def test_no_network_access_occurs_during_validation(self):
         # These functions must be pure/local -- assert no `requests` symbol is even imported by

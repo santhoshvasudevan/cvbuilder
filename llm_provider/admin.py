@@ -29,6 +29,8 @@ class LLMModelAdmin(admin.ModelAdmin):
         "supports_reasoning",
         "supported_reasoning_levels",
         "max_output_tokens",
+        "supports_temperature",
+        "supports_temperature_with_reasoning",
         "enabled",
     )
     list_filter = ("provider", "supports_structured_output", "enabled")

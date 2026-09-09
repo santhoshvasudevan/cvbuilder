@@ -9,6 +9,7 @@ correct without ever needing a real endpoint.
 import json
 from unittest import mock
 
+import requests
 from django.test import TestCase
 from pydantic import BaseModel
 
@@ -18,10 +19,16 @@ from llm_provider.adapters.nvidia import NvidiaNimAdapter
 from llm_provider.adapters.openai import OpenAIAdapter
 from llm_provider.adapters.openrouter import OpenRouterAdapter
 from llm_provider.errors import LLMErrorCategory
-from llm_provider.models import LLMProvider, ReasoningLevel
+from llm_provider.models import LLMCallLog, LLMProvider, ReasoningLevel
 from llm_provider.types import NormalizedLLMRequest
 
 from .factories import make_model, make_provider
+
+# A synthetic, obviously-fake credential -- never a real key of any kind. Used only to prove a
+# credential-shaped value cannot survive the Gemini adapter's error path (V2-D043, the audit
+# BLOCKER this file's new tests close). No test in this file may ever assert this value is
+# *present* anywhere in output -- every assertion checks it is absent.
+_SYNTHETIC_GEMINI_CREDENTIAL = "FAKE-SYNTHETIC-GEMINI-KEY-DO-NOT-USE-1234567890"
 
 
 class Answer(BaseModel):
@@ -212,6 +219,98 @@ class GeminiAdapterTests(TestCase):
         result = adapter.generate(request)
         self.assertTrue(result.is_error)
         mock_post.assert_not_called()
+
+    # -- V2-D043: closes the M2 audit BLOCKER (Gemini credential leak via URL) ------------------
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_credential_is_sent_via_documented_header_never_the_url(self, mock_post):
+        mock_post.return_value = _gemini_response()
+        adapter = GeminiAdapter(self.model)
+        adapter.generate(self.request)
+        args, kwargs = mock_post.call_args
+        url = args[0] if args else kwargs["url"]
+        # The request URL must contain neither the literal credential nor any "key=" query
+        # parameter at all -- the credential travels only via the x-goog-api-key header.
+        self.assertNotIn(_SYNTHETIC_GEMINI_CREDENTIAL, url)
+        self.assertNotIn("key=", url)
+        self.assertNotIn("?", url)
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], _SYNTHETIC_GEMINI_CREDENTIAL)
+
+    def _assert_credential_absent_everywhere(self, result, credential: str):
+        # 1. the raised/returned application error
+        self.assertTrue(result.is_error)
+        self.assertNotIn(credential, result.error.message)
+        # 2. the persisted LLMCallLog row -- every field, not just error_message, since the
+        #    admin's LLMCallLogAdmin.readonly_fields exposes the entire row for viewing.
+        log = LLMCallLog.objects.latest("created_at")
+        self.assertNotIn(credential, log.error_message)
+        for field in LLMCallLog._meta.fields:
+            value = getattr(log, field.name)
+            self.assertNotIn(credential, str(value))
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_connection_failure_with_credential_bearing_url_never_leaks_credential(self, mock_post):
+        # Worst-case simulation: even if a lower-level exception's own text embedded the full
+        # credential-bearing request URL (the exact shape `requests`/`urllib3` connection-level
+        # exceptions produce), the credential must not survive into any observable output. This
+        # is the defence-in-depth backstop (classify_network_exception + sanitize_error_message)
+        # working even if a future regression reintroduces a URL-embedded credential somewhere.
+        leaking_text = (
+            "HTTPSConnectionPool(host='generativelanguage.googleapis.com', port=443): Max "
+            "retries exceeded with url: /v1beta/models/"
+            f"{self.model.model_identifier}:generateContent?key={_SYNTHETIC_GEMINI_CREDENTIAL} "
+            '(Caused by NewConnectionError("Failed to establish a new connection"))'
+        )
+        mock_post.side_effect = requests.exceptions.ConnectionError(leaking_text)
+        adapter = GeminiAdapter(self.model, retry_policy=_no_retry_policy())
+        result = adapter.generate(self.request)
+        self._assert_credential_absent_everywhere(result, _SYNTHETIC_GEMINI_CREDENTIAL)
+        self.assertEqual(result.error.category, LLMErrorCategory.PROVIDER_INTERNAL)
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_dns_failure_never_leaks_credential(self, mock_post):
+        mock_post.side_effect = requests.exceptions.ConnectionError(
+            f"Failed to resolve 'generativelanguage.googleapis.com' while requesting "
+            f"?key={_SYNTHETIC_GEMINI_CREDENTIAL} ([Errno 8] nodename nor servname provided)"
+        )
+        adapter = GeminiAdapter(self.model, retry_policy=_no_retry_policy())
+        result = adapter.generate(self.request)
+        self._assert_credential_absent_everywhere(result, _SYNTHETIC_GEMINI_CREDENTIAL)
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_tls_failure_never_leaks_credential(self, mock_post):
+        mock_post.side_effect = requests.exceptions.SSLError(
+            f"SSL: CERTIFICATE_VERIFY_FAILED for url ...?key={_SYNTHETIC_GEMINI_CREDENTIAL}"
+        )
+        adapter = GeminiAdapter(self.model, retry_policy=_no_retry_policy())
+        result = adapter.generate(self.request)
+        self._assert_credential_absent_everywhere(result, _SYNTHETIC_GEMINI_CREDENTIAL)
+        self.assertEqual(result.error.category, LLMErrorCategory.PROVIDER_INTERNAL)
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_connection_refused_never_leaks_credential(self, mock_post):
+        mock_post.side_effect = requests.exceptions.ConnectionError(
+            f"Connection refused: could not connect, requested url had ?key={_SYNTHETIC_GEMINI_CREDENTIAL}"
+        )
+        adapter = GeminiAdapter(self.model, retry_policy=_no_retry_policy())
+        result = adapter.generate(self.request)
+        self._assert_credential_absent_everywhere(result, _SYNTHETIC_GEMINI_CREDENTIAL)
+
+    @mock.patch("llm_provider.adapters.gemini.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_GEMINI_KEY": _SYNTHETIC_GEMINI_CREDENTIAL})
+    def test_timeout_never_leaks_credential(self, mock_post):
+        mock_post.side_effect = requests.exceptions.ReadTimeout(
+            f"Read timed out. url=/v1beta/models/x:generateContent?key={_SYNTHETIC_GEMINI_CREDENTIAL}"
+        )
+        adapter = GeminiAdapter(self.model, retry_policy=_no_retry_policy())
+        result = adapter.generate(self.request)
+        self._assert_credential_absent_everywhere(result, _SYNTHETIC_GEMINI_CREDENTIAL)
+        self.assertEqual(result.error.category, LLMErrorCategory.TIMEOUT)
 
 
 class OpenRouterAdapterTests(TestCase):

@@ -13,6 +13,8 @@ they go through `StageModelAssignment` (registry-driven routing, LLM-001/LLM-006
 
 from __future__ import annotations
 
+import math
+
 from django.contrib.postgres.fields import ArrayField
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -20,6 +22,14 @@ from django.db import models
 from job_applications.models import LLM_CAPABLE_STAGES, StageIdentifier
 
 from .errors import LLMErrorCategory
+
+# Canonical permitted temperature range (V2-D042) -- matches the range OpenAI/Gemini/OpenRouter
+# all document for their `temperature` request parameter. A per-model ceiling narrower than this
+# (e.g. a model that only supports up to 1.0) is not currently represented -- only whether
+# temperature is supported at all (`LLMModel.supports_temperature`) and, independently, whether
+# it may be combined with a non-NONE reasoning level (`LLMModel.supports_temperature_with_reasoning`).
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
 
 # The LLM-capable subset of the canonical stage vocabulary (job_applications.StageIdentifier,
 # V2-D022) is the only set of stage values StageModelAssignment/LLMCallLog may ever store --
@@ -120,6 +130,22 @@ class LLMModel(models.Model):
             "return. A StageModelAssignment's default_max_output_tokens may never exceed this."
         ),
     )
+    supports_temperature = models.BooleanField(
+        default=True,
+        help_text=(
+            "Whether this model accepts a `temperature` request parameter at all (V2-D042). "
+            "Explicit model capability metadata, not inferred from model_identifier/provider."
+        ),
+    )
+    supports_temperature_with_reasoning = models.BooleanField(
+        default=True,
+        help_text=(
+            "Whether `temperature` may be combined with a non-NONE reasoning_level for this "
+            "model (V2-D042) -- some reasoning-tier models reject temperature entirely once "
+            "reasoning is enabled. Only consulted when supports_temperature is True and the "
+            "requested reasoning_level != NONE; irrelevant otherwise."
+        ),
+    )
     enabled = models.BooleanField(
         default=True,
         help_text=(
@@ -218,6 +244,24 @@ class StageModelAssignment(models.Model):
                     f"{self.default_max_output_tokens} exceeds {model} capability of "
                     f"{model.max_output_tokens}."
                 )
+            if self.default_temperature is not None:
+                if not math.isfinite(self.default_temperature) or not (
+                    MIN_TEMPERATURE <= self.default_temperature <= MAX_TEMPERATURE
+                ):
+                    errors["default_temperature"] = (
+                        f"{self.default_temperature} is outside the permitted range "
+                        f"[{MIN_TEMPERATURE}, {MAX_TEMPERATURE}]."
+                    )
+                elif not model.supports_temperature:
+                    errors["default_temperature"] = f"{model} does not support a temperature parameter."
+                elif (
+                    self.default_reasoning_level != ReasoningLevel.NONE
+                    and not model.supports_temperature_with_reasoning
+                ):
+                    errors["default_temperature"] = (
+                        f"{model} does not accept temperature combined with reasoning_level="
+                        f"'{self.default_reasoning_level}'."
+                    )
         if errors:
             raise ValidationError(errors)
 

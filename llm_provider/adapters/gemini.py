@@ -64,12 +64,17 @@ class GeminiAdapter(BaseLLMAdapter):
             generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
 
         base_url = provider.base_url or DEFAULT_BASE_URL
-        url = f"{base_url}/models/{self.llm_model.model_identifier}:generateContent?key={api_key}"
+        url = f"{base_url}/models/{self.llm_model.model_identifier}:generateContent"
 
         try:
             response = requests.post(
                 url,
-                headers={"Content-Type": "application/json"},
+                # V2-D043: the credential is sent via the documented `x-goog-api-key` header
+                # (https://ai.google.dev/gemini-api/docs/api-key), never the URL/query string --
+                # `requests`/`urllib3` connection-level exceptions stringify with the full request
+                # URL, so a URL-embedded credential is exception-visible in a way a header value
+                # never is.
+                headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
                 json={
                     "contents": _to_gemini_contents(request.messages),
                     "generationConfig": generation_config,
@@ -78,11 +83,11 @@ class GeminiAdapter(BaseLLMAdapter):
             )
         except requests.Timeout as exc:
             return NormalizedLLMResult(
-                error=NormalizedLLMError.from_exception(LLMErrorCategory.TIMEOUT, exc)
+                error=NormalizedLLMError.from_network_exception(LLMErrorCategory.TIMEOUT, exc)
             )
         except requests.RequestException as exc:
             return NormalizedLLMResult(
-                error=NormalizedLLMError.from_exception(LLMErrorCategory.PROVIDER_INTERNAL, exc)
+                error=NormalizedLLMError.from_network_exception(LLMErrorCategory.PROVIDER_INTERNAL, exc)
             )
 
         return self._parse_response(response)

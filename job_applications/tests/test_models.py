@@ -2,6 +2,7 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from job_applications.models import (
+    _REASONING_LEVEL_VALUES,
     LLM_CAPABLE_STAGES,
     JobApplication,
     JobApplicationStageState,
@@ -259,3 +260,23 @@ class DeletionBehaviorTests(TestCase):
         self.run.delete()
         self.other_state.refresh_from_db()
         self.assertEqual(self.other_state.current_stage_run_id, self.other_run.id)
+
+
+class ReasoningLevelVocabularyDriftTests(TestCase):
+    """V2-D041 documents `job_applications._REASONING_LEVEL_VALUES` as a deliberate,
+    dependency-cycle-avoiding echo of `llm_provider.models.ReasoningLevel`'s value set -- never a
+    second, independently-evolving definition. This regression test is the guard that claim
+    actually needs: without it, the two could silently drift (e.g. a new reasoning level added to
+    one but not the other) with no test catching it, since `StageRun.reasoning_level`'s `choices`
+    constraint and `llm_provider.validation.validate_reasoning_level`'s membership check are
+    otherwise never compared against each other.
+    """
+
+    def test_stage_run_reasoning_level_values_match_llm_provider_reasoning_level(self):
+        # Imported here, not at module level, so this file's own import order can never be the
+        # thing that (re)introduces the job_applications <-> llm_provider circular import
+        # _REASONING_LEVEL_VALUES exists specifically to avoid (V2-D041) -- only this test needs
+        # llm_provider at all, and only at call time, once both apps are fully loaded.
+        from llm_provider.models import ReasoningLevel
+
+        self.assertEqual(set(_REASONING_LEVEL_VALUES), set(ReasoningLevel.values))
