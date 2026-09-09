@@ -45,16 +45,58 @@ class LLMModelTests(TestCase):
         self.assertEqual(model.supported_reasoning_levels, [ReasoningLevel.NONE])
         self.assertFalse(model.supports_reasoning)
 
-    def test_temperature_capability_fields_default_to_true(self):
+    def test_temperature_capability_fields_default_to_false(self):
         # LLMModel.objects.create bypasses the factory's explicit defaults -- assert the model
-        # field defaults themselves (V2-D042), not just what the factory happens to pass.
+        # field defaults themselves (V2-D044: fail-closed, explicit opt-in required), not just
+        # what the factory happens to pass.
         model = LLMModel.objects.create(
             provider=self.provider,
             model_identifier="defaults-check",
             supported_reasoning_levels=[ReasoningLevel.NONE],
         )
-        self.assertTrue(model.supports_temperature)
-        self.assertTrue(model.supports_temperature_with_reasoning)
+        self.assertFalse(model.supports_temperature)
+        self.assertFalse(model.supports_temperature_with_reasoning)
+
+    def test_clean_rejects_temperature_with_reasoning_when_temperature_itself_unsupported(self):
+        model = LLMModel(
+            provider=self.provider,
+            model_identifier="inconsistent-temp-flags",
+            supported_reasoning_levels=[ReasoningLevel.NONE],
+            supports_temperature=False,
+            supports_temperature_with_reasoning=True,
+        )
+        with self.assertRaises(ValidationError):
+            model.full_clean()
+
+    def test_clean_allows_both_temperature_flags_true(self):
+        model = LLMModel(
+            provider=self.provider,
+            model_identifier="both-temp-flags-true",
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.HIGH],
+            supports_temperature=True,
+            supports_temperature_with_reasoning=True,
+        )
+        model.full_clean()  # must not raise
+
+    def test_clean_allows_temperature_true_reasoning_combo_false(self):
+        model = LLMModel(
+            provider=self.provider,
+            model_identifier="temp-true-combo-false",
+            supported_reasoning_levels=[ReasoningLevel.NONE],
+            supports_temperature=True,
+            supports_temperature_with_reasoning=False,
+        )
+        model.full_clean()  # must not raise -- temperature alone is fine without the combo flag
+
+    def test_clean_allows_both_temperature_flags_false(self):
+        model = LLMModel(
+            provider=self.provider,
+            model_identifier="both-temp-flags-false",
+            supported_reasoning_levels=[ReasoningLevel.NONE],
+            supports_temperature=False,
+            supports_temperature_with_reasoning=False,
+        )
+        model.full_clean()  # must not raise -- the fail-closed default itself is valid
 
     def test_supports_reasoning_is_derived_from_levels(self):
         model = make_model(

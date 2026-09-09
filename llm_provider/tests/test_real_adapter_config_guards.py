@@ -140,6 +140,25 @@ class OpenAIAdapterTests(TestCase):
         result = adapter.generate(self.request)
         self.assertEqual(result.error.category, LLMErrorCategory.AUTH)
 
+    @mock.patch("llm_provider.adapters.openai.requests.post")
+    @mock.patch.dict("os.environ", {"TEST_OPENAI_KEY": "test-key-value"})
+    def test_invalid_temperature_never_reaches_http(self, mock_post):
+        # V2-D044: self.model uses the fail-closed factory default (supports_temperature=False)
+        # -- requesting a temperature on it must fail before any HTTP call, with no retry and no
+        # fallback to a different provider/model.
+        request = NormalizedLLMRequest(
+            stage=StageIdentifier.AJ_ANALYZE,
+            messages=[{"role": "user", "content": "hi"}],
+            output_schema=Answer,
+            temperature=0.7,
+        )
+        adapter = OpenAIAdapter(self.model)
+        result = adapter.generate(request)
+        self.assertTrue(result.is_error)
+        self.assertEqual(result.error.category, LLMErrorCategory.CONFIGURATION)
+        mock_post.assert_not_called()
+        self.assertEqual(result.retry_count, 0)
+
 
 class NvidiaNimAdapterTests(TestCase):
     def setUp(self):

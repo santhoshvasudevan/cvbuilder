@@ -6,6 +6,7 @@ they only exercise the pure validation functions directly.
 import os
 from unittest import mock
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import TestCase
 
 from llm_provider.errors import (
@@ -20,7 +21,7 @@ from llm_provider.errors import (
     UnsupportedStructuredOutputError,
     UnsupportedTemperatureError,
 )
-from llm_provider.models import MAX_TEMPERATURE, MIN_TEMPERATURE, ReasoningLevel
+from llm_provider.models import MAX_TEMPERATURE, MIN_TEMPERATURE, ReasoningLevel, StageModelAssignment
 from llm_provider.validation import (
     validate_call_configuration,
     validate_credential_configured,
@@ -201,6 +202,98 @@ class TemperatureValidationTests(TestCase):
         for bad_value in (float("inf"), float("-inf"), float("nan")):
             with self.assertRaises(TemperatureOutOfRangeError):
                 validate_temperature_supported(model, bad_value)
+
+
+class SaveTimeCallTimeParityTests(TestCase):
+    """V2-D044: StageModelAssignment.clean() (save time) and validate_temperature_supported
+    (call time, used by both the routing entrypoint and BaseLLMAdapter.generate() -- covering
+    runtime overrides) must agree on every configuration -- neither may accept what the other
+    rejects, or a runtime override could bypass what save-time validation would have caught."""
+
+    def _agree(
+        self, *, supports_temperature, supports_temperature_with_reasoning, reasoning_level, temperature
+    ):
+        provider = make_provider()
+        model = make_model(
+            provider,
+            supported_reasoning_levels=[ReasoningLevel.NONE, ReasoningLevel.HIGH],
+            supports_temperature=supports_temperature,
+            supports_temperature_with_reasoning=supports_temperature_with_reasoning,
+        )
+        assignment = StageModelAssignment(
+            stage="AJ_ANALYZE",
+            model=model,
+            default_reasoning_level=reasoning_level,
+            default_temperature=temperature,
+        )
+        save_time_raised = False
+        try:
+            assignment.full_clean()
+        except DjangoValidationError:
+            save_time_raised = True
+
+        call_time_raised = False
+        try:
+            validate_temperature_supported(model, temperature, reasoning_level)
+        except (TemperatureOutOfRangeError, UnsupportedTemperatureError, TemperatureReasoningConflictError):
+            call_time_raised = True
+
+        self.assertEqual(
+            save_time_raised,
+            call_time_raised,
+            f"save-time ({save_time_raised}) and call-time ({call_time_raised}) disagreed for "
+            f"supports_temperature={supports_temperature}, "
+            f"supports_temperature_with_reasoning={supports_temperature_with_reasoning}, "
+            f"reasoning_level={reasoning_level}, temperature={temperature}",
+        )
+
+    def test_agree_when_unsupported(self):
+        self._agree(
+            supports_temperature=False,
+            supports_temperature_with_reasoning=False,
+            reasoning_level=ReasoningLevel.NONE,
+            temperature=0.5,
+        )
+
+    def test_agree_when_supported_and_valid(self):
+        self._agree(
+            supports_temperature=True,
+            supports_temperature_with_reasoning=False,
+            reasoning_level=ReasoningLevel.NONE,
+            temperature=0.5,
+        )
+
+    def test_agree_when_reasoning_combination_forbidden(self):
+        self._agree(
+            supports_temperature=True,
+            supports_temperature_with_reasoning=False,
+            reasoning_level=ReasoningLevel.HIGH,
+            temperature=0.5,
+        )
+
+    def test_agree_when_reasoning_combination_permitted(self):
+        self._agree(
+            supports_temperature=True,
+            supports_temperature_with_reasoning=True,
+            reasoning_level=ReasoningLevel.HIGH,
+            temperature=0.5,
+        )
+
+    def test_agree_when_out_of_range(self):
+        self._agree(
+            supports_temperature=True,
+            supports_temperature_with_reasoning=True,
+            reasoning_level=ReasoningLevel.NONE,
+            temperature=MAX_TEMPERATURE + 1,
+        )
+
+    def test_agree_when_temperature_none(self):
+        self._agree(
+            supports_temperature=False,
+            supports_temperature_with_reasoning=False,
+            reasoning_level=ReasoningLevel.NONE,
+            temperature=None,
+        )
 
     def test_range_checked_before_capability_check(self):
         # An out-of-range value must fail as TemperatureOutOfRangeError even on a model that

@@ -131,19 +131,22 @@ class LLMModel(models.Model):
         ),
     )
     supports_temperature = models.BooleanField(
-        default=True,
+        default=False,
         help_text=(
-            "Whether this model accepts a `temperature` request parameter at all (V2-D042). "
-            "Explicit model capability metadata, not inferred from model_identifier/provider."
+            "Whether this model accepts a `temperature` request parameter at all (V2-D042, "
+            "fail-closed default per V2-D044). Explicit model capability metadata, not inferred "
+            "from model_identifier/provider -- False until an operator explicitly opts a model "
+            "in, consistent with supports_structured_output/supported_reasoning_levels."
         ),
     )
     supports_temperature_with_reasoning = models.BooleanField(
-        default=True,
+        default=False,
         help_text=(
             "Whether `temperature` may be combined with a non-NONE reasoning_level for this "
-            "model (V2-D042) -- some reasoning-tier models reject temperature entirely once "
-            "reasoning is enabled. Only consulted when supports_temperature is True and the "
-            "requested reasoning_level != NONE; irrelevant otherwise."
+            "model (V2-D042, fail-closed default per V2-D044) -- some reasoning-tier models "
+            "reject temperature entirely once reasoning is enabled. Meaningless (and rejected by "
+            "clean()) when supports_temperature is False; only consulted when supports_temperature "
+            "is True and the requested reasoning_level != NONE."
         ),
     )
     enabled = models.BooleanField(
@@ -188,6 +191,15 @@ class LLMModel(models.Model):
                     "supported_reasoning_levels": (
                         "Must always include NONE -- every model can be called with reasoning "
                         "explicitly disabled (V2-D034)."
+                    )
+                }
+            )
+        if self.supports_temperature_with_reasoning and not self.supports_temperature:
+            raise ValidationError(
+                {
+                    "supports_temperature_with_reasoning": (
+                        "Cannot be True while supports_temperature is False -- "
+                        "temperature-with-reasoning implies temperature support (V2-D044)."
                     )
                 }
             )

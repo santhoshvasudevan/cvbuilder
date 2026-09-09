@@ -40,8 +40,8 @@ def make_model(
     supports_structured_output: bool = True,
     supported_reasoning_levels: list[str] | None = None,
     max_output_tokens: int | None = 4096,
-    supports_temperature: bool = True,
-    supports_temperature_with_reasoning: bool = True,
+    supports_temperature: bool = False,
+    supports_temperature_with_reasoning: bool = False,
     enabled: bool = True,
 ) -> LLMModel:
     return LLMModel.objects.create(
