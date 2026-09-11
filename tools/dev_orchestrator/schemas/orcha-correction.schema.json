@@ -3,5 +3,5 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["decision", "prompt", "finding_ids"],
-  "properties": {"decision": {"enum": ["CORRECT", "ESCALATE"]}, "prompt": {"type": "string"}, "finding_ids": {"type": "array", "items": {"type": "string"}}}
+  "properties": {"decision": {"type": "string", "enum": ["CORRECT", "ESCALATE"]}, "prompt": {"type": "string"}, "finding_ids": {"type": "array", "items": {"type": "string"}}}
 }

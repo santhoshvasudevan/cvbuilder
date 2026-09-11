@@ -5,7 +5,7 @@
   "required": ["run_id", "decision", "reason", "additional_allowed_paths", "constraints"],
   "properties": {
     "run_id": {"type": "string", "minLength": 1},
-    "decision": {"const": "APPROVED"},
+    "decision": {"type": "string", "const": "APPROVED"},
     "reason": {"type": "string", "minLength": 1},
     "additional_allowed_paths": {
       "type": "array",

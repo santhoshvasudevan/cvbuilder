@@ -86,7 +86,10 @@ TRANSITIONS = {
         RunStateName.BLOCKED,
         RunStateName.OPERATOR_ESCALATION,
     },
-    RunStateName.OPERATOR_ESCALATION: {RunStateName.ORCHA_DECISION},
+    RunStateName.OPERATOR_ESCALATION: {
+        RunStateName.ORCHA_DECISION,
+        RunStateName.AUDITING,
+    },
 }
 
 

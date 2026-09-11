@@ -74,6 +74,12 @@ command refuses missing/unregistered worktrees, mismatched run IDs, prohibited p
 paths, and any main-checkout change beyond a clean descendant commit limited to the orchestration
 repair implementation and these two orchestration documents.
 
+When the implementer evidence has already passed but the reviewer process itself fails before writing
+an audit handoff, repair and commit only the orchestration tooling, then run the same `resume` command.
+The controller will retry the audit only when both existing worktrees are registered, clean, and at the
+recorded result SHA, the evidence artifact exists, and the latest durable event is a reviewer failure.
+It does not rerun Cursor or create another implementation worktree.
+
 ## Non-live dry run and tests
 
 ```text

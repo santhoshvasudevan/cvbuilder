@@ -286,6 +286,57 @@ class OrchestrationController:
                 f"repository HEAD {boundary.head} differs from recorded controller HEAD {expected}"
             )
 
+    def _retry_reviewer_after_tooling_repair(
+        self,
+        state: RunState,
+        paths: RunPaths,
+        store: StateStore,
+        events: EventLog,
+    ) -> bool:
+        """Resume a failed reviewer invocation without repeating implementation validation."""
+        if not state.result_sha or state.pending_operator_decision_path:
+            return False
+        records = list(events.read())
+        if not records:
+            return False
+        last = records[-1]
+        if last.get("event") != "agent_failure" or last.get("role") != "REVIEWER":
+            return False
+        if (paths.handoffs / f"audit-{state.correction_cycles:02d}.json").exists():
+            return False
+        implementation = paths.worktrees / "implementation"
+        audit = paths.worktrees / f"audit-{state.correction_cycles:02d}"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if (
+            not implementation.exists()
+            or not audit.exists()
+            or implementation.resolve() not in registered
+            or audit.resolve() not in registered
+            or self.repository.head(implementation) != state.result_sha
+            or self.repository.head(audit) != state.result_sha
+            or self.repository.status(implementation)
+            or self.repository.status(audit)
+            or not paths.evidence.exists()
+        ):
+            raise ControllerError("reviewer retry prerequisites do not preserve the validated candidate")
+        boundary = self._verify_repository_boundary(require_clean=True)
+        if boundary.head == state.controller_sha:
+            raise ControllerError("reviewer retry requires a committed orchestration tooling repair")
+        self._verify_repair_checkout(state, boundary)
+        state.controller_sha = boundary.head
+        state.last_error = ""
+        state.transition(RunStateName.AUDITING)
+        store.save(state)
+        events.emit(
+            run_id=state.run_id,
+            role="REVIEWER",
+            state=state.state,
+            event="reviewer_recovery_retry",
+            message="Retrying independent audit after a bounded orchestration tooling repair",
+            result_sha=state.result_sha,
+        )
+        return True
+
     def record_operator_decision(self, run_id: str, value: dict) -> tuple[RunState, Path]:
         paths = self.paths(run_id)
         store = StateStore(paths.state)
@@ -544,6 +595,11 @@ class OrchestrationController:
         store = StateStore(paths.state)
         state = store.load()
         events = EventLog(paths.events)
+        if resume and state.state == RunStateName.OPERATOR_ESCALATION.value:
+            try:
+                self._retry_reviewer_after_tooling_repair(state, paths, store, events)
+            except (GitSafetyError, ControllerError, ValueError) as exc:
+                return self._fail_agent(state, store, events, "REVIEWER", str(exc))
         if (
             state.state == RunStateName.OPERATOR_ESCALATION.value
             and state.pending_operator_decision_path

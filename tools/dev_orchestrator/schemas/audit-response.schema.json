@@ -4,8 +4,8 @@
   "additionalProperties": false,
   "required": ["schema_version", "verdict", "base_sha", "candidate_sha", "findings", "test_commands", "summary", "audit_test_requested", "audit_test_commit_sha"],
   "properties": {
-    "schema_version": {"const": 1},
-    "verdict": {"enum": ["PASS", "CORRECTION_REQUIRED", "BLOCKED"]},
+    "schema_version": {"type": "integer", "const": 1},
+    "verdict": {"type": "string", "enum": ["PASS", "CORRECTION_REQUIRED", "BLOCKED"]},
     "base_sha": {"type": "string"},
     "candidate_sha": {"type": "string"},
     "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
@@ -16,6 +16,6 @@
   },
   "$defs": {
     "test_command": {"type": "object", "additionalProperties": false, "required": ["command", "exit_code"], "properties": {"command": {"type": "string"}, "exit_code": {"type": "integer"}}},
-    "finding": {"type": "object", "additionalProperties": false, "required": ["finding_id", "severity", "requirement_ids", "decision_ids", "location", "explanation", "required_correction", "test_added", "test_commit_sha", "status"], "properties": {"finding_id": {"type": "string"}, "severity": {"enum": ["BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"]}, "requirement_ids": {"type": "array", "items": {"type": "string"}}, "decision_ids": {"type": "array", "items": {"type": "string"}}, "location": {"type": "string"}, "explanation": {"type": "string"}, "required_correction": {"type": "string"}, "test_added": {"type": "boolean"}, "test_commit_sha": {"type": "string"}, "status": {"enum": ["OPEN", "CLOSED"]}}}
+    "finding": {"type": "object", "additionalProperties": false, "required": ["finding_id", "severity", "requirement_ids", "decision_ids", "location", "explanation", "required_correction", "test_added", "test_commit_sha", "status"], "properties": {"finding_id": {"type": "string"}, "severity": {"type": "string", "enum": ["BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"]}, "requirement_ids": {"type": "array", "items": {"type": "string"}}, "decision_ids": {"type": "array", "items": {"type": "string"}}, "location": {"type": "string"}, "explanation": {"type": "string"}, "required_correction": {"type": "string"}, "test_added": {"type": "boolean"}, "test_commit_sha": {"type": "string"}, "status": {"type": "string", "enum": ["OPEN", "CLOSED"]}}}
   }
 }

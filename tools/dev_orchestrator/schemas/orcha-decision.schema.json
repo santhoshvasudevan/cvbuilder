@@ -3,5 +3,5 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["decision", "answer"],
-  "properties": {"decision": {"enum": ["ANSWER", "BLOCKED", "ESCALATE"]}, "answer": {"type": "string"}}
+  "properties": {"decision": {"type": "string", "enum": ["ANSWER", "BLOCKED", "ESCALATE"]}, "answer": {"type": "string"}}
 }

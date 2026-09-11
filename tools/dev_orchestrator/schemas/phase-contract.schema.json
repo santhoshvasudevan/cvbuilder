@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "run_id", "milestone", "slice", "base_sha", "product_baseline_sha", "orchestration_tooling_sha", "future_implementation_base_sha", "objective", "requirement_ids", "governing_decision_ids", "dependencies", "in_scope", "out_of_scope", "allowed_paths", "prohibited_paths", "acceptance_criteria", "required_tests", "required_documentation_updates", "operator_gates"],
   "properties": {
-    "schema_version": {"const": 1}, "run_id": {"type": "string"}, "milestone": {"type": "string"}, "slice": {"type": "string"}, "base_sha": {"type": "string"}, "product_baseline_sha": {"type": "string"}, "orchestration_tooling_sha": {"type": "string"}, "future_implementation_base_sha": {"type": "string"}, "objective": {"type": "string"},
+    "schema_version": {"type": "integer", "const": 1}, "run_id": {"type": "string"}, "milestone": {"type": "string"}, "slice": {"type": "string"}, "base_sha": {"type": "string"}, "product_baseline_sha": {"type": "string"}, "orchestration_tooling_sha": {"type": "string"}, "future_implementation_base_sha": {"type": "string"}, "objective": {"type": "string"},
     "requirement_ids": {"$ref": "#/$defs/strings"}, "governing_decision_ids": {"$ref": "#/$defs/strings"}, "dependencies": {"$ref": "#/$defs/strings"}, "in_scope": {"$ref": "#/$defs/strings"}, "out_of_scope": {"$ref": "#/$defs/strings"}, "allowed_paths": {"$ref": "#/$defs/strings"}, "prohibited_paths": {"$ref": "#/$defs/strings"}, "acceptance_criteria": {"$ref": "#/$defs/strings"}, "required_tests": {"$ref": "#/$defs/strings"}, "required_documentation_updates": {"$ref": "#/$defs/strings"}, "operator_gates": {"$ref": "#/$defs/strings"}
   },
   "$defs": {"strings": {"type": "array", "items": {"type": "string"}}}

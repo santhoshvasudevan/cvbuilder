@@ -54,6 +54,13 @@ verification failure, and remaining acceptance criteria; its exact correction pr
 under the run's `prompts/` directory with a SHA-256 identity before the saved implementer session is
 resumed in the existing worktree.
 
+If an independent reviewer invocation fails before producing an audit handoff, `resume` may retry the
+same audit only after a committed, bounded orchestration-tooling repair. The controller requires the
+validated implementation and audit worktrees to remain registered, clean, and pinned to the recorded
+result SHA; it reuses those worktrees and emits a durable `reviewer_recovery_retry` event. Codex output
+schemas declare explicit JSON types for every `const` and `enum` constraint so the reviewer API can
+validate them before the audit starts.
+
 The explicit states are `PREPARING`, `AWAITING_PHASE_APPROVAL`, `IMPLEMENTING`,
 `IMPLEMENTER_QUESTION`, `ORCHA_DECISION`, `VALIDATING_IMPLEMENTATION`, `AUDITING`,
 `CORRECTION_REQUIRED`, `ORCHA_CORRECTION_CONTRACT`, `CORRECTING`, `CLOSURE_REVIEW`, `COMPLETED`,

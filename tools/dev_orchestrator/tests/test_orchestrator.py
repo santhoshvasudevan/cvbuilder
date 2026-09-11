@@ -611,6 +611,69 @@ class ControllerTests(unittest.TestCase):
         events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
         self.assertIn("operator_recovery_retry", events)
 
+    def test_failed_reviewer_can_retry_same_audit_after_tooling_repair(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[], reviewer_responses=[audit()]
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION)
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        audit_worktree = paths.worktrees / "audit-00"
+        implementation.mkdir(parents=True)
+        audit_worktree.mkdir(parents=True)
+        controller.repository.registered_worktrees.extend([implementation, audit_worktree])  # type: ignore[attr-defined]
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        state.controller_sha = "c" * 40
+        state.last_error = "agent exited with code 1"
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.evidence, {"accepted": True, "result_sha": RESULT})
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="REVIEWER",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message=state.last_error,
+        )
+        repaired = "d" * 40
+        boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=repaired,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+
+        boundary_patch = mock.patch.object(
+            controller, "_verify_repository_boundary", return_value=boundary
+        )
+        head_patch = mock.patch.object(
+            controller.repository, "head", side_effect=lambda cwd=None: RESULT if cwd else repaired
+        )
+        with boundary_patch, head_patch:
+            resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(resumed.controller_sha, repaired)
+        self.assertEqual(adapters["reviewer"].requests[0].workdir, audit_worktree)
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("reviewer_recovery_retry", events)
+
+    def test_codex_output_schemas_give_const_and_enum_nodes_explicit_types(self):
+        def walk(value):
+            if isinstance(value, dict):
+                if "const" in value or "enum" in value:
+                    self.assertIn("type", value)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        for schema_path in (REPOSITORY_ROOT / "tools/dev_orchestrator/schemas").glob("*.json"):
+            walk(json.loads(schema_path.read_text(encoding="utf-8")))
+
 
 class ValidationAndSafetyTests(unittest.TestCase):
     def test_operator_decision_schema_is_strict(self):
