@@ -80,6 +80,11 @@ The controller will retry the audit only when both existing worktrees are regist
 recorded result SHA, the evidence artifact exists, and the latest durable event is a reviewer failure.
 It does not rerun Cursor or create another implementation worktree.
 
+An audit that returns `CORRECTION_REQUIRED` may include a failed reviewer-side command when the
+isolated audit worktree cannot access local credentials. The controller records that failure and the
+findings, independently reruns every successful reported command, and continues to Agent Orcha. A
+failed command with `PASS` remains an immediate escalation.
+
 ## Non-live dry run and tests
 
 ```text

@@ -1075,7 +1075,10 @@ class OrchestrationController:
                         "REVIEWER",
                         "audit response SHA range differs from deterministic candidate range",
                     )
-                if any(item["exit_code"] != 0 for item in latest_audit["test_commands"]):
+                failed_audit_commands = [
+                    item for item in latest_audit["test_commands"] if item["exit_code"] != 0
+                ]
+                if failed_audit_commands and latest_audit["verdict"] != "CORRECTION_REQUIRED":
                     return self._fail_agent(
                         state,
                         store,
@@ -1085,15 +1088,35 @@ class OrchestrationController:
                     )
                 try:
                     observed_audit_commands = self.evidence_collector.validate_test_commands(
-                        audit_worktree, latest_audit["test_commands"]
+                        audit_worktree,
+                        [
+                            item
+                            for item in latest_audit["test_commands"]
+                            if item["exit_code"] == 0
+                        ],
                     )
                 except EvidenceError as exc:
                     return self._fail_agent(state, store, events, "REVIEWER", str(exc))
                 _atomic_json(
                     paths.handoffs / f"audit-verification-{state.correction_cycles:02d}.json",
-                    {"commands": observed_audit_commands},
+                    {
+                        "commands": observed_audit_commands,
+                        "failed_reviewer_commands": failed_audit_commands,
+                        "implementation_evidence_path": str(paths.evidence),
+                    },
                 )
                 self._save_handoff(paths, f"audit-{state.correction_cycles:02d}.json", latest_audit)
+                if failed_audit_commands:
+                    events.emit(
+                        run_id=run_id,
+                        role="REVIEWER",
+                        state=state.state,
+                        event="reviewer_failed_test_recorded",
+                        message=(
+                            "Reviewer-side test failure retained with CORRECTION_REQUIRED findings; "
+                            "it cannot support a PASS verdict"
+                        ),
+                    )
                 events.emit(
                     run_id=run_id,
                     role="REVIEWER",

@@ -367,6 +367,48 @@ class ControllerTests(unittest.TestCase):
         state = controller.execute(self.prepare_run(controller))
         self.assertEqual(state.state, "OPERATOR_ESCALATION")
 
+    def test_failed_reviewer_command_preserves_correction_required_findings(self):
+        review = audit("CORRECTION_REQUIRED", [finding()])
+        review["test_commands"] = [
+            {"command": ".venv/bin/python manage.py test candidate_memory", "exit_code": 1},
+            {"command": "git diff --check", "exit_code": 0},
+        ]
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer(), implementer()],
+            reviewer_responses=[review, audit()],
+            orcha_responses=[
+                {
+                    "decision": "CORRECT",
+                    "prompt": "Correct AUD-001 without weakening tests.",
+                    "finding_ids": ["AUD-001"],
+                }
+            ],
+        )
+
+        state = controller.execute(self.prepare_run(controller))
+
+        self.assertEqual(state.state, "COMPLETED")
+        paths = controller.paths(state.run_id)
+        saved = json.loads((paths.handoffs / "audit-00.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["findings"][0]["finding_id"], "AUD-001")
+        verification = json.loads(
+            (paths.handoffs / "audit-verification-00.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(verification["failed_reviewer_commands"], review["test_commands"][:1])
+        self.assertIn("AUD-001", adapters["orcha"].requests[0].prompt)
+
+    def test_failed_reviewer_command_cannot_support_pass(self):
+        review = audit()
+        review["test_commands"] = [{"command": "make verify", "exit_code": 1}]
+        controller, _ = self.make_controller(
+            implementer_responses=[implementer()], reviewer_responses=[review]
+        )
+
+        state = controller.execute(self.prepare_run(controller))
+
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        self.assertEqual(state.last_error, "reviewer reported a failed deterministic test command")
+
     def test_nonzero_process_exit_escalates(self):
         failure = AdapterResult(status="FAILED", exit_code=7, error="agent exited with code 7")
         controller, _ = self.make_controller(implementer_responses=[failure], reviewer_responses=[])

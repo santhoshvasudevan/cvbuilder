@@ -72,6 +72,13 @@ movement, governance ambiguity, secrets, destructive migration ambiguity, or an 
 also requires the operator. Audit-test creation is isolated; transfer into the implementation branch
 remains an explicit operator gate.
 
+A reviewer-side failed test command can never support `PASS`. When the reviewer instead returns
+`CORRECTION_REQUIRED`, the controller preserves the failed command alongside the already-validated
+implementation evidence and routes the findings through the normal Agent Orcha correction cycle.
+This allows an isolated reviewer to report a genuine product finding even when its worktree cannot
+access local secrets such as database credentials; successful reviewer commands are still rerun by
+the controller.
+
 The controller maps structured role outcomes to the requested orchestration decisions: an answered
 question continues, an accepted audit correction produces `CORRECT`, successful closure produces
 `COMPLETE`, and unrecoverable or authority-expanding conditions produce `BLOCKED` or
