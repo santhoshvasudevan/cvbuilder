@@ -16,6 +16,8 @@ M1 — Foundation + reuse audit — COMPLETE
  |
 M2 — LLM control plane + operator call console — COMPLETE
  |
+DBO — External development-agent orchestration bootstrap — COMPLETE (not a product milestone)
+ |
 M3A — Candidate knowledge + StaticResumeProfile
  |
 M3B — CandidateContextSnapshot (five-bucket; own quality acceptance gate)
@@ -30,6 +32,32 @@ M7 — Integrated workflow/dashboard
  |
 M8 — Model qualification + token optimization
 ```
+
+## DBO — External Development-Agent Orchestration Bootstrap
+
+### Objective
+Create and deterministically verify the external supervision tooling before asking that tooling to
+implement product milestone M3A.
+
+### Scope
+- versioned strict role/model/limit/operator-gate configuration;
+- Codex, Cursor, disabled Claude, and deterministic fake adapters;
+- durable atomic state, sanitized events/logs, structured handoff contracts, Git evidence checks,
+  isolated implementation/audit worktrees, and observational tmux panes;
+- CLI doctor/plan/approve/run/status/attach/resume/abort operations;
+- a clean M3A phase contract derived only from the current `cvbuild2` documentation.
+
+### Out of scope
+- any M3A product model, migration, service, UI, or test;
+- any product-runtime orchestration change;
+- live/paid agent invocation, automatic merge, or push.
+
+### Acceptance — MET
+- deterministic fake-adapter and real temporary-Git tests cover all required success/failure paths;
+- configuration validation, non-live doctor, and M3A dry-run planning pass;
+- runtime directories are ignored and the versioned M3A contract validates;
+- M1/M2 remain green under the complete repository quality command;
+- M3A remains not started and every external mutation gate remains operator-owned.
 
 ## M0 — V2 Architecture Baseline
 

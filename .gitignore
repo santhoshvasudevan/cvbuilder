@@ -31,3 +31,7 @@ postgres_data/
 
 # Claude Code local session config
 .claude/
+
+# External development-orchestrator runtime (config/contracts remain versioned)
+.orchestration/runs/
+.orchestration/worktrees/

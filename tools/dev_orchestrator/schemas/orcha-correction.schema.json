@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "prompt", "finding_ids"],
+  "properties": {"decision": {"enum": ["CORRECT", "ESCALATE"]}, "prompt": {"type": "string"}, "finding_ids": {"type": "array", "items": {"type": "string"}}}
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "base_sha", "result_sha", "session_id", "requirements_addressed", "files_changed", "migrations", "tests_added", "test_commands", "documentation_updated", "known_gaps", "questions", "decisions_required", "summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"enum": ["IMPLEMENTED", "QUESTION", "BLOCKED", "FAILED"]},
+    "base_sha": {"type": "string"},
+    "result_sha": {"type": "string"},
+    "session_id": {"type": "string"},
+    "requirements_addressed": {"type": "array", "items": {"type": "string"}},
+    "files_changed": {"type": "array", "items": {"type": "string"}},
+    "migrations": {"type": "array", "items": {"type": "string"}},
+    "tests_added": {"type": "array", "items": {"type": "string"}},
+    "test_commands": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["command", "exit_code"], "properties": {"command": {"type": "string"}, "exit_code": {"type": "integer"}}}},
+    "documentation_updated": {"type": "array", "items": {"type": "string"}},
+    "known_gaps": {"type": "array", "items": {"type": "string"}},
+    "questions": {"type": "array", "items": {"type": "string"}},
+    "decisions_required": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "string"}
+  }
+}

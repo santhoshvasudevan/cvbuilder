@@ -1,0 +1,77 @@
+version: 1
+
+repository:
+  default_branch: cvbuild2
+  bootstrap_branch: buildwithAgent
+  bootstrap_base_sha: 437b179490b01697366ba70d75b6c72a6c83a7a4  # pragma: allowlist secret -- public Git commit
+  require_clean_base: true
+  automatic_merge: false
+
+agents:
+  orcha:
+    adapter: codex
+    binary: codex
+    model: gpt-5.6-terra
+    reasoning_effort: medium
+    permission_profile: read_only
+
+  orcha_closure:
+    adapter: codex
+    binary: codex
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    permission_profile: read_only
+
+  implementer:
+    adapter: cursor
+    binary: /Users/santhosh/.local/bin/cursor-agent
+    model: auto
+    permission_profile: implementation_worktree
+
+  reviewer:
+    adapter: codex
+    binary: codex
+    model: gpt-5.6-terra
+    reasoning_effort: high
+    permission_profile: audit_worktree
+
+  escalation_reviewer:
+    adapter: codex
+    binary: codex
+    model: gpt-5.6-sol
+    reasoning_effort: high
+    permission_profile: read_only
+
+  architecture_escalation:
+    adapter: codex
+    binary: codex
+    model: gpt-6-astra
+    reasoning_effort: high
+    permission_profile: read_only
+
+  claude_orchestrator:
+    adapter: claude
+    binary: claude
+    enabled: false
+    model: sonnet
+    permission_profile: read_only
+
+  claude_reviewer:
+    adapter: claude
+    binary: claude
+    enabled: false
+    model: sonnet
+    permission_profile: audit_worktree
+
+limits:
+  max_correction_cycles: 3
+  max_question_cycles: 5
+  max_agent_runtime_minutes: 45
+  heartbeat_seconds: 15
+  stop_on_repeated_finding: true
+
+operator_gates:
+  approve_phase_contract: true
+  approve_first_live_implementation: true
+  approve_audit_test_transfer: true
+  approve_merge: true

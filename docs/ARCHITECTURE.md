@@ -397,3 +397,17 @@ Never bulk-merge `main`.
 **Closed (V2-D035).** The repository must support safe continuation by a different coding agent without access to a prior agent's conversational context. This is a repository-native property, not something any single agent's working memory can provide: it is achieved through the canonical docs listed throughout this document, Git history, deterministic tests, `docs/CURRENT_STATE.md` (verified rather than trusted), and an explicit handover protocol.
 
 The tool-neutral entry point is `AGENTS.md`, backed by `docs/ENGINEERING_RULES.md` (the detailed engineering agreement — precedence rules, this architecture's invariants restated as a checklist, Git/database/testing/documentation/secrets rules), `docs/HANDOVER_PROTOCOL.md` (clean and emergency handover), and `docs/MILESTONE_COMPLETION_CHECKLIST.md`. Tool-specific files (e.g. `CLAUDE.md`) point to these rather than duplicating them.
+
+## 19. External Development-Agent Orchestration
+
+**Approved by V2-D045.** `tools/dev_orchestrator` is repository development tooling, not a Django
+product application and not the workflow described in §16. It coordinates isolated Codex/Cursor
+development sessions using local atomic JSON state and sanitized JSONL events under
+`.orchestration/`. Product runtime workflow truth remains PostgreSQL; the external controller does
+not import Django models, `llm_provider`, or any product orchestration service.
+
+The controller has no automatic merge/push/rebase/reset/delete/stash capability. Agent Implementer
+and Reviewer use distinct Git worktrees. Agent outputs are advisory until the controller has
+independently collected Git/test evidence and a fresh-context audit and closure review have passed;
+the operator retains every approval and merge gate. Full component and state-machine detail is in
+`docs/DEVELOPMENT_ORCHESTRATION.md`.

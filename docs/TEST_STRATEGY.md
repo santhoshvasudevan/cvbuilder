@@ -11,6 +11,23 @@ V2 testing has three distinct layers:
 
 Do not confuse these layers.
 
+### External development-orchestrator bootstrap
+
+`tools/dev_orchestrator/tests/` uses only the local Python toolchain (including declared PyYAML) and
+performs no real Codex, Cursor, Claude, provider, or network call. Fake adapters cover the successful
+implementation/audit/closure path,
+question/resume, correction/re-audit, correction limits, stable repeated findings, malformed JSON,
+non-zero exit, timeout, missing final output, read-only-to-isolated audit-test creation/gating, and
+interrupted Orcha/closure state. Temporary Git
+repositories exercise dirty-worktree, invalid-SHA/ancestry, unauthorized-path, requirements-change,
+failed-verification, and accepted-candidate evidence behavior. Further tests cover strict unknown
+roles/adapters/states/limits, recursive secret redaction, disabled Claude behavior, atomic state
+replacement, and tmux fixture rendering.
+
+This development tooling is outside the three product-quality layers below: its tests prove the
+supervisor, not resume-content quality or provider qualification. Live development-agent calls are
+explicit opt-in and are never part of `make verify`.
+
 ## 1. Deterministic Tests
 
 ### Foundation

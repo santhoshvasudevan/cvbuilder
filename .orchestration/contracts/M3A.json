@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "run_id": "TEMPLATE",
+  "milestone": "M3A",
+  "slice": "Candidate Knowledge and StaticResumeProfile",
+  "base_sha": "437b179490b01697366ba70d75b6c72a6c83a7a\u0034",
+  "product_baseline_sha": "437b179490b01697366ba70d75b6c72a6c83a7a\u0034",
+  "orchestration_tooling_sha": "",
+  "future_implementation_base_sha": "437b179490b01697366ba70d75b6c72a6c83a7a\u0034",
+  "objective": "Implement M3A candidate factual knowledge and the deterministic StaticResumeProfile foundation, including operator-controlled selection and ordering of exactly three active primary ExperienceSlots, without implementing M3B CandidateContextSnapshot or any later product milestone.",
+  "requirement_ids": [
+    "FACT-002",
+    "FACT-003",
+    "FACT-005",
+    "CTX-004",
+    "STATIC-001",
+    "STATIC-002",
+    "STATIC-003",
+    "LLM-012",
+    "requirements.md §6.1"
+  ],
+  "governing_decision_ids": [
+    "V2-D003",
+    "V2-D009",
+    "V2-D011",
+    "V2-D024",
+    "V2-D025",
+    "V2-D026",
+    "V2-D030",
+    "V2-D031",
+    "V2-D035",
+    "V2-D038"
+  ],
+  "dependencies": [
+    "M1 Django/PostgreSQL foundation verified at or before product baseline 437b179490b01697366ba70d75b6c72a6c83a7a\u0034",
+    "M2 LLM control plane verified at product baseline 437b179490b01697366ba70d75b6c72a6c83a7a\u0034",
+    "Operator fast-forwards cvbuild2 to the verified orchestration bootstrap before creating the live M3A implementation worktree",
+    "Candidate source precedence and non-reingestion constraints in docs/CANDIDATE_MEMORY_SNAPSHOT.md are preserved"
+  ],
+  "in_scope": [
+    "Create the candidate_memory Django app only; candidate_context remains a distinct later app",
+    "Persist candidate source documents, atomic MemoryClaims where useful, support/provenance, conflicts, revisions, profile data, operator corrections/preferences, career direction, target-role families, technology-depth constraints, and prior positioning history",
+    "Model CareerEngagement-equivalent source records and StaticResumeProfile",
+    "Choose copy-versus-reference storage for ExperienceSlot metadata as the smallest M3A implementation detail permitted by V2-D031, while preserving source linkage and static operator ownership",
+    "Model ExperienceSlot as a related sequenced collection, not three fixed columns",
+    "Implement operator-controlled engagement-to-slot creation/activation and explicit ordering flow",
+    "Enforce exactly three active primary slots as a deterministic hard-integrity prerequisite",
+    "Keep company, role title, location, and dates operator-owned and inaccessible to model generation",
+    "Implement source ingestion, validation, admin/server-rendered UI, migrations, and deterministic tests needed for M3A acceptance",
+    "Preserve immutable source provenance and surface unresolved candidate-data contradictions for operator resolution"
+  ],
+  "out_of_scope": [
+    "M3B CandidateContextSnapshot, five-bucket selection, token compaction, or editable job-specific context",
+    "AJ, AC, APS, AB, reviews, rendering, resume drafting, or later milestone functionality",
+    "Any model/provider call or change to the llm_provider architecture",
+    "Automatic choice of the three primary career engagements",
+    "LLM generation of company, title, location, dates, certifications, or languages",
+    "Any ExperienceSlot design that loses source provenance, permits automatic selection, or makes static metadata model-owned",
+    "Reuse of implementation from the abandoned M3A branch or its excluded commits",
+    "Merge, push, rebase, reset, force-update, branch deletion, worktree deletion, or stash"
+  ],
+  "allowed_paths": [
+    "candidate_memory/**",
+    "config/settings.py",
+    "config/urls.py",
+    "templates/**",
+    "Makefile",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pyproject.toml",
+    "docs/CURRENT_STATE.md",
+    "docs/IMPLEMENTATION_PLAN.md",
+    "docs/TEST_STRATEGY.md",
+    "docs/REQUIREMENT_TRACEABILITY.md"
+  ],
+  "prohibited_paths": [
+    "requirements.md",
+    "docs/DECISIONS.md",
+    "docs/ARCHITECTURE.md",
+    "llm_provider/**",
+    "job_applications/migrations/**",
+    "candidate_context/**",
+    "candidate_matching/**",
+    "positioning_strategy/**",
+    "resume_builder/**",
+    "reviews/**",
+    ".env",
+    ".orchestration/runs/**"
+  ],
+  "acceptance_criteria": [
+    "Candidate source documents ingest into structured, provenance-bearing claims without treating docs/CANDIDATE_MEMORY_SNAPSHOT.md as evidence or re-ingesting generated snapshots",
+    "Candidate profile, operator corrections/preferences, career direction, target role families, known gaps, development areas, technology depth, privacy/naming preferences, and previous positioning history are durably represented and available to downstream code",
+    "ExperienceSlot is a sequenced related collection and no fixed slot columns exist",
+    "The operator selects engagements and explicitly creates/activates/orders slots through a server-rendered UI or admin-backed workflow; no automatic selection path exists",
+    "A deterministic HARD_INTEGRITY validator rejects any state other than exactly three unique active primary slots with sequences 1, 2, and 3",
+    "Static company, title, location, and date metadata remains operator-owned and is never produced or overwritten by model output",
+    "Certifications and languages are stored as static profile content and are not LLM-generated",
+    "Unresolved source contradictions are preserved for operator review rather than silently resolved",
+    "Fresh PostgreSQL migrations apply from zero and have no model drift",
+    "No live provider call occurs and all M3A plus complete repository deterministic quality checks pass"
+  ],
+  "required_tests": [
+    ".venv/bin/python manage.py test candidate_memory",
+    "make migrations-check",
+    "make verify",
+    "make secrets",
+    "git diff --check",
+    "Fresh disposable PostgreSQL migration apply from zero, second-run no-op, and relevant unapply/reapply check",
+    "Source-ingestion fixture test covering provenance, idempotency, conflict preservation, and generated-snapshot exclusion",
+    "ExperienceSlot model/service/UI tests covering explicit selection, ordering, uniqueness, cardinality failure, and static-metadata ownership",
+    "Architecture/import test proving candidate_context and all M4+ apps were not introduced"
+  ],
+  "required_documentation_updates": [
+    "docs/CURRENT_STATE.md",
+    "docs/IMPLEMENTATION_PLAN.md",
+    "docs/TEST_STRATEGY.md",
+    "docs/REQUIREMENT_TRACEABILITY.md"
+  ],
+  "operator_gates": [
+    "Operator approves this phase contract before Cursor is launched",
+    "Operator approves the first live implementation launch",
+    "Operator approves transfer of any adversarial audit-test commit",
+    "Operator alone decides whether to fast-forward the accepted M3A result into cvbuild2"
+  ]
+}

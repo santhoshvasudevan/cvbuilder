@@ -20,6 +20,8 @@ The repository — Git history, canonical documentation, tests, and `docs/CURREN
    - `docs/TEST_STRATEGY.md`
    - `docs/REQUIREMENT_TRACEABILITY.md`
    - `docs/CURRENT_STATE.md`
+   - `docs/DEVELOPMENT_ORCHESTRATION.md`
+   - `docs/DEVELOPMENT_RUNBOOK.md`
    - `docs/RESUME_OUTPUT_STRUCTURE.md`
    - `docs/V2_REUSE_AUDIT.md` and `docs/QUALITY_BENCHMARK.md` (audit/history and methodology records — see below)
 
@@ -53,4 +55,8 @@ The repository — Git history, canonical documentation, tests, and `docs/CURREN
 
 ## Local development commands
 
-As of this writing, `cvbuild2` has no Django project, Makefile, or `.env.example` yet — establishing them is explicit M1 scope (see `docs/IMPLEMENTATION_PLAN.md` M1 and `docs/V2_REUSE_AUDIT.md` §3, reuse-order item 1). Do not invent commands that do not exist in the repository. Once M1 establishes them, the canonical commands for starting the database, running migrations, running tests, linting/checking, and running the server live in the root `Makefile` — read it directly (or run `make help` if it documents itself) rather than relying on any document's description of what the commands "should" be.
+M1 established the Django project, `.env.example`, and root `Makefile`; read the Makefile directly
+for the canonical application commands. The external development-agent controller is documented in
+`docs/DEVELOPMENT_ORCHESTRATION.md` and operated through `python -m tools.dev_orchestrator` as
+described in `docs/DEVELOPMENT_RUNBOOK.md`. Its local `.orchestration/runs/` and worktree directories
+are never product workflow state and must not be committed.

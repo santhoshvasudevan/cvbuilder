@@ -92,3 +92,10 @@ Notes: Recorded here as a placeholder so this case is not lost. Populate once (a
 ```
 
 This entry should be updated in place as real material becomes available — do not create a second "Amazon" entry.
+
+## 8. Development-Agent Audit Is Not Product Quality Evidence
+
+The external development orchestrator's reviewer and closure verdicts assess implementation
+correctness against an approved phase contract. They do not score resume content and cannot satisfy
+the benchmark dimensions or 90% target above. M3B/M5/M6/M8 quality gates still require the real
+candidate/job artifacts and human scoring defined in this document.

@@ -381,3 +381,30 @@ The Product Owner decision: **temperature capability must be fail-closed and exp
 4. A new adapter-level regression test (`OpenAIAdapterTests.test_invalid_temperature_never_reaches_http`) proves an invalid temperature configuration never reaches `requests.post`, is never retried, and is classified `CONFIGURATION` -- closing the second re-audit's MINOR-2 test-coverage gap. `SaveTimeCallTimeParityTests` (new) proves `StageModelAssignment.clean()` (save time) and `validate_temperature_supported` (call time, covering routing and runtime overrides identically) agree on every tested configuration.
 
 No model-slug/provider-name pattern matching was introduced anywhere in this fix. No provider/model fallback was introduced. Credential-leak protections (V2-D043) and the reasoning-vocabulary drift guard (V2-D041) are untouched by this correction and remain green.
+
+---
+
+## External Development Orchestration Bootstrap
+
+## V2-D045 — Development-agent orchestration is external repository tooling with operator-owned gates
+**Status:** APPROVED (Product Owner-directed bootstrap task)
+
+CVBuilder uses a small, explicit controller in `tools/dev_orchestrator` to supervise future
+development phases. This is development infrastructure only. It does not supersede V2-D015/D016 or
+`docs/ARCHITECTURE.md` §16: PostgreSQL and plain Django services remain the product runtime's durable
+workflow truth, while development runs use local, atomic JSON state and sanitized JSONL events under
+`.orchestration/`.
+
+The initial role mapping is Codex (Orcha and independent Reviewer), Cursor CLI (Implementer), and
+disabled Claude placeholders. Implementation and audit writes occur only in separate isolated Git
+worktrees. The controller may create those worktrees/branches but never merges, pushes, rebases,
+resets, force-updates, deletes, or stashes. Contract approval, first live implementation, audit-test
+transfer, and final merge remain operator decisions. Completion requires controller-collected Git and
+test evidence plus independently structured audit and closure responses; no agent summary is
+self-certifying.
+
+M3A remains unimplemented. Its first live implementation is deliberately deferred until this
+bootstrap has been independently accepted and `cvbuild2` has been operator-fast-forwarded to include
+the tooling. The versioned M3A contract preserves `437b179490b01697366ba70d75b6c72a6c83a7a4`
+as the product baseline and resolves the future implementation base to the orchestration-enabled HEAD
+when a run is planned.

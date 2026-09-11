@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_sha", "final_sha", "accepted_requirement_ids", "closed_findings", "unresolved_findings", "residual_risks", "deterministic_verification_results", "documentation_status", "merge_recommendation", "no_merge_or_push_confirmed", "summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "base_sha": {"type": "string"},
+    "final_sha": {"type": "string"},
+    "accepted_requirement_ids": {"type": "array", "items": {"type": "string"}},
+    "closed_findings": {"type": "array", "items": {"type": "string"}},
+    "unresolved_findings": {"type": "array", "items": {"type": "string"}},
+    "residual_risks": {"type": "array", "items": {"type": "string"}},
+    "deterministic_verification_results": {"type": "array", "items": {"type": "string"}},
+    "documentation_status": {"type": "string"},
+    "merge_recommendation": {"enum": ["MERGE", "DO_NOT_MERGE", "OPERATOR_REVIEW"]},
+    "no_merge_or_push_confirmed": {"const": true},
+    "summary": {"type": "string"}
+  }
+}
