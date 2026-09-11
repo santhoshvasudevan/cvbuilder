@@ -544,6 +544,27 @@ class OrchestrationController:
         store = StateStore(paths.state)
         state = store.load()
         events = EventLog(paths.events)
+        if (
+            state.state == RunStateName.OPERATOR_ESCALATION.value
+            and state.pending_operator_decision_path
+            and not state.pending_implementer_prompt_path
+        ):
+            try:
+                boundary = self._verify_repository_boundary(require_clean=True)
+                self._verify_repair_checkout(state, boundary)
+            except (GitSafetyError, ControllerError) as exc:
+                return self._fail_agent(state, store, events, "ORCHA", str(exc))
+            state.controller_sha = boundary.head
+            state.transition(RunStateName.ORCHA_DECISION)
+            store.save(state)
+            events.emit(
+                run_id=run_id,
+                role="ORCHA",
+                state=state.state,
+                event="operator_recovery_retry",
+                message="Retrying Agent Orcha for the already-recorded operator decision",
+                decision_path=state.pending_operator_decision_path,
+            )
         if RunStateName(state.state) in TERMINAL_STATES:
             return state
         if state.state == RunStateName.AWAITING_PHASE_APPROVAL.value:
@@ -790,6 +811,7 @@ class OrchestrationController:
                     required_prompt_markers = {
                         "job_applications/tests/test_settings.py",
                         "candidate_memory",
+                        "targeted",
                         "make verify",
                         "commit",
                         "handoff",
@@ -798,12 +820,18 @@ class OrchestrationController:
                         "QUESTION",
                         "merge",
                         "push",
+                        "rebase",
                         "reset",
-                        "main checkout",
                     }
                     missing_markers = {
                         marker for marker in required_prompt_markers if marker not in payload["prompt"]
                     }
+                    main_checkout_boundary = any(
+                        marker in payload["prompt"]
+                        for marker in ("main checkout", "main-checkout", "modify/check out `main`")
+                    )
+                    if not main_checkout_boundary:
+                        missing_markers.add("main checkout boundary")
                     if missing_markers:
                         return self._fail_agent(
                             state,

@@ -562,6 +562,55 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("orcha_correction_prompt_generated", events)
         self.assertIn("cursor_resume_started", events)
 
+    def test_pending_operator_decision_can_retry_orcha_after_escalation(self):
+        generated_prompt = (
+            "Preserve candidate_memory and update job_applications/tests/test_settings.py. Run the "
+            "targeted test and make verify, then commit and return a handoff using IMPLEMENTED, "
+            "BLOCKED, or QUESTION. "
+            "Never merge, push, rebase, reset, or modify/check out `main`."
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[audit()],
+            orcha_responses=[
+                {
+                    "decision": "CORRECT",
+                    "prompt": generated_prompt,
+                    "finding_ids": ["OPERATOR-DECISION-01"],
+                }
+            ],
+        )
+        run_id = self.prepare_run(
+            controller,
+            state_name=RunStateName.OPERATOR_ESCALATION,
+            session_id="persisted-session",
+        )
+        paths = controller.paths(run_id)
+        implementation_path = paths.worktrees / "implementation"
+        implementation_path.mkdir(parents=True)
+        controller.repository.registered_worktrees.append(implementation_path)  # type: ignore[attr-defined]
+        _atomic_json(paths.handoffs / "implementer-00.json", implementer("QUESTION"))
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "boundary advanced",
+            "additional_allowed_paths": ["job_applications/tests/test_settings.py"],
+            "constraints": ["Preserve unrelated assertions."],
+        }
+        _atomic_json(paths.handoffs / "operator-decision-01.json", decision)
+        state = StateStore(paths.state).load()
+        state.operator_decision_count = 1
+        state.pending_operator_decision_path = "handoffs/operator-decision-01.json"
+        state.recovered_handoff_path = "handoffs/implementer-00.json"
+        StateStore(paths.state).save(state)
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(adapters["implementer"].requests[0].prompt, generated_prompt)
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("operator_recovery_retry", events)
+
 
 class ValidationAndSafetyTests(unittest.TestCase):
     def test_operator_decision_schema_is_strict(self):
