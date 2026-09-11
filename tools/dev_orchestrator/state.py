@@ -55,6 +55,7 @@ TRANSITIONS = {
     RunStateName.IMPLEMENTER_QUESTION: {RunStateName.ORCHA_DECISION},
     RunStateName.ORCHA_DECISION: {
         RunStateName.IMPLEMENTING,
+        RunStateName.CORRECTING,
         RunStateName.BLOCKED,
         RunStateName.OPERATOR_ESCALATION,
     },
@@ -85,6 +86,7 @@ TRANSITIONS = {
         RunStateName.BLOCKED,
         RunStateName.OPERATOR_ESCALATION,
     },
+    RunStateName.OPERATOR_ESCALATION: {RunStateName.ORCHA_DECISION},
 }
 
 
@@ -103,6 +105,14 @@ class RunState:
     question_cycles: int = 0
     finding_occurrences: dict[str, int] = dataclasses.field(default_factory=dict)
     sessions: dict[str, str] = dataclasses.field(default_factory=dict)
+    controller_sha: str = ""
+    original_contract_sha256: str = ""
+    operator_decision_count: int = 0
+    pending_operator_decision_path: str = ""
+    recovered_handoff_path: str = ""
+    latest_orcha_prompt_path: str = ""
+    latest_orcha_prompt_sha256: str = ""
+    pending_implementer_prompt_path: str = ""
     last_error: str = ""
     created_at: str = dataclasses.field(default_factory=utc_now)
     updated_at: str = dataclasses.field(default_factory=utc_now)

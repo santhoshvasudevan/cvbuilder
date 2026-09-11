@@ -33,12 +33,26 @@ timeout, emit heartbeats, and terminate the process group on timeout. Agent subp
 small environment allowlist rather than inherited API keys or credentials. Codex flags are based on
 the installed `codex exec --help`; Cursor uses documented print + `stream-json` mode and session resume.
 
+For Cursor, the controller treats a complete schema-shaped `assistant` event as the authoritative
+handoff candidate and immediately serializes it into the invocation's durable `.final.json` file.
+A later presentation-oriented `result` event containing a truncation marker cannot overwrite that
+file. Malformed or genuinely incomplete assistant output remains rejected. Structured redaction is
+performed before NDJSON persistence so sanitization cannot corrupt the JSON framing.
+
 ## Durable state
 
 Each run contains `manifest.json`, atomic `state.json`, JSON/Markdown phase contracts,
 `context-manifest.json`, append-only `events.jsonl`, structured handoffs, deterministic evidence, and
 sanitized logs. State updates fsync a temporary file and atomically replace `state.json`; a crash cannot
 partially write a false `COMPLETED` state.
+
+An escalated run may receive a strictly validated, append-only operator decision under its existing
+`handoffs/` directory. The original phase contract is never rewritten. Additional allowed paths are
+applied only as an in-memory effective-contract amendment for that run. Agent Orcha receives the
+original contract, amendment, prior structured question, current worktree evidence, unresolved
+verification failure, and remaining acceptance criteria; its exact correction prompt is persisted
+under the run's `prompts/` directory with a SHA-256 identity before the saved implementer session is
+resumed in the existing worktree.
 
 The explicit states are `PREPARING`, `AWAITING_PHASE_APPROVAL`, `IMPLEMENTING`,
 `IMPLEMENTER_QUESTION`, `ORCHA_DECISION`, `VALIDATING_IMPLEMENTATION`, `AUDITING`,

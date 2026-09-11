@@ -37,7 +37,23 @@ class CursorAdapter(ProcessAdapter):
 
     def final_message_from_event(self, event: dict) -> str:
         event_type = str(event.get("type", "")).lower()
+        if event_type == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    texts = [
+                        item.get("text", "")
+                        for item in content
+                        if isinstance(item, dict)
+                        and item.get("type") == "text"
+                        and isinstance(item.get("text"), str)
+                    ]
+                    if texts:
+                        return "".join(texts)
         if event_type in {"result", "final_result"}:
             value = event.get("result") or event.get("text") or event.get("message")
-            return value if isinstance(value, str) else ""
+            if isinstance(value, str) and "[TRUNCATED]" not in value and "…[TRUNCATED]" not in value:
+                return value
+            return ""
         return super().final_message_from_event(event)

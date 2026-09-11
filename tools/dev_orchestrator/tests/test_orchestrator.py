@@ -11,8 +11,8 @@ from unittest import mock
 
 import yaml
 
-from tools.dev_orchestrator.adapters import AdapterResult, ClaudeAdapter, FakeAdapter
-from tools.dev_orchestrator.adapters.base import ProcessAdapter
+from tools.dev_orchestrator.adapters import AdapterResult, ClaudeAdapter, CursorAdapter, FakeAdapter
+from tools.dev_orchestrator.adapters.base import AdapterRequest, ProcessAdapter
 from tools.dev_orchestrator.config import ConfigError, load_config
 from tools.dev_orchestrator.controller import ControllerError, OrchestrationController, _atomic_json
 from tools.dev_orchestrator.events import EventLog
@@ -23,6 +23,7 @@ from tools.dev_orchestrator.schemas import (
     SchemaError,
     validate_audit_response,
     validate_implementer_response,
+    validate_operator_decision,
     validate_phase_contract,
 )
 from tools.dev_orchestrator.state import RunState, RunStateName, StateStore
@@ -128,6 +129,11 @@ def closure() -> dict:
 
 
 class FakeRepository:
+    registered_worktrees: list[Path]
+
+    def __init__(self):
+        self.registered_worktrees = []
+
     def verify_bootstrap_boundary(self, **kwargs) -> GitBoundary:
         del kwargs
         return GitBoundary(
@@ -159,6 +165,29 @@ class FakeRepository:
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
         return bool(ancestor and descendant)
+
+    def worktrees(self):
+        return [{"worktree": str(path)} for path in self.registered_worktrees]
+
+    def head(self, cwd=None):
+        del cwd
+        return BASE
+
+    def branch(self, cwd=None):
+        del cwd
+        return "agent/m3a-test/implementation"
+
+    def status(self, cwd=None):
+        del cwd
+        return []
+
+    def run(self, *args, cwd=None):
+        del cwd
+        if args[:2] == ("diff", "--stat"):
+            return "candidate_memory/models.py | 1 +"
+        if args[:2] == ("diff", "--name-only"):
+            return "tools/dev_orchestrator/controller.py"
+        return ""
 
 
 class AcceptEvidence:
@@ -459,8 +488,175 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(resumed.state, "COMPLETED")
         self.assertIn('"verdict": "PASS"', adapters["orcha_closure"].requests[0].prompt)
 
+    def test_operator_decision_recovers_same_run_and_resumes_saved_cursor_session(self):
+        generated_prompt = (
+            "Preserve completed candidate_memory work. Modify only "
+            "job_applications/tests/test_settings.py and original paths; run the targeted test and "
+            "make verify; fix causes without weakening tests; commit M3A; return a concise handoff. "
+            "Use IMPLEMENTED only on success, otherwise BLOCKED or QUESTION. Never merge, push, "
+            "rebase, reset, or modify the main checkout."
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[audit()],
+            orcha_responses=[
+                {
+                    "decision": "CORRECT",
+                    "prompt": generated_prompt,
+                    "finding_ids": ["OPERATOR-DECISION-01"],
+                }
+            ],
+        )
+        run_id = self.prepare_run(
+            controller,
+            state_name=RunStateName.OPERATOR_ESCALATION,
+            session_id="persisted-session",
+        )
+        paths = controller.paths(run_id)
+        implementation_path = paths.worktrees / "implementation"
+        implementation_path.mkdir(parents=True)
+        controller.repository.registered_worktrees.append(implementation_path)  # type: ignore[attr-defined]
+        question = implementer("QUESTION")
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": f"```json\n{json.dumps(question)}\n```"}]
+            },
+            "session_id": "persisted-session",
+        }
+        (paths.logs / "implementer-001.stdout.log").write_text(
+            json.dumps(assistant_event) + "\n"
+            + json.dumps({"type": "result", "result": "{…[TRUNCATED]"})
+            + "\n",
+            encoding="utf-8",
+        )
+        original_contract = paths.contract_json.read_bytes()
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "candidate_memory is now implemented",
+            "additional_allowed_paths": ["job_applications/tests/test_settings.py"],
+            "constraints": [
+                "Remove only candidate_memory from the not-yet-built boundary.",
+                "Preserve unrelated assertions.",
+            ],
+        }
+
+        recorded, decision_path = controller.record_operator_decision(run_id, decision)
+        self.assertEqual(recorded.state, "ORCHA_DECISION")
+        self.assertEqual(paths.contract_json.read_bytes(), original_contract)
+        self.assertEqual(json.loads(decision_path.read_text(encoding="utf-8")), decision)
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(resumed.correction_cycles, 1)
+        self.assertEqual(adapters["implementer"].requests[0].session_id, "persisted-session")
+        self.assertEqual(adapters["implementer"].requests[0].prompt, generated_prompt)
+        self.assertEqual(adapters["implementer"].requests[0].workdir, implementation_path)
+        self.assertIn("job_applications/tests/test_settings.py", adapters["orcha"].requests[0].prompt)
+        self.assertEqual(len(list(paths.worktrees.glob("implementation"))), 1)
+        self.assertTrue((paths.root / resumed.latest_orcha_prompt_path).exists())
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("operator_decision_recorded", events)
+        self.assertIn("orcha_correction_prompt_generated", events)
+        self.assertIn("cursor_resume_started", events)
+
 
 class ValidationAndSafetyTests(unittest.TestCase):
+    def test_operator_decision_schema_is_strict(self):
+        decision = {
+            "run_id": "m3a-test",
+            "decision": "APPROVED",
+            "reason": "milestone boundary advanced",
+            "additional_allowed_paths": ["job_applications/tests/test_settings.py"],
+            "constraints": ["Preserve unrelated assertions."],
+        }
+        self.assertEqual(validate_operator_decision(decision), decision)
+        with self.assertRaises(SchemaError):
+            validate_operator_decision({**decision, "unexpected": True})
+        with self.assertRaises(SchemaError):
+            validate_operator_decision({**decision, "additional_allowed_paths": ["../outside"]})
+
+    def test_cursor_durable_assistant_handoff_survives_truncated_result(self):
+        handoff = implementer("QUESTION")
+        assistant = json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": f"```json\n{json.dumps(handoff)}\n```"}
+                    ]
+                },
+                "session_id": "durable-session",
+            }
+        )
+        truncated = json.dumps(
+            {"type": "result", "subtype": "success", "result": "oversized…[TRUNCATED]"}
+        )
+
+        class ScriptedCursor(CursorAdapter):
+            def build_command(self, request, final_output_path):
+                del request, final_output_path
+                script = f"print({assistant!r}); print({truncated!r})"
+                return [sys.executable, "-c", script]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = ScriptedCursor("unused").start(
+                AdapterRequest(
+                    role="implementer",
+                    prompt="prompt",
+                    workdir=root,
+                    model="auto",
+                    reasoning_effort=None,
+                    permission_profile="implementation_worktree",
+                    timeout_seconds=10,
+                    heartbeat_seconds=1,
+                    log_dir=root / "logs",
+                    allow_write=True,
+                    safety_verified=True,
+                )
+            )
+            self.assertTrue(result.succeeded)
+            self.assertEqual(result.handoff, handoff)
+            final_path = root / "logs" / "implementer-001.final.json"
+            self.assertEqual(json.loads(final_path.read_text(encoding="utf-8")), handoff)
+            for line in (root / "logs" / "implementer-001.stdout.log").read_text().splitlines():
+                json.loads(line)
+
+    def test_cursor_malformed_actual_handoff_remains_rejected(self):
+        malformed = json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "```json\n{bad}\n```"}]},
+            }
+        )
+        truncated = json.dumps({"type": "result", "result": "{…[TRUNCATED]"})
+
+        class ScriptedCursor(CursorAdapter):
+            def build_command(self, request, final_output_path):
+                del request, final_output_path
+                return [sys.executable, "-c", f"print({malformed!r}); print({truncated!r})"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = ScriptedCursor("unused").start(
+                AdapterRequest(
+                    role="implementer",
+                    prompt="prompt",
+                    workdir=root,
+                    model="auto",
+                    reasoning_effort=None,
+                    permission_profile="implementation_worktree",
+                    timeout_seconds=10,
+                    heartbeat_seconds=1,
+                    log_dir=root / "logs",
+                )
+            )
+            self.assertFalse(result.succeeded)
+            self.assertIn("valid structured final output", result.error)
+
     def test_secret_redaction_is_recursive_and_event_log_is_sanitized(self):
         value = redact(
             {
@@ -699,3 +895,16 @@ class EvidenceCollectorTests(unittest.TestCase):
                 allowed_paths=["candidate_memory/**"],
                 prohibited_paths=[],
             )
+
+    def test_explicit_operator_authorization_allows_bounded_test_change_for_audit(self):
+        result = self.commit(
+            "candidate_memory/tests/test_models.py",
+            "def test_one():\n    assert True\n",
+        )
+        report = self.collect(
+            result,
+            allowed_paths=["candidate_memory/**"],
+            prohibited_paths=[],
+            authorized_test_changes=["candidate_memory/tests/test_models.py"],
+        )
+        self.assertEqual(report.suspicious_test_changes, ())

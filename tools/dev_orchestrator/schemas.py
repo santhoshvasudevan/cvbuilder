@@ -16,6 +16,15 @@ AUDIT_VERDICTS = frozenset({"PASS", "CORRECTION_REQUIRED", "BLOCKED"})
 MERGE_RECOMMENDATIONS = frozenset({"MERGE", "DO_NOT_MERGE", "OPERATOR_REVIEW"})
 SEVERITIES = frozenset({"BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"})
 FINDING_STATUSES = frozenset({"OPEN", "CLOSED"})
+OPERATOR_DECISION_FIELDS = frozenset(
+    {
+        "run_id",
+        "decision",
+        "reason",
+        "additional_allowed_paths",
+        "constraints",
+    }
+)
 
 PHASE_FIELDS = frozenset(
     {
@@ -166,6 +175,33 @@ def validate_phase_contract(value: dict[str, Any]) -> dict[str, Any]:
         _string_list(value, key)
     if len(value["base_sha"]) != 40 or len(value["product_baseline_sha"]) != 40:
         raise SchemaError("base SHA values must use full 40-character hashes")
+    return value
+
+
+def validate_operator_decision(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SchemaError("operator_decision must be an object")
+    unknown = set(value) - OPERATOR_DECISION_FIELDS
+    missing = OPERATOR_DECISION_FIELDS - set(value)
+    if unknown or missing:
+        raise SchemaError(
+            "operator_decision fields invalid: "
+            f"unknown={sorted(unknown)}, missing={sorted(missing)}"
+        )
+    for key in ("run_id", "reason"):
+        _string(value, key)
+    if value["decision"] != "APPROVED":
+        raise SchemaError("operator_decision.decision must be APPROVED")
+    for key in ("additional_allowed_paths", "constraints"):
+        _string_list(value, key)
+        if not value[key] or any(not item.strip() for item in value[key]):
+            raise SchemaError(f"operator_decision.{key} must contain non-empty strings")
+        if len(value[key]) != len(set(value[key])):
+            raise SchemaError(f"operator_decision.{key} must not contain duplicates")
+    for path in value["additional_allowed_paths"]:
+        candidate = Path(path)
+        if candidate.is_absolute() or ".." in candidate.parts or path.startswith("."):
+            raise SchemaError("operator decision paths must be safe repository-relative paths")
     return value
 
 

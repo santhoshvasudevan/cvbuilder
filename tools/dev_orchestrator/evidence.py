@@ -170,6 +170,7 @@ class EvidenceCollector:
         prohibited_paths: list[str],
         test_commands: list[dict],
         authorized_governance_changes: bool = False,
+        authorized_test_changes: list[str] | None = None,
     ) -> EvidenceReport:
         if not self.repository.commit_exists(result_sha):
             raise EvidenceError(f"result SHA does not exist: {result_sha}")
@@ -213,7 +214,14 @@ class EvidenceCollector:
                 and int(deleted) > 0
             ):
                 suspicious_paths.add(path)
-        suspicious = tuple(sorted(suspicious_paths))
+        authorized_test_changes = authorized_test_changes or []
+        suspicious = tuple(
+            sorted(
+                path
+                for path in suspicious_paths
+                if not self._matches(path, authorized_test_changes)
+            )
+        )
         commands = self._execute_test_commands(worktree, test_commands)
         report = EvidenceReport(
             base_sha=base_sha,

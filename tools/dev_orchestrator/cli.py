@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     attach_parser.add_argument("--run-id", required=True)
     resume_parser = sub.add_parser("resume")
     resume_parser.add_argument("--run-id", required=True)
+    decision_parser = sub.add_parser("record-decision")
+    decision_parser.add_argument("--run-id", required=True)
+    decision_parser.add_argument("--file", required=True, type=Path)
     abort_parser = sub.add_parser("abort")
     abort_parser.add_argument("--run-id", required=True)
     pane_parser = sub.add_parser("tmux-pane", help=argparse.SUPPRESS)
@@ -130,6 +133,23 @@ def main(argv: list[str] | None = None) -> int:
             state = controller.execute(args.run_id, resume=True)
             print(json.dumps({"run_id": args.run_id, "state": state.state}, indent=2))
             return 0 if state.state == "COMPLETED" else 2
+        if args.command == "record-decision":
+            try:
+                decision = json.loads(args.file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ControllerError(f"invalid operator-decision JSON: {exc}") from exc
+            state, artifact = controller.record_operator_decision(args.run_id, decision)
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "state": state.state,
+                        "operator_decision": str(artifact),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         if args.command == "abort":
             state = controller.abort(args.run_id)
             print(json.dumps({"run_id": args.run_id, "state": state.state}, indent=2))

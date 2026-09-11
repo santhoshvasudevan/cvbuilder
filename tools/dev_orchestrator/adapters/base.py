@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
@@ -14,7 +15,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable
 
-from ..redaction import redact_text
+from ..redaction import redact, redact_text
 
 
 @dataclasses.dataclass(frozen=True)
@@ -143,8 +144,12 @@ class ProcessAdapter(AgentAdapter):
     def _parse_handoff(final_message: str) -> dict | None:
         if not final_message:
             return None
+        candidate = final_message.strip()
+        fenced = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", candidate, flags=re.DOTALL)
+        if fenced:
+            candidate = fenced.group(1)
         try:
-            value = json.loads(final_message)
+            value = json.loads(candidate)
         except json.JSONDecodeError:
             return None
         return value if isinstance(value, dict) else None
@@ -238,10 +243,15 @@ class ProcessAdapter(AgentAdapter):
                     completed_streams += 1
                     continue
                 stream_name, raw_line = item
-                safe_line = redact_text(raw_line)
                 event = None
                 if stream_name == "stdout":
-                    event = self.parse_event(safe_line)
+                    parsed = self.parse_event(raw_line)
+                    if parsed.get("type") == "text" and parsed.get("message") == redact_text(raw_line):
+                        event = parsed
+                        safe_line = redact_text(raw_line)
+                    else:
+                        event = redact(parsed)
+                        safe_line = json.dumps(event, sort_keys=True, ensure_ascii=False)
                     if self.contains_hidden_reasoning(event):
                         safe_line = json.dumps(
                             {"type": "reasoning_omitted", "message": "reasoning event not persisted"}
@@ -253,15 +263,30 @@ class ProcessAdapter(AgentAdapter):
                 if stream_name == "stdout":
                     assert event is not None
                     session_id = self.session_id_from_event(event) or session_id
-                    final_message = self.final_message_from_event(event) or final_message
+                    candidate_message = self.final_message_from_event(event)
+                    candidate_handoff = self._parse_handoff(candidate_message)
+                    if candidate_handoff is not None:
+                        final_message = json.dumps(candidate_handoff, indent=2, sort_keys=True) + "\n"
+                        final_path.write_text(final_message, encoding="utf-8")
+                    elif candidate_message:
+                        final_message = candidate_message
                     if event_callback:
                         event_callback(stream_name, event)
                 elif event_callback:
                     event_callback(stream_name, {"type": "stderr", "message": safe_line})
 
         exit_code = self._process.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+        self._process.stdout.close()
+        self._process.stderr.close()
         if final_path.exists():
-            final_message = redact_text(final_path.read_text(encoding="utf-8"))
+            raw_final = final_path.read_text(encoding="utf-8")
+            parsed_final = self._parse_handoff(raw_final)
+            if parsed_final is not None:
+                final_message = json.dumps(redact(parsed_final), indent=2, sort_keys=True) + "\n"
+            else:
+                final_message = redact_text(raw_final)
             final_path.write_text(final_message, encoding="utf-8")
         handoff = self._parse_handoff(final_message)
         if exit_code != 0:

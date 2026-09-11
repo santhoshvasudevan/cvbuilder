@@ -58,6 +58,22 @@ aborted but deliberately leaves branches/worktrees intact for inspection and rec
 `OPERATOR_ESCALATION` or audit-test commit is not auto-transferred; inspect state/events/handoffs and
 make a separately authorized decision.
 
+For an operator-approved bounded amendment to an existing `OPERATOR_ESCALATION` run, write the exact
+decision object to a temporary JSON file outside the repository, then record it and resume:
+
+```text
+.venv/bin/python -m tools.dev_orchestrator record-decision --run-id <run-id> --file /tmp/operator-decision.json
+.venv/bin/python -m tools.dev_orchestrator resume --run-id <run-id>
+```
+
+`record-decision` strictly validates the object, preserves the original phase contract byte-for-byte,
+recovers only a complete schema-valid prior handoff from durable Cursor output, and creates an
+append-only decision artifact. On `resume`, Agent Orcha generates the correction prompt, the controller
+persists its exact text and SHA-256 identity, and the existing Cursor session/worktree are reused. The
+command refuses missing/unregistered worktrees, mismatched run IDs, prohibited paths, unsafe relative
+paths, and any main-checkout change beyond a clean descendant commit limited to the orchestration
+repair implementation and these two orchestration documents.
+
 ## Non-live dry run and tests
 
 ```text

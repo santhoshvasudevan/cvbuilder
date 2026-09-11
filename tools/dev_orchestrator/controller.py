@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import tempfile
@@ -26,6 +27,7 @@ from .schemas import (
     validate_audit_response,
     validate_closure_response,
     validate_implementer_response,
+    validate_operator_decision,
     validate_phase_contract,
 )
 from .state import TERMINAL_STATES, RunState, RunStateName, StateStore
@@ -45,6 +47,7 @@ class RunPaths:
     context_manifest: Path
     events: Path
     handoffs: Path
+    prompts: Path
     logs: Path
     evidence: Path
     worktrees: Path
@@ -61,6 +64,7 @@ class RunPaths:
             context_manifest=root / "context-manifest.json",
             events=root / "events.jsonl",
             handoffs=root / "handoffs",
+            prompts=root / "prompts",
             logs=root / "logs",
             evidence=root / "evidence.json",
             worktrees=runtime_root / "worktrees" / run_id,
@@ -80,6 +84,24 @@ def _atomic_json(path: Path, value: Any) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def _contract_markdown(contract: dict) -> str:
@@ -161,7 +183,19 @@ class OrchestrationController:
     def _effective_contract(paths: RunPaths, contract: dict) -> dict:
         """Rebuild approved clarification/correction context after an interrupted controller."""
         result = dict(contract)
+        result["allowed_paths"] = list(contract["allowed_paths"])
         additions = []
+        for path in sorted(paths.handoffs.glob("operator-decision-*.json")):
+            payload = validate_operator_decision(json.loads(path.read_text(encoding="utf-8")))
+            for allowed_path in payload["additional_allowed_paths"]:
+                if allowed_path not in result["allowed_paths"]:
+                    result["allowed_paths"].append(allowed_path)
+            additions.append(
+                "Approved operator amendment: "
+                + payload["reason"]
+                + " Constraints: "
+                + " ".join(payload["constraints"])
+            )
         for path in sorted(paths.handoffs.glob("orcha-question-*.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("decision") == "ANSWER":
@@ -173,6 +207,152 @@ class OrchestrationController:
         if additions:
             result["objective"] += "\n\n" + "\n\n".join(additions)
         return result
+
+    @staticmethod
+    def _next_artifact_path(directory: Path, stem: str, suffix: str = ".json") -> Path:
+        index = 1
+        while (directory / f"{stem}-{index:02d}{suffix}").exists():
+            index += 1
+        return directory / f"{stem}-{index:02d}{suffix}"
+
+    @staticmethod
+    def _relative_artifact(paths: RunPaths, path: Path) -> str:
+        return str(path.relative_to(paths.root))
+
+    @staticmethod
+    def _append_only_json(path: Path, value: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(descriptor, payload.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _recover_implementer_handoff(paths: RunPaths) -> tuple[dict, str]:
+        for log_path in sorted(paths.logs.glob("implementer-*.stdout.log"), reverse=True):
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            adapter = CursorAdapter("cursor")
+            for line_number in range(len(lines), 0, -1):
+                try:
+                    event = json.loads(lines[line_number - 1])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                message = adapter.final_message_from_event(event)
+                handoff = adapter._parse_handoff(message)
+                if handoff is None:
+                    continue
+                try:
+                    return validate_implementer_response(handoff), f"{log_path.name}:{line_number}"
+                except SchemaError:
+                    continue
+        raise ControllerError("no complete schema-valid implementer handoff is recoverable from logs")
+
+    def _verify_repair_checkout(self, state: RunState, boundary) -> None:
+        if boundary.head == state.base_sha:
+            return
+        if not self.repository.is_ancestor(state.base_sha, boundary.head):
+            raise ControllerError("orchestration repair HEAD is not descended from the approved run base")
+        changed = {
+            line
+            for line in self.repository.run(
+                "diff", "--name-only", f"{state.base_sha}..{boundary.head}"
+            ).splitlines()
+            if line
+        }
+        permitted = {
+            path
+            for path in changed
+            if path.startswith("tools/dev_orchestrator/")
+            or path in {
+                "docs/DEVELOPMENT_ORCHESTRATION.md",
+                "docs/DEVELOPMENT_RUNBOOK.md",
+            }
+        }
+        if changed != permitted:
+            raise ControllerError(
+                "post-escalation checkout contains changes beyond the bounded orchestration repair: "
+                f"{sorted(changed - permitted)}"
+            )
+
+    def _verify_run_controller_head(self, state: RunState, boundary) -> None:
+        expected = state.controller_sha or state.base_sha
+        if boundary.head != expected:
+            raise ControllerError(
+                f"repository HEAD {boundary.head} differs from recorded controller HEAD {expected}"
+            )
+
+    def record_operator_decision(self, run_id: str, value: dict) -> tuple[RunState, Path]:
+        paths = self.paths(run_id)
+        store = StateStore(paths.state)
+        state = store.load()
+        if state.state != RunStateName.OPERATOR_ESCALATION.value:
+            raise ControllerError("operator decisions may only amend an OPERATOR_ESCALATION run")
+        decision = validate_operator_decision(value)
+        if decision["run_id"] != run_id:
+            raise ControllerError("operator decision run_id does not match the target run")
+        contract_bytes = paths.contract_json.read_bytes()
+        contract = validate_phase_contract(json.loads(contract_bytes))
+        prohibited = decision["additional_allowed_paths"]
+        if any(EvidenceCollector._matches(path, contract["prohibited_paths"]) for path in prohibited):
+            raise ControllerError("operator decision cannot allow a path prohibited by the phase contract")
+        try:
+            boundary = self._verify_repository_boundary(require_clean=True)
+            self._verify_repair_checkout(state, boundary)
+        except (GitSafetyError, ControllerError) as exc:
+            raise ControllerError(str(exc)) from exc
+        implementation = paths.worktrees / "implementation"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if not implementation.exists() or implementation.resolve() not in registered:
+            raise ControllerError("existing implementation worktree is missing or unregistered")
+        if self.repository.head(implementation) != state.base_sha or state.result_sha:
+            raise ControllerError("implementation worktree no longer matches the recoverable escalated state")
+
+        handoff, source = self._recover_implementer_handoff(paths)
+        recovered_path = paths.handoffs / f"implementer-{state.correction_cycles:02d}.json"
+        if recovered_path.exists():
+            existing = validate_implementer_response(json.loads(recovered_path.read_text(encoding="utf-8")))
+            if existing != handoff:
+                raise ControllerError("existing recovered handoff conflicts with the durable raw log")
+        else:
+            self._append_only_json(recovered_path, handoff)
+
+        decision_path = self._next_artifact_path(paths.handoffs, "operator-decision")
+        self._append_only_json(decision_path, decision)
+        contract_hash = _sha256_bytes(contract_bytes)
+        state.controller_sha = boundary.head
+        state.original_contract_sha256 = state.original_contract_sha256 or contract_hash
+        if state.original_contract_sha256 != contract_hash:
+            raise ControllerError("original phase contract changed before operator decision recording")
+        state.operator_decision_count += 1
+        state.pending_operator_decision_path = self._relative_artifact(paths, decision_path)
+        state.recovered_handoff_path = self._relative_artifact(paths, recovered_path)
+        state.transition(RunStateName.ORCHA_DECISION)
+        store.save(state)
+        events = EventLog(paths.events)
+        events.emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=state.state,
+            event="implementer_handoff_recovered",
+            message="Recovered complete schema-valid implementer handoff from durable Cursor output",
+            source=source,
+            handoff_path=state.recovered_handoff_path,
+        )
+        events.emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=state.state,
+            event="operator_decision_recorded",
+            message="Append-only operator scope amendment recorded",
+            decision_path=state.pending_operator_decision_path,
+            contract_sha256=contract_hash,
+        )
+        return state, decision_path
 
     def plan(self, phase: str, *, dry_run: bool = False) -> tuple[str, dict]:
         if phase != "M3A":
@@ -206,6 +386,7 @@ class OrchestrationController:
         state = RunState(run_id=run_id, phase=phase, base_sha=head)
         paths.root.mkdir(parents=True, exist_ok=False)
         paths.handoffs.mkdir()
+        paths.prompts.mkdir()
         paths.logs.mkdir()
         _atomic_json(paths.contract_json, contract)
         paths.contract_markdown.write_text(_contract_markdown(contract), encoding="utf-8")
@@ -373,9 +554,11 @@ class OrchestrationController:
             boundary = self._verify_repository_boundary(require_clean=True)
         except GitSafetyError as exc:
             return self._fail_agent(state, store, events, "ORCHA", str(exc))
-        if boundary.head != state.base_sha:
+        try:
+            self._verify_run_controller_head(state, boundary)
+        except ControllerError as exc:
             return self._fail_agent(
-                state, store, events, "ORCHA", "repository HEAD changed from the approved run base"
+                state, store, events, "ORCHA", str(exc)
             )
         try:
             implementation_worktree, _ = self._prepare_worktrees(state, paths)
@@ -425,16 +608,23 @@ class OrchestrationController:
                 boundary = self._verify_repository_boundary(require_clean=True)
             except GitSafetyError as exc:
                 return self._fail_agent(state, store, events, "ORCHA", str(exc))
-            if boundary.head != state.base_sha:
+            try:
+                self._verify_run_controller_head(state, boundary)
+            except ControllerError as exc:
                 return self._fail_agent(
-                    state, store, events, "ORCHA", "repository HEAD changed from the approved run base"
+                    state, store, events, "ORCHA", str(exc)
                 )
             current = RunStateName(state.state)
             if current in {RunStateName.IMPLEMENTING, RunStateName.CORRECTING}:
-                prompt = (
-                    "Implement only the attached approved phase contract. Return only the required "
-                    "structured implementer handoff.\n\n" + json.dumps(contract, indent=2)
-                )
+                if state.pending_implementer_prompt_path:
+                    prompt = (paths.root / state.pending_implementer_prompt_path).read_text(
+                        encoding="utf-8"
+                    )
+                else:
+                    prompt = (
+                        "Implement only the attached approved phase contract. Return only the required "
+                        "structured implementer handoff.\n\n" + json.dumps(contract, indent=2)
+                    )
                 session_id = state.sessions.get("implementer", "")
                 request = self._request(
                     "implementer",
@@ -446,6 +636,18 @@ class OrchestrationController:
                     allow_write=True,
                     safety_verified=True,
                 )
+                if state.pending_implementer_prompt_path:
+                    events.emit(
+                        run_id=run_id,
+                        role="IMPLEMENTER",
+                        state=state.state,
+                        event="cursor_resume_started",
+                        message="Resuming saved Cursor session with the exact persisted Orcha prompt",
+                        session_id=session_id,
+                        prompt_path=state.pending_implementer_prompt_path,
+                        prompt_sha256=state.latest_orcha_prompt_sha256,
+                        implementation_worktree=str(implementation_worktree),
+                    )
                 result = self._invoke(
                     implementer,
                     request,
@@ -470,6 +672,9 @@ class OrchestrationController:
                         "implementer handoff base SHA differs from approved contract",
                     )
                 self._save_handoff(paths, f"implementer-{state.correction_cycles:02d}.json", handoff)
+                state.pending_implementer_prompt_path = ""
+                state.pending_operator_decision_path = ""
+                store.save(state)
                 if handoff["status"] == "QUESTION":
                     events.emit(
                         run_id=run_id,
@@ -507,6 +712,132 @@ class OrchestrationController:
                 store.save(state)
 
             elif current == RunStateName.ORCHA_DECISION:
+                if state.pending_operator_decision_path:
+                    decision_path = paths.root / state.pending_operator_decision_path
+                    operator_decision = validate_operator_decision(
+                        json.loads(decision_path.read_text(encoding="utf-8"))
+                    )
+                    handoff_path = paths.root / state.recovered_handoff_path
+                    previous_handoff = validate_implementer_response(
+                        json.loads(handoff_path.read_text(encoding="utf-8"))
+                    )
+                    status = self.repository.status(implementation_worktree)
+                    worktree_snapshot = {
+                        "path": str(implementation_worktree),
+                        "branch": self.repository.branch(implementation_worktree),
+                        "head": self.repository.head(implementation_worktree),
+                        "status": status,
+                        "diff_stat": self.repository.run("diff", "--stat", cwd=implementation_worktree),
+                        "existing_implementation_commit": (
+                            self.repository.head(implementation_worktree)
+                            if self.repository.head(implementation_worktree) != state.base_sha
+                            else ""
+                        ),
+                    }
+                    correction_id = f"OPERATOR-DECISION-{state.operator_decision_count:02d}"
+                    orcha_context = {
+                        "task": (
+                            "Generate the exact bounded correction/resume prompt for Cursor. Return "
+                            "CORRECT with this finding_ids value and a prompt that preserves completed "
+                            "M3A work; applies only the original allowed paths plus the approved added "
+                            "path; makes only the candidate_memory milestone-boundary update there; "
+                            "preserves all other unimplemented-app assertions; runs the targeted boundary "
+                            "test and make verify; fixes causes without weakening tests; commits M3A; "
+                            "returns a concise schema-valid handoff; reports IMPLEMENTED only after all "
+                            "verification passes and otherwise reports BLOCKED or QUESTION; and forbids "
+                            "merge, push, rebase, reset, or main-checkout modification."
+                        ),
+                        "required_finding_ids": [correction_id],
+                        "original_approved_contract": validate_phase_contract(
+                            json.loads(paths.contract_json.read_text(encoding="utf-8"))
+                        ),
+                        "append_only_operator_decision": operator_decision,
+                        "previous_implementer_handoff": previous_handoff,
+                        "implementation_worktree": worktree_snapshot,
+                        "unresolved_controller_error": state.last_error,
+                        "applicable_requirement_ids": contract["requirement_ids"],
+                        "applicable_decision_ids": contract["governing_decision_ids"],
+                        "remaining_acceptance_criteria": contract["acceptance_criteria"],
+                        "durable_handoff_instruction": (
+                            "Keep the final conversational response short and return only the implementer "
+                            "schema JSON (a single json code fence is accepted). The controller captures "
+                            "the complete assistant event into its durable final handoff file before any "
+                            "terminal presentation truncation."
+                        ),
+                    }
+                    correction = orcha.start(
+                        self._request(
+                            "orcha",
+                            "Generate the bounded operator-authorized recovery prompt from this evidence.\n\n"
+                            + json.dumps(orcha_context, indent=2),
+                            implementation_worktree,
+                            paths,
+                            "orcha-correction.schema.json",
+                        ),
+                        callback("orcha"),
+                    )
+                    if not correction.succeeded:
+                        return self._fail_agent(state, store, events, "ORCHA", correction.error)
+                    payload = correction.handoff or {}
+                    if (
+                        set(payload) != {"decision", "prompt", "finding_ids"}
+                        or payload.get("decision") != "CORRECT"
+                        or payload.get("finding_ids") != [correction_id]
+                    ):
+                        return self._fail_agent(
+                            state, store, events, "ORCHA", "malformed operator correction contract"
+                        )
+                    required_prompt_markers = {
+                        "job_applications/tests/test_settings.py",
+                        "candidate_memory",
+                        "make verify",
+                        "commit",
+                        "handoff",
+                        "IMPLEMENTED",
+                        "BLOCKED",
+                        "QUESTION",
+                        "merge",
+                        "push",
+                        "reset",
+                        "main checkout",
+                    }
+                    missing_markers = {
+                        marker for marker in required_prompt_markers if marker not in payload["prompt"]
+                    }
+                    if missing_markers:
+                        return self._fail_agent(
+                            state,
+                            store,
+                            events,
+                            "ORCHA",
+                            "operator correction prompt omitted required boundaries: "
+                            f"{sorted(missing_markers)}",
+                        )
+                    correction_path = self._next_artifact_path(
+                        paths.handoffs, "operator-correction"
+                    )
+                    self._append_only_json(correction_path, payload)
+                    prompt_path = self._next_artifact_path(paths.prompts, "orcha-correction", ".txt")
+                    _atomic_text(prompt_path, payload["prompt"])
+                    prompt_hash = _sha256_bytes(payload["prompt"].encode("utf-8"))
+                    state.latest_orcha_prompt_path = self._relative_artifact(paths, prompt_path)
+                    state.latest_orcha_prompt_sha256 = prompt_hash
+                    state.pending_implementer_prompt_path = state.latest_orcha_prompt_path
+                    state.correction_cycles += 1
+                    state.transition(RunStateName.CORRECTING)
+                    state.last_error = ""
+                    store.save(state)
+                    events.emit(
+                        run_id=run_id,
+                        role="ORCHA",
+                        state=state.state,
+                        event="orcha_correction_prompt_generated",
+                        message="Agent Orcha generated the bounded correction prompt",
+                        prompt_path=state.latest_orcha_prompt_path,
+                        prompt_sha256=prompt_hash,
+                        correction_path=self._relative_artifact(paths, correction_path),
+                    )
+                    continue
                 handoff = validate_implementer_response(
                     json.loads(
                         (paths.handoffs / f"implementer-{state.correction_cycles:02d}.json").read_text(
@@ -583,6 +914,15 @@ class OrchestrationController:
                         allowed_paths=contract["allowed_paths"],
                         prohibited_paths=contract["prohibited_paths"],
                         test_commands=implementer_handoff["test_commands"],
+                        authorized_test_changes=[
+                            path
+                            for decision_path in sorted(
+                                paths.handoffs.glob("operator-decision-*.json")
+                            )
+                            for path in validate_operator_decision(
+                                json.loads(decision_path.read_text(encoding="utf-8"))
+                            )["additional_allowed_paths"]
+                        ],
                     )
                     _atomic_json(
                         paths.evidence,
