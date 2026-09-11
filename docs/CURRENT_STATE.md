@@ -5,45 +5,41 @@
 ## Repository State
 
 - Product baseline: `cvbuild2` commit `437b179490b01697366ba70d75b6c72a6c83a7a4` (verified M2).
-- Development-orchestration bootstrap branch: `buildwithAgent`, descended directly from that baseline;
-  verify the current bootstrap commit with `git rev-parse HEAD`.
-- The abandoned M3A line ending at `02bbc5c` and listed predecessor commits is excluded.
+- Development-orchestration bootstrap: `buildwithAgent` / `2fea4b43ffdb74dec314f68086d172db8570a95e`.
+- M3A implementation worktree branch: `agent/m3a-d2c0cc48b6aa/implementation` (run `m3a-d2c0cc48b6aa`).
+- The abandoned M3A line ending at `02bbc5c` and listed predecessor commits remains excluded.
 - `main` remains the incompatible V1 legacy line (V2-D038).
 - Last verified date: 2026-09-11.
 
 ## Current Task
 
-- External development-agent orchestration bootstrap (V2-D045): implemented and deterministically
-  verified outside Django under `tools/dev_orchestrator`.
-- M3A: **not implemented and not started live**. A clean versioned contract exists at
-  `.orchestration/contracts/M3A.json`; dry-run planning has been exercised with no agent call.
+- M3A Candidate Knowledge and StaticResumeProfile: **implemented in this worktree** pending
+  independent audit and operator acceptance/fast-forward into `cvbuild2`.
+- M3B CandidateContextSnapshot: not started (`candidate_context` app intentionally absent).
 
 ## Verified Working
 
-- M1/M2 product baseline plus bootstrap: `make verify` passes 271 tests (231 existing M1/M2 + 40
-  external orchestration tests), with Django checks, migration drift, and Ruff all clean.
-- External controller: strict YAML config; Codex/Cursor/disabled-Claude/fake adapters;
-  atomic state; sanitized events/logs; structured phase/implementer/audit/closure schemas; Git evidence;
-  isolated worktrees; bounded questions/corrections; safe resume/abort; three-pane observational tmux.
-- Non-live `doctor` qualifies installed Codex CLI capabilities/authentication, Git/tmux/jq, worktree
-  safety, and redaction. Cursor CLI is installed but reported `Not logged in` on 2026-09-11; this is a
-  live-run prerequisite, not a deterministic test failure. Claude remains disabled and unchecked.
+- `candidate_memory` Django app with provenance-bearing source ingestion, MemoryClaims/supports,
+  unresolved MemoryConflicts, CandidateProfile preferences, CareerEngagement roster,
+  StaticResumeProfile, and sequenced ExperienceSlot collection (copy-on-create + source FK).
+- Operator-controlled ExperienceSlot workspace (server-rendered) plus admin-backed explicit
+  three-engagement selection action — no automatic primary-slot selection path.
+- Deterministic HARD_INTEGRITY validator requiring exactly three unique active primary slots
+  with sequences 1, 2, and 3; static metadata replacement attempts are rejected.
+- `docs/CANDIDATE_MEMORY_SNAPSHOT.md` is excluded from ingestion (path + generated markers).
+- Fresh disposable PostgreSQL migration apply/no-op/unapply-reapply covered by
+  `candidate_memory.tests.test_migrations`.
 
 ## Known Limits / Operator Actions
 
-- No real Codex/Cursor/Claude development-agent invocation has been made by this bootstrap.
-- Configured Codex model names are syntactically recorded but model availability was not tested with a
-  paid/live call. Cursor model `auto` likewise was not queried because Cursor is not authenticated.
-- V2-D031 leaves `ExperienceSlot` copy-versus-reference as an M3A implementation detail. The contract
-  permits the smallest approach only if source linkage, operator selection, and static ownership remain
-  intact; any broader architecture change still requires escalation.
-- Adversarial audit-test commits require a separate operator-approved write/transfer action; they are
-  detected and never transferred automatically.
-- The operator must fast-forward `cvbuild2` to the accepted bootstrap commit before planning the first
-  live M3A run, then authenticate Cursor and re-run `doctor`.
+- Certifications/languages are stored only on StaticResumeProfile as static JSON; no LLM path
+  generates them in M3A.
+- ExperienceSlot copy-versus-reference chose the smallest copy-on-create approach with retained
+  CareerEngagement linkage (V2-D031 permitted detail).
+- Adversarial audit-test commits still require a separate operator-approved write/transfer action.
+- Operator alone decides whether to fast-forward the accepted M3A result into `cvbuild2`.
 
 ## Next Recommended Action
 
-Independently review the bootstrap commit. If accepted, operator-fast-forward `cvbuild2`, authenticate
-Cursor, run the commands in `docs/DEVELOPMENT_RUNBOOK.md`, inspect/approve the generated M3A contract,
-and launch M3A as the first supervised live run. No merge or push has been performed by the tooling.
+Independent audit of this M3A candidate against `.orchestration/contracts/M3A.json`. Do not merge
+or push from orchestration tooling.

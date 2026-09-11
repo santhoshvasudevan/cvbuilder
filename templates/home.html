@@ -7,8 +7,10 @@
 {% block content %}
   <h2>CVBuilder V2 — Foundation</h2>
   <p class="lede">
-    The M1 Django/PostgreSQL foundation is running. The job-tracking dashboard (M7) and the
-    rest of the pipeline are not implemented yet. Use <a href="{% url 'admin:index' %}">the
-    admin site</a> to inspect JobApplication, StageRun, and JobApplicationStageState records.
+    M1/M2 foundations and M3A candidate memory are available. Use
+    <a href="{% url 'admin:index' %}">the admin site</a> for CandidateMemory, CareerEngagement,
+    and StaticResumeProfile records, then open the ExperienceSlot selection workspace for an
+    active CandidateMemory. The job-tracking dashboard (M7) and later pipeline stages are not
+    implemented yet.
   </p>
 {% endblock %}
