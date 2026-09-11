@@ -68,4 +68,5 @@ make secrets
 ```
 
 Dry-run planning validates and materializes a contract, records `live_agents_invoked: false`, and stops
-at `AWAITING_PHASE_APPROVAL`. Automated tests use fake adapters only.
+at `AWAITING_PHASE_APPROVAL`. Its manifest is permanently non-approvable; create a normal `plan` for a
+live run. Automated tests use fake adapters only.

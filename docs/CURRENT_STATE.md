@@ -20,7 +20,7 @@
 
 ## Verified Working
 
-- M1/M2 product baseline plus bootstrap: `make verify` passes 270 tests (231 existing M1/M2 + 39
+- M1/M2 product baseline plus bootstrap: `make verify` passes 271 tests (231 existing M1/M2 + 40
   external orchestration tests), with Django checks, migration drift, and Ruff all clean.
 - External controller: strict YAML config; Codex/Cursor/disabled-Claude/fake adapters;
   atomic state; sanitized events/logs; structured phase/implementer/audit/closure schemas; Git evidence;

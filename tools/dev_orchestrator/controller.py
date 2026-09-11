@@ -243,6 +243,7 @@ class OrchestrationController:
                 "orchestration_tooling_sha": contract["orchestration_tooling_sha"],
                 "future_implementation_base_sha": head,
                 "automatic_merge": False,
+                "dry_run": dry_run,
                 "live_agents_invoked": False,
             },
         )
@@ -268,6 +269,9 @@ class OrchestrationController:
             raise ControllerError(f"run {run_id} is not awaiting phase approval")
         contract = json.loads(paths.contract_json.read_text(encoding="utf-8"))
         validate_phase_contract(contract)
+        manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
+        if manifest.get("dry_run") is not False:
+            raise ControllerError("dry-run plans cannot be approved or launched; create a live plan")
         try:
             boundary = self._verify_repository_boundary(require_clean=True)
         except GitSafetyError as exc:

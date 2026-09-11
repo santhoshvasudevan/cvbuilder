@@ -14,7 +14,7 @@ import yaml
 from tools.dev_orchestrator.adapters import AdapterResult, ClaudeAdapter, FakeAdapter
 from tools.dev_orchestrator.adapters.base import ProcessAdapter
 from tools.dev_orchestrator.config import ConfigError, load_config
-from tools.dev_orchestrator.controller import OrchestrationController, _atomic_json
+from tools.dev_orchestrator.controller import ControllerError, OrchestrationController, _atomic_json
 from tools.dev_orchestrator.events import EventLog
 from tools.dev_orchestrator.evidence import EvidenceCollector, EvidenceError
 from tools.dev_orchestrator.git_safety import GitBoundary, GitRepository
@@ -253,6 +253,17 @@ class ControllerTests(unittest.TestCase):
         )
         state = controller.execute(self.prepare_run(controller))
         self.assertEqual(state.state, "COMPLETED")
+
+    def test_dry_run_plan_cannot_be_approved(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller, state_name=RunStateName.AWAITING_PHASE_APPROVAL)
+        _atomic_json(
+            controller.paths(run_id).manifest,
+            {"schema_version": 1, "run_id": run_id, "dry_run": True},
+        )
+
+        with self.assertRaisesRegex(ControllerError, "dry-run plans cannot be approved"):
+            controller.approve(run_id)
 
     def test_question_orcha_answer_resume(self):
         controller, adapters = self.make_controller(
