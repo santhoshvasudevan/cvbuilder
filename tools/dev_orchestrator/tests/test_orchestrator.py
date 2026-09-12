@@ -1038,6 +1038,41 @@ class EvidenceCollectorTests(unittest.TestCase):
                 test_commands=[{"command": f"{sys.executable} -c pass", "exit_code": 0}],
             )
 
+    def test_accepts_git_diff_check_with_commit_endpoints(self):
+        collector = EvidenceCollector(self.repository, command_runner=lambda argv, cwd: 0)
+        for command in (
+            "git diff --check",
+            "git diff --check HEAD",
+            f"git diff --check {self.base} HEAD",
+            f"git diff --check {self.base}..HEAD",
+            f"git diff --check {self.base}...HEAD",
+        ):
+            with self.subTest(command=command):
+                observed = collector.validate_test_commands(
+                    self.root,
+                    [{"command": command, "exit_code": 0}],
+                )
+                self.assertEqual(observed, ((command, 0),))
+
+    def test_rejects_unsafe_git_diff_check_forms(self):
+        collector = EvidenceCollector(self.repository, command_runner=lambda argv, cwd: 0)
+        for command in (
+            "git diff --check --cached",
+            "git diff --check -n",
+            "git diff --check HEAD -- candidate_memory/models.py",
+            f"git diff --check {self.base} HEAD extra",
+            "git diff --check ..HEAD",
+            "git diff --check 'HEAD;rm'",
+            "git checkout HEAD",
+            "git commit -am x",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaisesRegex(EvidenceError, "unapproved"):
+                    collector.validate_test_commands(
+                        self.root,
+                        [{"command": command, "exit_code": 0}],
+                    )
+
     def test_rejects_suspicious_test_weakening(self):
         result = self.commit(
             "candidate_memory/tests/test_models.py",

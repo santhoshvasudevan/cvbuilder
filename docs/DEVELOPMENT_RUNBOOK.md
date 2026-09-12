@@ -83,7 +83,9 @@ It does not rerun Cursor or create another implementation worktree.
 An audit that returns `CORRECTION_REQUIRED` may include a failed reviewer-side command when the
 isolated audit worktree cannot access local credentials. The controller records that failure and the
 findings, independently reruns every successful reported command, and continues to Agent Orcha. A
-failed command with `PASS` remains an immediate escalation.
+failed command with `PASS` remains an immediate escalation. Successful reviewer `git diff --check`
+commands may include an explicit commit range or endpoints; the controller still rejects shell
+operators, option injection, malformed revisions, and write-capable git forms.
 
 ## Non-live dry run and tests
 

@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import fnmatch
+import re
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable
 
 from .git_safety import GitRepository
+
+# Read-only git revision endpoints for allowlisted `git diff --check` forms.
+# Rejects leading dashes (option injection) and shell/path metacharacters.
+_SAFE_GIT_REVISION_ENDPOINT = re.compile(r"\A(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/@~^-]*)\Z")
 
 
 class EvidenceError(RuntimeError):
@@ -97,6 +102,36 @@ class EvidenceCollector:
         return result.returncode
 
     @staticmethod
+    def _is_safe_git_revision_endpoint(value: str) -> bool:
+        return bool(value) and _SAFE_GIT_REVISION_ENDPOINT.fullmatch(value) is not None
+
+    @classmethod
+    def _is_safe_git_diff_check_revision(cls, value: str) -> bool:
+        """Accept a single endpoint or an explicit A..B / A...B range token."""
+        if "..." in value:
+            left, _, right = value.partition("...")
+            return cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right)
+        if ".." in value:
+            left, _, right = value.partition("..")
+            return cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right)
+        return cls._is_safe_git_revision_endpoint(value)
+
+    @classmethod
+    def _validate_git_diff_check_argv(cls, argv: list[str]) -> None:
+        """Allow only `git diff --check` with zero or one explicit commit range/endpoints."""
+        if len(argv) < 3 or argv[1] != "diff" or argv[2] != "--check":
+            raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+        extras = argv[3:]
+        if len(extras) > 2:
+            raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+        if len(extras) == 2:
+            if not all(cls._is_safe_git_revision_endpoint(token) for token in extras):
+                raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+            return
+        if len(extras) == 1 and not cls._is_safe_git_diff_check_revision(extras[0]):
+            raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+
+    @staticmethod
     def _validate_verification_argv(argv: list[str]) -> None:
         executable = Path(argv[0]).name
         if executable == "make":
@@ -111,8 +146,13 @@ class EvidenceCollector:
             if len(argv) != 2 or argv[1] not in allowed_targets:
                 raise EvidenceError(f"unapproved make verification command: {argv!r}")
             return
-        if executable == "git" and argv[1:] in (["diff", "--check"], ["status", "--short"]):
-            return
+        if executable == "git":
+            if argv[1:] == ["status", "--short"]:
+                return
+            if len(argv) >= 3 and argv[1] == "diff" and argv[2] == "--check":
+                EvidenceCollector._validate_git_diff_check_argv(argv)
+                return
+            raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
         if executable.startswith("python") and len(argv) >= 3:
             if argv[1] == "manage.py" and argv[2] in {"test", "check"}:
                 return

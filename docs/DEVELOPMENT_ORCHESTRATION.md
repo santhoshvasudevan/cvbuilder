@@ -91,6 +91,10 @@ cleanliness, commit range, changed/untracked files, allowed/prohibited paths, un
 `requirements.md`/decision changes, deleted or weakened tests, and verification results. It
 independently re-executes the allowlisted reported commands with argument arrays and compares their
 real exit codes with the handoff instead of trusting the agent's summary.
+Allowed Git verification forms are only `git status --short` and read-only `git diff --check`
+(optionally with one explicit commit range token `A..B` / `A...B`, or one or two safe revision
+endpoints). Shell operators, leading-dash option injection, malformed revisions, other git
+subcommands, and write-capable commands remain rejected.
 Malformed handoffs, nonexistent or wrong-base SHAs, failed commands, dirty worktrees, and prohibited
 changes cannot reach closure. The reviewer receives the contract and candidate Git state, not the
 implementer's conversational history.
