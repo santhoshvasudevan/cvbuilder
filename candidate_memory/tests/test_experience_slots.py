@@ -116,6 +116,46 @@ class ExperienceSlotServiceTests(TestCase):
         self.assertFalse(hasattr(slot_services, "auto_select_primary_slots"))
         self.assertFalse(hasattr(slot_services, "choose_top_engagements"))
 
+    def test_reorder_existing_active_primary_triple(self):
+        set_slot_order(self.profile, [self.e1.pk, self.e2.pk, self.e3.pk])
+        set_slot_order(self.profile, [self.e3.pk, self.e2.pk, self.e1.pk])
+        assert_hard_integrity(self.profile)
+        ordered = list(
+            ExperienceSlot.objects.filter(
+                static_resume_profile=self.profile, is_active=True, is_primary=True
+            )
+            .order_by("sequence")
+            .values_list("career_engagement_id", "sequence")
+        )
+        self.assertEqual(
+            ordered,
+            [(self.e3.pk, 1), (self.e2.pk, 2), (self.e1.pk, 3)],
+        )
+
+    def test_replace_one_engagement_in_established_triple(self):
+        set_slot_order(self.profile, [self.e1.pk, self.e2.pk, self.e3.pk])
+        set_slot_order(self.profile, [self.e1.pk, self.e2.pk, self.e4.pk])
+        assert_hard_integrity(self.profile)
+        ordered = list(
+            ExperienceSlot.objects.filter(
+                static_resume_profile=self.profile, is_active=True, is_primary=True
+            )
+            .order_by("sequence")
+            .values_list("career_engagement_id", "sequence")
+        )
+        self.assertEqual(
+            ordered,
+            [(self.e1.pk, 1), (self.e2.pk, 2), (self.e4.pk, 3)],
+        )
+        self.assertFalse(
+            ExperienceSlot.objects.filter(
+                static_resume_profile=self.profile,
+                career_engagement=self.e3,
+                is_active=True,
+                is_primary=True,
+            ).exists()
+        )
+
 
 class ExperienceSlotUITests(TestCase):
     def setUp(self):
@@ -127,6 +167,7 @@ class ExperienceSlotUITests(TestCase):
             _engagement(self.memory, "Two", 2),
             _engagement(self.memory, "Three", 3),
         ]
+        self.e4 = _engagement(self.memory, "Four", 4)
 
     def test_get_workspace(self):
         url = reverse("candidate_memory:experience_slots", args=[self.memory.pk])
@@ -167,6 +208,80 @@ class ExperienceSlotUITests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "distinct CareerEngagement")
         self.assertEqual(ExperienceSlot.objects.filter(static_resume_profile=self.profile).count(), 0)
+
+    def test_post_reorder_existing_active_primary_triple(self):
+        url = reverse("candidate_memory:experience_slots", args=[self.memory.pk])
+        initial = self.client.post(
+            url,
+            {
+                "slot_1": self.engagements[0].pk,
+                "slot_2": self.engagements[1].pk,
+                "slot_3": self.engagements[2].pk,
+            },
+        )
+        self.assertEqual(initial.status_code, 302)
+        response = self.client.post(
+            url,
+            {
+                "slot_1": self.engagements[2].pk,
+                "slot_2": self.engagements[1].pk,
+                "slot_3": self.engagements[0].pk,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        assert_hard_integrity(self.profile)
+        ordered = list(
+            ExperienceSlot.objects.filter(
+                static_resume_profile=self.profile, is_active=True, is_primary=True
+            )
+            .order_by("sequence")
+            .values_list("career_engagement_id", "sequence")
+        )
+        self.assertEqual(
+            ordered,
+            [
+                (self.engagements[2].pk, 1),
+                (self.engagements[1].pk, 2),
+                (self.engagements[0].pk, 3),
+            ],
+        )
+
+    def test_post_replace_one_engagement_in_established_triple(self):
+        url = reverse("candidate_memory:experience_slots", args=[self.memory.pk])
+        initial = self.client.post(
+            url,
+            {
+                "slot_1": self.engagements[0].pk,
+                "slot_2": self.engagements[1].pk,
+                "slot_3": self.engagements[2].pk,
+            },
+        )
+        self.assertEqual(initial.status_code, 302)
+        response = self.client.post(
+            url,
+            {
+                "slot_1": self.engagements[0].pk,
+                "slot_2": self.engagements[1].pk,
+                "slot_3": self.e4.pk,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        assert_hard_integrity(self.profile)
+        ordered = list(
+            ExperienceSlot.objects.filter(
+                static_resume_profile=self.profile, is_active=True, is_primary=True
+            )
+            .order_by("sequence")
+            .values_list("career_engagement_id", "sequence")
+        )
+        self.assertEqual(
+            ordered,
+            [
+                (self.engagements[0].pk, 1),
+                (self.engagements[1].pk, 2),
+                (self.e4.pk, 3),
+            ],
+        )
 
 
 class ProfileDurabilityTests(TestCase):

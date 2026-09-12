@@ -68,18 +68,35 @@ def create_or_activate_slot(
 
 @transaction.atomic
 def set_slot_order(profile: StaticResumeProfile, ordered_engagement_ids: list[int]) -> list[ExperienceSlot]:
-    """Set explicit 1..N ordering for active primary slots from operator-selected engagements."""
+    """Set explicit 1..N ordering for active primary slots from operator-selected engagements.
+
+    Collision-safe under PostgreSQL's conditional unique active-primary sequence constraint:
+    deactivate affected active-primary slots before assigning final sequences 1..N, then
+    reactivate the operator-selected engagements in the requested order.
+    """
     if len(ordered_engagement_ids) != len(set(ordered_engagement_ids)):
         raise ExperienceSlotServiceError("Ordered engagement IDs must be unique.")
 
-    slots: list[ExperienceSlot] = []
-    for index, engagement_id in enumerate(ordered_engagement_ids, start=1):
+    engagements: list[CareerEngagement] = []
+    for engagement_id in ordered_engagement_ids:
         try:
-            engagement = CareerEngagement.objects.get(pk=engagement_id, memory=profile.memory)
+            engagements.append(
+                CareerEngagement.objects.get(pk=engagement_id, memory=profile.memory)
+            )
         except CareerEngagement.DoesNotExist as exc:
             raise ExperienceSlotServiceError(
                 f"CareerEngagement #{engagement_id} is not available for this candidate."
             ) from exc
+
+    # Free sequence/engagement uniqueness before reassignment (reorder and replace cases).
+    ExperienceSlot.objects.select_for_update().filter(
+        static_resume_profile=profile,
+        is_primary=True,
+        is_active=True,
+    ).update(is_active=False)
+
+    slots: list[ExperienceSlot] = []
+    for index, engagement in enumerate(engagements, start=1):
         slots.append(
             create_or_activate_slot(
                 profile=profile,
@@ -90,7 +107,7 @@ def set_slot_order(profile: StaticResumeProfile, ordered_engagement_ids: list[in
             )
         )
 
-    # Deactivate any other primary slots not in the operator selection.
+    # Keep only the operator-selected primary slots active.
     ExperienceSlot.objects.filter(
         static_resume_profile=profile,
         is_primary=True,
