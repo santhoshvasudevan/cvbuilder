@@ -89,6 +89,8 @@ TRANSITIONS = {
     RunStateName.OPERATOR_ESCALATION: {
         RunStateName.ORCHA_DECISION,
         RunStateName.AUDITING,
+        RunStateName.IMPLEMENTING,
+        RunStateName.CORRECTING,
     },
 }
 

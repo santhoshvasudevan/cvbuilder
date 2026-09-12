@@ -32,6 +32,8 @@ from tools.dev_orchestrator.tmux_ui import render_event
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 BASE = "a" * 40
 RESULT = "b" * 40
+CORRECTED = "e" * 40
+REPAIRED = "d" * 40
 M3A_REQUIREMENTS = [
     "FACT-002",
     "FACT-003",
@@ -253,12 +255,11 @@ class ControllerTests(unittest.TestCase):
         controller.repository = FakeRepository()
         return controller, adapters
 
-    def prepare_run(self, controller, state_name=RunStateName.IMPLEMENTING, session_id=""):
-        run_id = "m3a-test"
+    def prepare_run(self, controller, state_name=RunStateName.IMPLEMENTING, session_id="", run_id="m3a-test"):
         paths = controller.paths(run_id)
-        paths.root.mkdir(parents=True)
-        paths.handoffs.mkdir()
-        paths.logs.mkdir()
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.handoffs.mkdir(exist_ok=True)
+        paths.logs.mkdir(exist_ok=True)
         contract = json.loads(
             (REPOSITORY_ROOT / ".orchestration/contracts/M3A.json").read_text(encoding="utf-8")
         )
@@ -701,6 +702,231 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(adapters["reviewer"].requests[0].workdir, audit_worktree)
         events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
         self.assertIn("reviewer_recovery_retry", events)
+
+    def _prepare_implementer_strict_output_escalation(
+        self,
+        controller,
+        *,
+        run_id="m3a-test",
+        session_id="persisted-session",
+        register_worktree=True,
+        emit_failure=True,
+        failure_message="agent exited successfully without a valid structured final output",
+        correction_cycles=1,
+        write_malformed_final=True,
+        create_handoff=False,
+    ):
+        run_id = self.prepare_run(
+            controller,
+            state_name=RunStateName.OPERATOR_ESCALATION,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        if register_worktree:
+            controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        state.controller_sha = "c" * 40
+        state.correction_cycles = correction_cycles
+        state.last_error = failure_message
+        if not session_id:
+            state.sessions.pop("implementer", None)
+        StateStore(paths.state).save(state)
+        if emit_failure:
+            EventLog(paths.events).emit(
+                run_id=run_id,
+                role="IMPLEMENTER",
+                state=RunStateName.OPERATOR_ESCALATION.value,
+                event="agent_failure",
+                message=failure_message,
+            )
+        if write_malformed_final:
+            malformed = (
+                '```json\n{"schema_version":1,"status":"IMPLEMENTED"}\n```\n'
+                "Additional prose that must not be accepted as a handoff.\n"
+            )
+            (paths.logs / "implementer-001.final.json").write_text(malformed, encoding="utf-8")
+        if create_handoff:
+            _atomic_json(
+                paths.handoffs / f"implementer-{correction_cycles:02d}.json",
+                implementer(result_sha=RESULT),
+            )
+        return run_id, paths, implementation
+
+    def test_failed_implementer_can_retry_strict_output_after_tooling_repair(self):
+        corrected_handoff = implementer(result_sha=CORRECTED)
+        corrected_handoff["files_changed"] = [
+            "candidate_memory/models.py",
+            "candidate_memory/tests/test_models.py",
+        ]
+        review = audit()
+        review["candidate_sha"] = CORRECTED
+        closed = closure()
+        closed["final_sha"] = CORRECTED
+        controller, adapters = self.make_controller(
+            implementer_responses=[corrected_handoff],
+            reviewer_responses=[review],
+            closure_responses=[closed],
+        )
+        run_id, paths, implementation = self._prepare_implementer_strict_output_escalation(controller)
+        self.assertFalse((paths.handoffs / "implementer-01.json").exists())
+        repaired_boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=REPAIRED,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+
+        def fake_run(*args, cwd=None):
+            if args[:2] == ("diff", "--name-only"):
+                if cwd is not None:
+                    return "candidate_memory/models.py\ncandidate_memory/tests/test_models.py"
+                return (
+                    "tools/dev_orchestrator/controller.py\n"
+                    "docs/DEVELOPMENT_ORCHESTRATION.md\n"
+                    "docs/DEVELOPMENT_RUNBOOK.md"
+                )
+            return ""
+
+        boundary_patch = mock.patch.object(
+            controller, "_verify_repository_boundary", return_value=repaired_boundary
+        )
+        head_patch = mock.patch.object(
+            controller.repository,
+            "head",
+            side_effect=lambda cwd=None: CORRECTED if cwd else REPAIRED,
+        )
+        run_patch = mock.patch.object(controller.repository, "run", side_effect=fake_run)
+        with boundary_patch, head_patch, run_patch:
+            resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(resumed.controller_sha, REPAIRED)
+        self.assertEqual(resumed.result_sha, CORRECTED)
+        self.assertEqual(len(adapters["implementer"].requests), 1)
+        request = adapters["implementer"].requests[0]
+        self.assertEqual(request.session_id, "persisted-session")
+        self.assertEqual(request.workdir, implementation)
+        self.assertIn("Do not modify any files", request.prompt)
+        self.assertIn(CORRECTED, request.prompt)
+        self.assertIn("candidate_memory/models.py", request.prompt)
+        self.assertIn("Return only one JSON object", request.prompt)
+        self.assertNotIn("Additional prose", request.prompt)
+        saved = json.loads((paths.handoffs / "implementer-01.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["result_sha"], CORRECTED)
+        self.assertEqual(saved["status"], "IMPLEMENTED")
+        malformed = (paths.logs / "implementer-001.final.json").read_text(encoding="utf-8")
+        self.assertIn("Additional prose", malformed)
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("implementer_strict_output_retry", events)
+        self.assertIn("cursor_resume_started", events)
+        self.assertEqual(len(list(paths.worktrees.glob("implementation"))), 1)
+
+    def test_implementer_strict_output_retry_fail_closed_preconditions(self):
+        cases = {
+            "dirty_worktree": {"status": [" M candidate_memory/models.py"]},
+            "missing_worktree": {"create_worktree": False},
+            "unregistered_worktree": {"register_worktree": False},
+            "non_descendant_head": {"is_ancestor": False},
+            "absent_session": {"session_id": ""},
+            "conflicting_handoff": {"create_handoff": True},
+            "unexpected_last_event": {
+                "failure_message": "agent exited with code 7",
+                "match": "strict-output retry",
+                "expect_no_invoke": True,
+            },
+            "same_head_as_prior_result": {"implementation_head": RESULT},
+            "no_tooling_repair": {"repair_head": "c" * 40},
+        }
+        for name, options in cases.items():
+            with self.subTest(name=name):
+                controller, adapters = self.make_controller(
+                    implementer_responses=[implementer(result_sha=CORRECTED)],
+                    reviewer_responses=[audit()],
+                )
+                expect_no_invoke = options.get("expect_no_invoke", False)
+                run_id, paths, implementation = self._prepare_implementer_strict_output_escalation(
+                    controller,
+                    run_id=f"m3a-test-{name}",
+                    session_id=options.get("session_id", "persisted-session"),
+                    register_worktree=options.get("register_worktree", True),
+                    failure_message=options.get(
+                        "failure_message",
+                        "agent exited successfully without a valid structured final output",
+                    ),
+                    create_handoff=options.get("create_handoff", False),
+                )
+                if options.get("create_worktree", True) is False:
+                    # Replace with absent path while keeping parent layout.
+                    for child in implementation.iterdir():
+                        child.unlink()
+                    implementation.rmdir()
+                    controller.repository.registered_worktrees = [
+                        path
+                        for path in controller.repository.registered_worktrees  # type: ignore[attr-defined]
+                        if path != implementation
+                    ]
+                repair_head = options.get("repair_head", REPAIRED)
+                implementation_head = options.get("implementation_head", CORRECTED)
+                boundary = GitBoundary(
+                    branch="buildwithAgent",
+                    head=repair_head,
+                    clean=True,
+                    default_branch_is_ancestor=True,
+                    bootstrap_base_is_ancestor=True,
+                    excluded_ancestors=(),
+                )
+                status_value = options.get("status", [])
+                is_ancestor_value = options.get("is_ancestor", True)
+
+                def fake_run(*args, cwd=None):
+                    if args[:2] == ("diff", "--name-only"):
+                        if cwd is not None:
+                            return "candidate_memory/models.py"
+                        return (
+                            "tools/dev_orchestrator/controller.py\n"
+                            "docs/DEVELOPMENT_ORCHESTRATION.md"
+                        )
+                    return ""
+
+                patches = [
+                    mock.patch.object(controller, "_verify_repository_boundary", return_value=boundary),
+                    mock.patch.object(
+                        controller.repository,
+                        "head",
+                        side_effect=lambda cwd=None: implementation_head if cwd else repair_head,
+                    ),
+                    mock.patch.object(
+                        controller.repository, "status", side_effect=lambda cwd=None: list(status_value)
+                    ),
+                    mock.patch.object(
+                        controller.repository,
+                        "is_ancestor",
+                        side_effect=lambda ancestor, descendant: bool(
+                            is_ancestor_value and ancestor and descendant
+                        ),
+                    ),
+                    mock.patch.object(controller.repository, "run", side_effect=fake_run),
+                ]
+                with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                    resumed = controller.execute(run_id, resume=True)
+
+                self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+                self.assertEqual(adapters["implementer"].requests, [])
+                events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+                self.assertNotIn("implementer_strict_output_retry", events)
+                if options.get("create_handoff"):
+                    saved = json.loads((paths.handoffs / "implementer-01.json").read_text(encoding="utf-8"))
+                    self.assertEqual(saved["result_sha"], RESULT)
+                else:
+                    self.assertFalse((paths.handoffs / "implementer-01.json").exists())
+                if not expect_no_invoke:
+                    self.assertTrue(resumed.last_error)
 
     def test_codex_output_schemas_give_const_and_enum_nodes_explicit_types(self):
         def walk(value):

@@ -30,7 +30,7 @@ from .schemas import (
     validate_operator_decision,
     validate_phase_contract,
 )
-from .state import TERMINAL_STATES, RunState, RunStateName, StateStore
+from .state import TERMINAL_STATES, RunState, RunStateName, StateStore, utc_now
 
 
 class ControllerError(RuntimeError):
@@ -337,6 +337,135 @@ class OrchestrationController:
         )
         return True
 
+    @staticmethod
+    def _is_implementer_structured_output_failure(message: str) -> bool:
+        text = (message or "").lower()
+        return "structured final output" in text or "implementer_response" in text
+
+    @staticmethod
+    def _build_implementer_strict_output_prompt(
+        *,
+        base_sha: str,
+        result_sha: str,
+        files_changed: list[str],
+        required_tests: list[str],
+    ) -> str:
+        file_lines = "\n".join(f"- {path}" for path in files_changed) or "- (none)"
+        test_lines = "\n".join(f"- {command}" for command in required_tests) or "- (none)"
+        return (
+            "Do not modify any files and do not create commits. The implementation worktree is already "
+            f"clean at commit `{result_sha}`.\n"
+            "Return only one JSON object that matches the implementer response schema. Do not include "
+            "prose, markdown fences, or any text before or after the JSON.\n"
+            f"Set status to IMPLEMENTED, base_sha to `{base_sha}`, and result_sha to `{result_sha}`.\n"
+            "files_changed must be exactly this full base-to-result path list:\n"
+            f"{file_lines}\n"
+            "test_commands must include these required tests with accurate exit codes:\n"
+            f"{test_lines}\n"
+        )
+
+    def _retry_implementer_strict_output_after_tooling_repair(
+        self,
+        state: RunState,
+        paths: RunPaths,
+        store: StateStore,
+        events: EventLog,
+    ) -> bool:
+        """Resume Cursor only to obtain a schema-only handoff for an already-committed HEAD."""
+        if (
+            not state.result_sha
+            or state.pending_operator_decision_path
+            or state.pending_implementer_prompt_path
+        ):
+            return False
+        records = list(events.read())
+        if not records:
+            return False
+        last = records[-1]
+        failure_message = str(last.get("message") or state.last_error or "")
+        if (
+            last.get("event") != "agent_failure"
+            or last.get("role") != "IMPLEMENTER"
+            or not self._is_implementer_structured_output_failure(failure_message)
+        ):
+            return False
+        handoff_path = paths.handoffs / f"implementer-{state.correction_cycles:02d}.json"
+        if handoff_path.exists():
+            raise ControllerError(
+                "implementer strict-output retry conflicts with an existing handoff for this cycle"
+            )
+        session_id = state.sessions.get("implementer", "")
+        if not session_id:
+            raise ControllerError("implementer strict-output retry requires the saved Cursor session")
+        implementation = paths.worktrees / "implementation"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if not implementation.exists() or implementation.resolve() not in registered:
+            raise ControllerError(
+                "implementer strict-output retry requires a registered implementation worktree"
+            )
+        if self.repository.status(implementation):
+            raise ControllerError("implementer strict-output retry requires a clean implementation worktree")
+        head = self.repository.head(implementation)
+        if head == state.result_sha:
+            raise ControllerError(
+                "implementer strict-output retry requires implementation HEAD to differ from the prior result"
+            )
+        if not self.repository.is_ancestor(state.base_sha, head):
+            raise ControllerError(
+                "implementer strict-output retry requires implementation HEAD to "
+                "descend from the approved base"
+            )
+        boundary = self._verify_repository_boundary(require_clean=True)
+        if boundary.head == state.controller_sha:
+            raise ControllerError(
+                "implementer strict-output retry requires a committed orchestration tooling repair"
+            )
+        self._verify_repair_checkout(state, boundary)
+        files_changed = [
+            line
+            for line in self.repository.run(
+                "diff", "--name-only", f"{state.base_sha}..{head}", cwd=implementation
+            ).splitlines()
+            if line
+        ]
+        contract = validate_phase_contract(json.loads(paths.contract_json.read_text(encoding="utf-8")))
+        prompt = self._build_implementer_strict_output_prompt(
+            base_sha=state.base_sha,
+            result_sha=head,
+            files_changed=files_changed,
+            required_tests=list(contract["required_tests"]),
+        )
+        paths.prompts.mkdir(parents=True, exist_ok=True)
+        prompt_path = self._next_artifact_path(paths.prompts, "implementer-strict-output", ".txt")
+        _atomic_text(prompt_path, prompt)
+        prompt_hash = _sha256_bytes(prompt.encode("utf-8"))
+        target = (
+            RunStateName.CORRECTING if state.correction_cycles > 0 else RunStateName.IMPLEMENTING
+        )
+        state.controller_sha = boundary.head
+        state.last_error = ""
+        state.latest_orcha_prompt_path = self._relative_artifact(paths, prompt_path)
+        state.latest_orcha_prompt_sha256 = prompt_hash
+        state.pending_implementer_prompt_path = state.latest_orcha_prompt_path
+        state.transition(target)
+        store.save(state)
+        events.emit(
+            run_id=state.run_id,
+            role="IMPLEMENTER",
+            state=state.state,
+            event="implementer_strict_output_retry",
+            message=(
+                "Retrying saved Cursor session for a schema-only implementer handoff after a "
+                "bounded orchestration tooling repair"
+            ),
+            result_sha=head,
+            prior_result_sha=state.result_sha,
+            prompt_path=state.pending_implementer_prompt_path,
+            prompt_sha256=prompt_hash,
+            session_id=session_id,
+        )
+        return True
+
     def record_operator_decision(self, run_id: str, value: dict) -> tuple[RunState, Path]:
         paths = self.paths(run_id)
         store = StateStore(paths.state)
@@ -569,7 +698,11 @@ class OrchestrationController:
         _atomic_json(paths.handoffs / name, handoff)
 
     def _fail_agent(self, state: RunState, store: StateStore, events: EventLog, role: str, error: str):
-        state.transition(RunStateName.OPERATOR_ESCALATION, error)
+        if RunStateName(state.state) != RunStateName.OPERATOR_ESCALATION:
+            state.transition(RunStateName.OPERATOR_ESCALATION, error)
+        else:
+            state.last_error = error
+            state.updated_at = utc_now()
         store.save(state)
         events.emit(
             run_id=state.run_id,
@@ -600,6 +733,11 @@ class OrchestrationController:
                 self._retry_reviewer_after_tooling_repair(state, paths, store, events)
             except (GitSafetyError, ControllerError, ValueError) as exc:
                 return self._fail_agent(state, store, events, "REVIEWER", str(exc))
+        if resume and state.state == RunStateName.OPERATOR_ESCALATION.value:
+            try:
+                self._retry_implementer_strict_output_after_tooling_repair(state, paths, store, events)
+            except (GitSafetyError, ControllerError, ValueError) as exc:
+                return self._fail_agent(state, store, events, "IMPLEMENTER", str(exc))
         if (
             state.state == RunStateName.OPERATOR_ESCALATION.value
             and state.pending_operator_decision_path

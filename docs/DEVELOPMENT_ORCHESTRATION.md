@@ -61,6 +61,16 @@ result SHA; it reuses those worktrees and emits a durable `reviewer_recovery_ret
 schemas declare explicit JSON types for every `const` and `enum` constraint so the reviewer API can
 validate them before the audit starts.
 
+If the implementer commits a correction but its final message is missing or invalid structured output
+(for example schema-valid JSON followed by prose), `resume` may retry only the saved Cursor session
+after a committed, bounded orchestration-tooling repair. The controller requires the implementation
+worktree to remain registered and clean, its HEAD to be a descendant of the approved base and different
+from the prior recorded result, the saved implementer session to exist, and no conflicting handoff for
+the current correction cycle. It persists an exact no-file-change prompt that demands schema-only JSON
+for the already-committed HEAD (with the full base-to-result file list and required tests), emits
+`implementer_strict_output_retry`, and continues through the normal evidence boundary. Parsing and
+schema validation are not relaxed; the malformed prior message is never accepted as a handoff.
+
 The explicit states are `PREPARING`, `AWAITING_PHASE_APPROVAL`, `IMPLEMENTING`,
 `IMPLEMENTER_QUESTION`, `ORCHA_DECISION`, `VALIDATING_IMPLEMENTATION`, `AUDITING`,
 `CORRECTION_REQUIRED`, `ORCHA_CORRECTION_CONTRACT`, `CORRECTING`, `CLOSURE_REVIEW`, `COMPLETED`,

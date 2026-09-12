@@ -80,6 +80,15 @@ The controller will retry the audit only when both existing worktrees are regist
 recorded result SHA, the evidence artifact exists, and the latest durable event is a reviewer failure.
 It does not rerun Cursor or create another implementation worktree.
 
+When the implementer has already committed a correction but escalated because the Cursor final message
+was not strict schema-only JSON, repair and commit only the orchestration tooling, then `resume`. The
+controller retries the saved Cursor session only when the implementation worktree is registered, clean,
+and at a HEAD that descends from the approved base and differs from the prior recorded result, the
+session ID exists, the latest event is an implementer structured-output failure, and no conflicting
+handoff exists for the cycle. The persisted prompt forbids further file changes and demands only the
+implementer schema JSON for that HEAD; evidence collection then reruns reported commands against the
+full base-to-result boundary.
+
 An audit that returns `CORRECTION_REQUIRED` may include a failed reviewer-side command when the
 isolated audit worktree cannot access local credentials. The controller records that failure and the
 findings, independently reruns every successful reported command, and continues to Agent Orcha. A
