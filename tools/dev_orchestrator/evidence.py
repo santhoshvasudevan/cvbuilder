@@ -12,8 +12,10 @@ from typing import Callable
 
 from .git_safety import GitRepository
 
-# Read-only git revision endpoints for allowlisted `git diff --check` forms.
-# Rejects leading dashes (option injection) and shell/path metacharacters.
+# Bare revision endpoints for allowlisted `git diff --check` forms.
+# Dots are allowed in names (e.g. tags) but never as range delimiters (`..`).
+# Leading dashes (option injection) and shell/path metacharacters are rejected.
+# Matching this pattern is not sufficient: endpoints must also resolve to commits.
 _SAFE_GIT_REVISION_ENDPOINT = re.compile(r"\A(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/@~^-]*)\Z")
 
 
@@ -103,33 +105,81 @@ class EvidenceCollector:
 
     @staticmethod
     def _is_safe_git_revision_endpoint(value: str) -> bool:
-        return bool(value) and _SAFE_GIT_REVISION_ENDPOINT.fullmatch(value) is not None
+        if not value or value.startswith("-") or ".." in value:
+            return False
+        return _SAFE_GIT_REVISION_ENDPOINT.fullmatch(value) is not None
 
     @classmethod
-    def _is_safe_git_diff_check_revision(cls, value: str) -> bool:
-        """Accept a single endpoint or an explicit A..B / A...B range token."""
+    def _parse_single_range_token(cls, value: str) -> tuple[str, str] | None:
+        """Parse exactly one A..B or A...B token; both sides must be bare endpoints."""
         if "..." in value:
-            left, _, right = value.partition("...")
-            return cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right)
+            left, sep, right = value.partition("...")
+            if not sep or ".." in left or ".." in right:
+                return None
+            if cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right):
+                return left, right
+            return None
         if ".." in value:
-            left, _, right = value.partition("..")
-            return cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right)
-        return cls._is_safe_git_revision_endpoint(value)
+            left, sep, right = value.partition("..")
+            if not sep or ".." in left or ".." in right:
+                return None
+            if cls._is_safe_git_revision_endpoint(left) and cls._is_safe_git_revision_endpoint(right):
+                return left, right
+            return None
+        return None
 
     @classmethod
-    def _validate_git_diff_check_argv(cls, argv: list[str]) -> None:
-        """Allow only `git diff --check` with zero or one explicit commit range/endpoints."""
+    def _git_diff_check_endpoints(cls, argv: list[str]) -> tuple[str, ...]:
+        """
+        Enforce the documented `git diff --check` grammar and return endpoints to verify.
+
+        Accepted forms:
+        - zero endpoints
+        - one bare revision endpoint
+        - two bare revision endpoints
+        - exactly one A..B / A...B token whose sides contain no further range delimiters
+        """
         if len(argv) < 3 or argv[1] != "diff" or argv[2] != "--check":
             raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
         extras = argv[3:]
         if len(extras) > 2:
             raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+        if len(extras) == 0:
+            return ()
         if len(extras) == 2:
+            # Two-token form: both must be bare endpoints (never range tokens).
             if not all(cls._is_safe_git_revision_endpoint(token) for token in extras):
                 raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
-            return
-        if len(extras) == 1 and not cls._is_safe_git_diff_check_revision(extras[0]):
+            return (extras[0], extras[1])
+        token = extras[0]
+        if ".." in token:
+            parsed = cls._parse_single_range_token(token)
+            if parsed is None:
+                raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+            return parsed
+        if not cls._is_safe_git_revision_endpoint(token):
             raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
+        return (token,)
+
+    @staticmethod
+    def _revision_resolves_to_commit(endpoint: str, worktree: Path) -> bool:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{endpoint}^{{commit}}"],
+            cwd=worktree,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    def _verify_git_diff_check_endpoints(self, endpoints: tuple[str, ...], worktree: Path) -> None:
+        for endpoint in endpoints:
+            if not self._revision_resolves_to_commit(endpoint, worktree):
+                raise EvidenceError(
+                    f"git diff --check revision does not resolve to a commit: {endpoint!r}"
+                )
 
     @staticmethod
     def _validate_verification_argv(argv: list[str]) -> None:
@@ -150,7 +200,7 @@ class EvidenceCollector:
             if argv[1:] == ["status", "--short"]:
                 return
             if len(argv) >= 3 and argv[1] == "diff" and argv[2] == "--check":
-                EvidenceCollector._validate_git_diff_check_argv(argv)
+                EvidenceCollector._git_diff_check_endpoints(argv)
                 return
             raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
         if executable.startswith("python") and len(argv) >= 3:
@@ -165,6 +215,17 @@ class EvidenceCollector:
                 return
         raise EvidenceError(f"unapproved verification executable/arguments: {argv!r}")
 
+    def _prepare_verification_argv(self, argv: list[str], worktree: Path) -> list[str]:
+        self._validate_verification_argv(argv)
+        executable = Path(argv[0]).name
+        if executable == "git" and len(argv) >= 3 and argv[1] == "diff" and argv[2] == "--check":
+            endpoints = self._git_diff_check_endpoints(argv)
+            self._verify_git_diff_check_endpoints(endpoints, worktree)
+            # Disambiguate: force revision/range parsing; never treat tokens as pathspecs.
+            if endpoints:
+                return [*argv, "--"]
+        return list(argv)
+
     def _execute_test_commands(self, worktree: Path, reported: list[dict]) -> tuple[tuple[str, int], ...]:
         observed = []
         for item in reported:
@@ -178,8 +239,8 @@ class EvidenceCollector:
             # Shell operators are never accepted: every verification runs as an argument array.
             if any(token in {"|", "||", "&&", ";", ">", ">>", "<", "`"} for token in argv):
                 raise EvidenceError(f"verification command requires forbidden shell syntax: {command!r}")
-            self._validate_verification_argv(argv)
-            exit_code = self.command_runner(argv, worktree)
+            exec_argv = self._prepare_verification_argv(argv, worktree)
+            exit_code = self.command_runner(exec_argv, worktree)
             observed.append((command, exit_code))
             if exit_code != item["exit_code"]:
                 raise EvidenceError(

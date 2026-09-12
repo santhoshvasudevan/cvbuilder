@@ -92,8 +92,12 @@ cleanliness, commit range, changed/untracked files, allowed/prohibited paths, un
 independently re-executes the allowlisted reported commands with argument arrays and compares their
 real exit codes with the handoff instead of trusting the agent's summary.
 Allowed Git verification forms are only `git status --short` and read-only `git diff --check`
-(optionally with one explicit commit range token `A..B` / `A...B`, or one or two safe revision
-endpoints). Shell operators, leading-dash option injection, malformed revisions, other git
+with exactly this grammar: zero endpoints; one revision endpoint; two revision endpoints; or
+exactly one `A..B` / `A...B` token whose two sides contain no further range delimiters. Each
+endpoint must resolve to a commit via `git rev-parse` in the candidate worktree before the
+command is accepted or executed; filesystem paths and nonexistent revisions are rejected, and
+accepted forms are executed with a trailing `--` so tokens cannot be reinterpreted as pathspecs.
+Shell operators, leading-dash option injection, nested/empty/multiple-range forms, other git
 subcommands, and write-capable commands remain rejected.
 Malformed handoffs, nonexistent or wrong-base SHAs, failed commands, dirty worktrees, and prohibited
 changes cannot reach closure. The reviewer receives the contract and candidate Git state, not the

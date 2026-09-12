@@ -1038,37 +1038,98 @@ class EvidenceCollectorTests(unittest.TestCase):
                 test_commands=[{"command": f"{sys.executable} -c pass", "exit_code": 0}],
             )
 
-    def test_accepts_git_diff_check_with_commit_endpoints(self):
-        collector = EvidenceCollector(self.repository, command_runner=lambda argv, cwd: 0)
-        for command in (
-            "git diff --check",
-            "git diff --check HEAD",
-            f"git diff --check {self.base} HEAD",
-            f"git diff --check {self.base}..HEAD",
-            f"git diff --check {self.base}...HEAD",
-        ):
+    def test_accepts_and_executes_valid_git_diff_check_forms(self):
+        self.commit("candidate_memory/models.py", "M3A = True\n")
+        executed: list[list[str]] = []
+
+        def runner(argv: list[str], cwd: Path) -> int:
+            executed.append(list(argv))
+            return EvidenceCollector._run_command(argv, cwd)
+
+        collector = EvidenceCollector(self.repository, command_runner=runner)
+        cases = (
+            ("git diff --check", ("git", "diff", "--check")),
+            ("git diff --check HEAD", ("git", "diff", "--check", "HEAD", "--")),
+            (
+                f"git diff --check {self.base} HEAD",
+                ("git", "diff", "--check", self.base, "HEAD", "--"),
+            ),
+            (
+                f"git diff --check {self.base}..HEAD",
+                ("git", "diff", "--check", f"{self.base}..HEAD", "--"),
+            ),
+            (
+                f"git diff --check {self.base}...HEAD",
+                ("git", "diff", "--check", f"{self.base}...HEAD", "--"),
+            ),
+        )
+        for command, expected_argv in cases:
             with self.subTest(command=command):
+                executed.clear()
                 observed = collector.validate_test_commands(
                     self.root,
                     [{"command": command, "exit_code": 0}],
                 )
                 self.assertEqual(observed, ((command, 0),))
+                self.assertEqual(executed, [list(expected_argv)])
 
-    def test_rejects_unsafe_git_diff_check_forms(self):
-        collector = EvidenceCollector(self.repository, command_runner=lambda argv, cwd: 0)
+    def test_rejects_pathspec_smuggling_as_diff_check_endpoint(self):
+        self.commit("candidate_memory/models.py", "M3A = True\n")
+        path = "candidate_memory/models.py"
+        # Git treats a filesystem path as a pathspec and can exit 0 (false-clean).
+        probe = subprocess.run(
+            ["git", "diff", "--check", "HEAD", path],
+            cwd=self.root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(probe.returncode, 0)
+        with self.assertRaisesRegex(EvidenceError, "does not resolve to a commit"):
+            self.collector.validate_test_commands(
+                self.root,
+                [{"command": f"git diff --check HEAD {path}", "exit_code": 0}],
+            )
+
+    def test_rejects_nonexistent_git_diff_check_revision(self):
+        missing = "a" * 40
+        with self.assertRaisesRegex(EvidenceError, "does not resolve to a commit"):
+            self.collector.validate_test_commands(
+                self.root,
+                [{"command": f"git diff --check {missing} HEAD", "exit_code": 0}],
+            )
+
+    def test_observes_nonzero_git_diff_check_exit(self):
+        self.commit("candidate_memory/models.py", "TRAILING = 1   \n")
+        command = f"git diff --check {self.base} HEAD"
+        with self.assertRaisesRegex(EvidenceError, "observed"):
+            self.collector.validate_test_commands(
+                self.root,
+                [{"command": command, "exit_code": 0}],
+            )
+
+    def test_rejects_malformed_and_unsafe_git_diff_check_forms(self):
         for command in (
             "git diff --check --cached",
             "git diff --check -n",
             "git diff --check HEAD -- candidate_memory/models.py",
             f"git diff --check {self.base} HEAD extra",
             "git diff --check ..HEAD",
+            "git diff --check HEAD..",
+            "git diff --check HEAD..HEAD..HEAD",
+            "git diff --check HEAD....HEAD",
+            f"git diff --check {self.base}..HEAD HEAD",
+            f"git diff --check HEAD {self.base}..HEAD",
+            f"git diff --check {self.base}..HEAD {self.base}..HEAD",
             "git diff --check 'HEAD;rm'",
             "git checkout HEAD",
             "git commit -am x",
         ):
             with self.subTest(command=command):
                 with self.assertRaisesRegex(EvidenceError, "unapproved"):
-                    collector.validate_test_commands(
+                    self.collector.validate_test_commands(
                         self.root,
                         [{"command": command, "exit_code": 0}],
                     )
