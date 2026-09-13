@@ -79,7 +79,9 @@ repair without changing the product commit. The rejected handoff remains append-
 corrected handoff artifact is written and selected through `active_implementer_handoff_path`. The
 implementation worktree must stay registered, clean, and pinned at `result_sha`, the returned
 `result_sha` must match that pin, and a second resume reuses the corrected artifact instead of
-re-prompting. Other evidence failures remain operator escalations.
+re-prompting. Reused corrected artifacts must also match the current run identity (`IMPLEMENTED`,
+matching `base_sha` and pinned `result_sha`) or the controller fails closed. Other evidence failures
+remain operator escalations.
 
 The explicit states are `PREPARING`, `AWAITING_PHASE_APPROVAL`, `IMPLEMENTING`,
 `IMPLEMENTER_QUESTION`, `ORCHA_DECISION`, `VALIDATING_IMPLEMENTATION`, `AUDITING`,

@@ -368,6 +368,28 @@ class OrchestrationController:
         pattern = f"implementer-{state.correction_cycles:02d}-evidence-corrected-*.json"
         return sorted(paths.handoffs.glob(pattern))
 
+    def _load_reusable_evidence_corrected_handoff(self, state: RunState, path: Path) -> dict:
+        """Schema-validate and prove a corrected handoff belongs to this run/cycle before reuse."""
+        try:
+            handoff = validate_implementer_response(json.loads(path.read_text(encoding="utf-8")))
+        except (SchemaError, json.JSONDecodeError, OSError) as exc:
+            raise ControllerError(
+                "implementer evidence-handoff retry found an unusable corrected handoff"
+            ) from exc
+        if handoff["status"] != "IMPLEMENTED":
+            raise ControllerError(
+                "corrected implementer handoff status must be IMPLEMENTED for reuse"
+            )
+        if handoff["base_sha"] != state.base_sha:
+            raise ControllerError(
+                "corrected implementer handoff base_sha does not match the approved run base"
+            )
+        if handoff["result_sha"] != state.result_sha:
+            raise ControllerError(
+                "corrected implementer handoff result_sha does not match the pinned result SHA"
+            )
+        return handoff
+
     def _is_evidence_handoff_repair_prompt(self, prompt_path: str) -> bool:
         name = Path(prompt_path).name
         return name.startswith("implementer-evidence-handoff-") and name.endswith(".txt")
@@ -591,12 +613,7 @@ class OrchestrationController:
         if existing_corrected:
             corrected_path = existing_corrected[-1]
             relative = self._relative_artifact(paths, corrected_path)
-            try:
-                validate_implementer_response(json.loads(corrected_path.read_text(encoding="utf-8")))
-            except (SchemaError, json.JSONDecodeError, OSError) as exc:
-                raise ControllerError(
-                    "implementer evidence-handoff retry found an unusable corrected handoff"
-                ) from exc
+            self._load_reusable_evidence_corrected_handoff(state, corrected_path)
             state.controller_sha = boundary.head
             state.last_error = ""
             state.active_implementer_handoff_path = relative
@@ -1041,17 +1058,9 @@ class OrchestrationController:
                     if existing_corrected:
                         corrected_path = existing_corrected[-1]
                         try:
-                            validate_implementer_response(
-                                json.loads(corrected_path.read_text(encoding="utf-8"))
-                            )
-                        except (SchemaError, json.JSONDecodeError, OSError) as exc:
-                            return self._fail_agent(
-                                state,
-                                store,
-                                events,
-                                "ORCHA",
-                                f"existing corrected implementer handoff is unusable: {exc}",
-                            )
+                            self._load_reusable_evidence_corrected_handoff(state, corrected_path)
+                        except ControllerError as exc:
+                            return self._fail_agent(state, store, events, "ORCHA", str(exc))
                         if self.repository.head(implementation_worktree) != state.result_sha:
                             return self._fail_agent(
                                 state,

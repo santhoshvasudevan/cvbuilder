@@ -1173,6 +1173,75 @@ class ControllerTests(unittest.TestCase):
         events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
         self.assertIn("implementer_evidence_handoff_retry_idempotent", events)
 
+    def test_evidence_handoff_reuse_rejects_forged_corrected_artifacts(self):
+        cases = {
+            "wrong_base_sha": {"base_sha": "1" * 40, "match": "base_sha"},
+            "wrong_result_sha": {"result_sha": CORRECTED, "match": "result_sha"},
+            "non_implemented": {"status": "BLOCKED", "result_sha": "", "match": "IMPLEMENTED"},
+        }
+        for name, options in cases.items():
+            with self.subTest(name=name):
+                controller, adapters = self.make_controller(
+                    implementer_responses=[implementer()],
+                    reviewer_responses=[audit()],
+                )
+                run_id, paths, implementation, rejected_path, rejected_bytes = (
+                    self._prepare_evidence_handoff_escalation(
+                        controller,
+                        run_id=f"m3a-evidence-forge-{name}",
+                    )
+                )
+                forged = implementer(result_sha=options.get("result_sha", RESULT))
+                if "base_sha" in options:
+                    forged["base_sha"] = options["base_sha"]
+                if "status" in options:
+                    forged["status"] = options["status"]
+                    forged["result_sha"] = options.get("result_sha", "")
+                    forged["questions"] = []
+                    if options["status"] == "BLOCKED":
+                        forged["summary"] = "blocked"
+                _atomic_json(
+                    paths.handoffs / "implementer-02-evidence-corrected-01.json",
+                    forged,
+                )
+                boundary = GitBoundary(
+                    branch="buildwithAgent",
+                    head=REPAIRED,
+                    clean=True,
+                    default_branch_is_ancestor=True,
+                    bootstrap_base_is_ancestor=True,
+                    excluded_ancestors=(),
+                )
+
+                def fake_run(*args, cwd=None):
+                    if args[:2] == ("diff", "--name-only"):
+                        return "tools/dev_orchestrator/controller.py"
+                    return ""
+
+                with (
+                    mock.patch.object(
+                        controller, "_verify_repository_boundary", return_value=boundary
+                    ),
+                    mock.patch.object(
+                        controller.repository,
+                        "head",
+                        side_effect=lambda cwd=None: RESULT if cwd else REPAIRED,
+                    ),
+                    mock.patch.object(controller.repository, "run", side_effect=fake_run),
+                ):
+                    resumed = controller.execute(run_id, resume=True)
+
+                self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+                self.assertIn(options["match"], resumed.last_error)
+                self.assertEqual(adapters["implementer"].requests, [])
+                self.assertEqual(rejected_path.read_bytes(), rejected_bytes)
+                self.assertFalse(resumed.active_implementer_handoff_path)
+                events = [
+                    json.loads(line)["event"] for line in paths.events.read_text().splitlines()
+                ]
+                self.assertNotIn("implementer_evidence_handoff_retry_idempotent", events)
+                self.assertNotIn("implementer_evidence_handoff_corrected", events)
+
     def test_evidence_handoff_retry_fail_closed_preconditions(self):
         cases = {
             "dirty_worktree": {"status": [" M candidate_memory/models.py"]},

@@ -94,7 +94,9 @@ When evidence validation rejects that handoff only because `test_commands` conta
 `required_tests` text, repair and commit orchestration tooling, then `resume` again. The controller
 keeps the rejected handoff intact, asks Cursor for a corrected schema-only handoff pinned to the same
 `result_sha`, stores the replacement under an append-only corrected artifact, and points validation at
-it. Duplicate resume reuses that artifact and does not consume another correction cycle.
+it. Duplicate resume reuses that artifact only when it remains schema-valid and semantically identical
+to the current run (`status=IMPLEMENTED`, matching `base_sha`/`result_sha`); forged or mismatched
+corrected artifacts fail closed without re-prompting Cursor or consuming another correction cycle.
 
 An audit that returns `CORRECTION_REQUIRED` may include a failed reviewer-side command when the
 isolated audit worktree cannot access local credentials. The controller records that failure and the
