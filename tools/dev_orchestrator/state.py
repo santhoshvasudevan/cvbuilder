@@ -91,6 +91,7 @@ TRANSITIONS = {
         RunStateName.AUDITING,
         RunStateName.IMPLEMENTING,
         RunStateName.CORRECTING,
+        RunStateName.VALIDATING_IMPLEMENTATION,
     },
 }
 
@@ -118,6 +119,7 @@ class RunState:
     latest_orcha_prompt_path: str = ""
     latest_orcha_prompt_sha256: str = ""
     pending_implementer_prompt_path: str = ""
+    active_implementer_handoff_path: str = ""
     last_error: str = ""
     created_at: str = dataclasses.field(default_factory=utc_now)
     updated_at: str = dataclasses.field(default_factory=utc_now)

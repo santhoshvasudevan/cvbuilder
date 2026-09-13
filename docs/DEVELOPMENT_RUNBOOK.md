@@ -87,7 +87,14 @@ and at a HEAD that descends from the approved base and differs from the prior re
 session ID exists, the latest event is an implementer structured-output failure, and no conflicting
 handoff exists for the cycle. The persisted prompt forbids further file changes and demands only the
 implementer schema JSON for that HEAD; evidence collection then reruns reported commands against the
-full base-to-result boundary.
+full base-to-result boundary. Strict-output prompts include only executable required tests in
+`test_commands` instructions.
+
+When evidence validation rejects that handoff only because `test_commands` contained narrative
+`required_tests` text, repair and commit orchestration tooling, then `resume` again. The controller
+keeps the rejected handoff intact, asks Cursor for a corrected schema-only handoff pinned to the same
+`result_sha`, stores the replacement under an append-only corrected artifact, and points validation at
+it. Duplicate resume reuses that artifact and does not consume another correction cycle.
 
 An audit that returns `CORRECTION_REQUIRED` may include a failed reviewer-side command when the
 isolated audit worktree cannot access local credentials. The controller records that failure and the

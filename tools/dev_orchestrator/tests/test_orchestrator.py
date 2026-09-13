@@ -816,6 +816,14 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(CORRECTED, request.prompt)
         self.assertIn("candidate_memory/models.py", request.prompt)
         self.assertIn("Return only one JSON object", request.prompt)
+        self.assertIn(".venv/bin/python manage.py test candidate_memory", request.prompt)
+        self.assertIn("make verify", request.prompt)
+        self.assertIn("test_commands must contain only real executable commands", request.prompt)
+        executable_section = request.prompt.split(
+            "Narrative expectations remain acceptance criteria only"
+        )[0]
+        self.assertNotIn("Fresh disposable PostgreSQL", executable_section)
+        self.assertNotIn("Source-ingestion fixture test", executable_section)
         self.assertNotIn("Additional prose", request.prompt)
         saved = json.loads((paths.handoffs / "implementer-01.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["result_sha"], CORRECTED)
@@ -926,6 +934,338 @@ class ControllerTests(unittest.TestCase):
                 else:
                     self.assertFalse((paths.handoffs / "implementer-01.json").exists())
                 if not expect_no_invoke:
+                    self.assertTrue(resumed.last_error)
+
+    def _prepare_evidence_handoff_escalation(
+        self,
+        controller,
+        *,
+        run_id="m3a-evidence",
+        session_id="persisted-session",
+        register_worktree=True,
+        failure_message=(
+            "unapproved verification executable/arguments: "
+            "['Fresh', 'disposable', 'PostgreSQL', 'migration', 'apply']"
+        ),
+        correction_cycles=2,
+        rejected_result_sha=RESULT,
+        create_rejected=True,
+    ):
+        run_id = self.prepare_run(
+            controller,
+            state_name=RunStateName.OPERATOR_ESCALATION,
+            session_id=session_id,
+            run_id=run_id,
+        )
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        if register_worktree:
+            controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        rejected = implementer(result_sha=rejected_result_sha)
+        rejected["test_commands"] = [
+            *rejected["test_commands"],
+            {
+                "command": "Fresh disposable PostgreSQL migration apply from zero",
+                "exit_code": 0,
+            },
+        ]
+        rejected_path = paths.handoffs / f"implementer-{correction_cycles:02d}.json"
+        rejected_bytes = b""
+        if create_rejected:
+            _atomic_json(rejected_path, rejected)
+            rejected_bytes = rejected_path.read_bytes()
+        state = StateStore(paths.state).load()
+        state.result_sha = rejected_result_sha
+        state.controller_sha = "c" * 40
+        state.correction_cycles = correction_cycles
+        state.last_error = failure_message
+        if not session_id:
+            state.sessions.pop("implementer", None)
+        StateStore(paths.state).save(state)
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message=failure_message,
+        )
+        return run_id, paths, implementation, rejected_path, rejected_bytes
+
+    def test_strict_output_prompt_omits_prose_required_tests(self):
+        prompt = OrchestrationController._build_implementer_strict_output_prompt(
+            base_sha=BASE,
+            result_sha=RESULT,
+            files_changed=["candidate_memory/models.py"],
+            required_tests=[
+                ".venv/bin/python manage.py test candidate_memory",
+                "make verify",
+                "git diff --check",
+                "Fresh disposable PostgreSQL migration apply from zero",
+                "Source-ingestion fixture test covering provenance",
+            ],
+        )
+        self.assertIn(".venv/bin/python manage.py test candidate_memory", prompt)
+        self.assertIn("make verify", prompt)
+        self.assertIn("git diff --check", prompt)
+        self.assertIn("test_commands must contain only real executable commands", prompt)
+        self.assertIn("Narrative expectations remain acceptance criteria only", prompt)
+        self.assertIn("Fresh disposable PostgreSQL migration apply from zero", prompt)
+        # Narrative appears only in the narrative section, not as a test_commands bullet requirement.
+        executable_section = prompt.split("Narrative expectations remain acceptance criteria only")[0]
+        self.assertNotIn("Fresh disposable PostgreSQL migration apply from zero", executable_section)
+
+    def test_evidence_handoff_retry_preserves_rejected_and_validates_corrected(self):
+        corrected = implementer(result_sha=RESULT)
+        review = audit()
+        controller, adapters = self.make_controller(
+            implementer_responses=[corrected],
+            reviewer_responses=[review],
+        )
+        run_id, paths, implementation, rejected_path, rejected_bytes = (
+            self._prepare_evidence_handoff_escalation(controller)
+        )
+        boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=REPAIRED,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+
+        def fake_run(*args, cwd=None):
+            if args[:2] == ("diff", "--name-only"):
+                if cwd is not None:
+                    return "candidate_memory/models.py"
+                return (
+                    "tools/dev_orchestrator/controller.py\n"
+                    "docs/DEVELOPMENT_ORCHESTRATION.md\n"
+                    "docs/DEVELOPMENT_RUNBOOK.md"
+                )
+            return ""
+
+        with (
+            mock.patch.object(controller, "_verify_repository_boundary", return_value=boundary),
+            mock.patch.object(
+                controller.repository,
+                "head",
+                side_effect=lambda cwd=None: RESULT if cwd else REPAIRED,
+            ),
+            mock.patch.object(controller.repository, "run", side_effect=fake_run),
+        ):
+            resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(resumed.correction_cycles, 2)
+        self.assertEqual(resumed.controller_sha, REPAIRED)
+        self.assertEqual(resumed.result_sha, RESULT)
+        self.assertEqual(rejected_path.read_bytes(), rejected_bytes)
+        corrected_path = paths.root / resumed.active_implementer_handoff_path
+        self.assertTrue(corrected_path.exists())
+        self.assertNotEqual(corrected_path, rejected_path)
+        self.assertEqual(
+            json.loads(corrected_path.read_text(encoding="utf-8"))["result_sha"],
+            RESULT,
+        )
+        self.assertEqual(len(adapters["implementer"].requests), 1)
+        request = adapters["implementer"].requests[0]
+        self.assertEqual(request.session_id, "persisted-session")
+        self.assertIn("test_commands must contain only real executable commands", request.prompt)
+        self.assertNotIn(
+            "['Fresh', 'disposable'",
+            request.prompt,
+        )
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("implementer_evidence_handoff_retry", events)
+        self.assertIn("implementer_evidence_handoff_corrected", events)
+
+    def test_evidence_handoff_retry_is_idempotent_on_second_resume(self):
+        corrected = implementer(result_sha=RESULT)
+        review = audit()
+        controller, adapters = self.make_controller(
+            implementer_responses=[corrected],
+            reviewer_responses=[review, audit()],
+            closure_responses=[closure(), closure()],
+        )
+        run_id, paths, implementation, rejected_path, rejected_bytes = (
+            self._prepare_evidence_handoff_escalation(controller, run_id="m3a-evidence-idem")
+        )
+        boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=REPAIRED,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+
+        def fake_run(*args, cwd=None):
+            if args[:2] == ("diff", "--name-only"):
+                if cwd is not None:
+                    return "candidate_memory/models.py"
+                return "tools/dev_orchestrator/controller.py\ndocs/DEVELOPMENT_ORCHESTRATION.md"
+            return ""
+
+        head_patch = mock.patch.object(
+            controller.repository,
+            "head",
+            side_effect=lambda cwd=None: RESULT if cwd else REPAIRED,
+        )
+        with (
+            mock.patch.object(controller, "_verify_repository_boundary", return_value=boundary),
+            head_patch,
+            mock.patch.object(controller.repository, "run", side_effect=fake_run),
+        ):
+            first = controller.execute(run_id, resume=True)
+        self.assertEqual(first.state, "COMPLETED")
+        first_corrected = first.active_implementer_handoff_path
+        first_prompt_count = len(list(paths.prompts.glob("implementer-evidence-handoff-*.txt")))
+        # Force a second resume attempt from escalation with corrected artifact already present.
+        state = StateStore(paths.state).load()
+        state.state = RunStateName.OPERATOR_ESCALATION.value
+        state.controller_sha = "c" * 40
+        state.pending_implementer_prompt_path = ""
+        state.last_error = (
+            "unapproved verification executable/arguments: ['Fresh', 'disposable']"
+        )
+        StateStore(paths.state).save(state)
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message=state.last_error,
+        )
+        second_repair = "f" * 40
+        second_boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=second_repair,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+        prior_requests = len(adapters["implementer"].requests)
+        with (
+            mock.patch.object(controller, "_verify_repository_boundary", return_value=second_boundary),
+            mock.patch.object(
+                controller.repository,
+                "head",
+                side_effect=lambda cwd=None: RESULT if cwd else second_repair,
+            ),
+            mock.patch.object(controller.repository, "run", side_effect=fake_run),
+        ):
+            second = controller.execute(run_id, resume=True)
+        self.assertEqual(second.state, "COMPLETED")
+        self.assertEqual(second.correction_cycles, 2)
+        self.assertEqual(len(adapters["implementer"].requests), prior_requests)
+        self.assertEqual(
+            len(list(paths.prompts.glob("implementer-evidence-handoff-*.txt"))),
+            first_prompt_count,
+        )
+        self.assertEqual(
+            len(list(paths.handoffs.glob("implementer-02-evidence-corrected-*.json"))),
+            1,
+        )
+        self.assertEqual(rejected_path.read_bytes(), rejected_bytes)
+        self.assertEqual(second.active_implementer_handoff_path, first_corrected)
+        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
+        self.assertIn("implementer_evidence_handoff_retry_idempotent", events)
+
+    def test_evidence_handoff_retry_fail_closed_preconditions(self):
+        cases = {
+            "dirty_worktree": {"status": [" M candidate_memory/models.py"]},
+            "missing_worktree": {"create_worktree": False},
+            "unregistered_worktree": {"register_worktree": False},
+            "absent_session": {"session_id": ""},
+            "head_mismatch": {"implementation_head": CORRECTED},
+            "returned_sha_mismatch": {"returned_sha": CORRECTED},
+            "unrelated_evidence_error": {
+                "failure_message": "worktree dirty: M file",
+                "expect_no_invoke": True,
+            },
+            "no_tooling_repair": {"repair_head": "c" * 40},
+        }
+        for name, options in cases.items():
+            with self.subTest(name=name):
+                returned_sha = options.get("returned_sha", RESULT)
+                controller, adapters = self.make_controller(
+                    implementer_responses=[implementer(result_sha=returned_sha)],
+                    reviewer_responses=[audit()],
+                )
+                run_id, paths, implementation, rejected_path, rejected_bytes = (
+                    self._prepare_evidence_handoff_escalation(
+                        controller,
+                        run_id=f"m3a-evidence-{name}",
+                        session_id=options.get("session_id", "persisted-session"),
+                        register_worktree=options.get("register_worktree", True),
+                        failure_message=options.get(
+                            "failure_message",
+                            "unapproved verification executable/arguments: ['Fresh']",
+                        ),
+                    )
+                )
+                if options.get("create_worktree", True) is False:
+                    implementation.rmdir()
+                    controller.repository.registered_worktrees = [
+                        path
+                        for path in controller.repository.registered_worktrees  # type: ignore[attr-defined]
+                        if path != implementation
+                    ]
+                repair_head = options.get("repair_head", REPAIRED)
+                implementation_head = options.get("implementation_head", RESULT)
+                boundary = GitBoundary(
+                    branch="buildwithAgent",
+                    head=repair_head,
+                    clean=True,
+                    default_branch_is_ancestor=True,
+                    bootstrap_base_is_ancestor=True,
+                    excluded_ancestors=(),
+                )
+                status_value = options.get("status", [])
+
+                def fake_run(*args, cwd=None):
+                    if args[:2] == ("diff", "--name-only"):
+                        if cwd is not None:
+                            return "candidate_memory/models.py"
+                        return "tools/dev_orchestrator/controller.py"
+                    return ""
+
+                with (
+                    mock.patch.object(
+                        controller, "_verify_repository_boundary", return_value=boundary
+                    ),
+                    mock.patch.object(
+                        controller.repository,
+                        "head",
+                        side_effect=lambda cwd=None: (
+                            implementation_head if cwd else repair_head
+                        ),
+                    ),
+                    mock.patch.object(
+                        controller.repository,
+                        "status",
+                        side_effect=lambda cwd=None: list(status_value),
+                    ),
+                    mock.patch.object(controller.repository, "run", side_effect=fake_run),
+                ):
+                    resumed = controller.execute(run_id, resume=True)
+
+                self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+                self.assertEqual(rejected_path.read_bytes(), rejected_bytes)
+                events = [
+                    json.loads(line)["event"] for line in paths.events.read_text().splitlines()
+                ]
+                self.assertNotIn("implementer_evidence_handoff_corrected", events)
+                if options.get("expect_no_invoke"):
+                    self.assertEqual(adapters["implementer"].requests, [])
+                    self.assertNotIn("implementer_evidence_handoff_retry", events)
+                elif name == "returned_sha_mismatch":
+                    self.assertEqual(len(adapters["implementer"].requests), 1)
+                    self.assertIn("pinned", resumed.last_error)
+                else:
+                    self.assertEqual(adapters["implementer"].requests, [])
                     self.assertTrue(resumed.last_error)
 
     def test_codex_output_schemas_give_const_and_enum_nodes_explicit_types(self):

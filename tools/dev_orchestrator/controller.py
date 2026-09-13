@@ -343,6 +343,36 @@ class OrchestrationController:
         return "structured final output" in text or "implementer_response" in text
 
     @staticmethod
+    def _is_unapproved_verification_command_failure(message: str) -> bool:
+        return "unapproved verification" in (message or "").lower()
+
+    @staticmethod
+    def _executable_required_tests(required_tests: list[str]) -> list[str]:
+        return [
+            command
+            for command in required_tests
+            if command.startswith(("make ", "git ", ".venv/"))
+        ]
+
+    @staticmethod
+    def _narrative_required_tests(required_tests: list[str]) -> list[str]:
+        executable = set(OrchestrationController._executable_required_tests(required_tests))
+        return [command for command in required_tests if command not in executable]
+
+    def _implementer_handoff_path(self, state: RunState, paths: RunPaths) -> Path:
+        if state.active_implementer_handoff_path:
+            return paths.root / state.active_implementer_handoff_path
+        return paths.handoffs / f"implementer-{state.correction_cycles:02d}.json"
+
+    def _evidence_corrected_handoff_glob(self, state: RunState, paths: RunPaths) -> list[Path]:
+        pattern = f"implementer-{state.correction_cycles:02d}-evidence-corrected-*.json"
+        return sorted(paths.handoffs.glob(pattern))
+
+    def _is_evidence_handoff_repair_prompt(self, prompt_path: str) -> bool:
+        name = Path(prompt_path).name
+        return name.startswith("implementer-evidence-handoff-") and name.endswith(".txt")
+
+    @staticmethod
     def _build_implementer_strict_output_prompt(
         *,
         base_sha: str,
@@ -350,8 +380,11 @@ class OrchestrationController:
         files_changed: list[str],
         required_tests: list[str],
     ) -> str:
+        executable = OrchestrationController._executable_required_tests(required_tests)
+        narrative = OrchestrationController._narrative_required_tests(required_tests)
         file_lines = "\n".join(f"- {path}" for path in files_changed) or "- (none)"
-        test_lines = "\n".join(f"- {command}" for command in required_tests) or "- (none)"
+        test_lines = "\n".join(f"- {command}" for command in executable) or "- (none)"
+        narrative_lines = "\n".join(f"- {item}" for item in narrative) or "- (none)"
         return (
             "Do not modify any files and do not create commits. The implementation worktree is already "
             f"clean at commit `{result_sha}`.\n"
@@ -360,8 +393,31 @@ class OrchestrationController:
             f"Set status to IMPLEMENTED, base_sha to `{base_sha}`, and result_sha to `{result_sha}`.\n"
             "files_changed must be exactly this full base-to-result path list:\n"
             f"{file_lines}\n"
-            "test_commands must include these required tests with accurate exit codes:\n"
+            "test_commands must contain only real executable commands that were actually run, with "
+            "accurate exit codes. Include these executable required tests:\n"
             f"{test_lines}\n"
+            "Do not put narrative verification expectations into test_commands. Narrative expectations "
+            "remain acceptance criteria only:\n"
+            f"{narrative_lines}\n"
+        )
+
+    @staticmethod
+    def _build_implementer_evidence_handoff_prompt(
+        *,
+        base_sha: str,
+        result_sha: str,
+        files_changed: list[str],
+        required_tests: list[str],
+    ) -> str:
+        return OrchestrationController._build_implementer_strict_output_prompt(
+            base_sha=base_sha,
+            result_sha=result_sha,
+            files_changed=files_changed,
+            required_tests=required_tests,
+        ) + (
+            "A prior schema-valid handoff was rejected only because test_commands included "
+            "non-executable narrative required_tests. Keep result_sha pinned to the current HEAD and "
+            "emit corrected test_commands only.\n"
         )
 
     def _retry_implementer_strict_output_after_tooling_repair(
@@ -463,6 +519,145 @@ class OrchestrationController:
             prompt_path=state.pending_implementer_prompt_path,
             prompt_sha256=prompt_hash,
             session_id=session_id,
+        )
+        return True
+
+    def _retry_implementer_evidence_handoff_after_tooling_repair(
+        self,
+        state: RunState,
+        paths: RunPaths,
+        store: StateStore,
+        events: EventLog,
+    ) -> bool:
+        """Resume Cursor to correct test_commands after an unapproved-command evidence failure."""
+        if (
+            not state.result_sha
+            or state.pending_operator_decision_path
+            or state.pending_implementer_prompt_path
+        ):
+            return False
+        records = list(events.read())
+        if not records:
+            return False
+        last = records[-1]
+        failure_message = str(last.get("message") or state.last_error or "")
+        if (
+            last.get("event") != "agent_failure"
+            or last.get("role") != "ORCHA"
+            or not self._is_unapproved_verification_command_failure(failure_message)
+        ):
+            return False
+        rejected_path = paths.handoffs / f"implementer-{state.correction_cycles:02d}.json"
+        if not rejected_path.exists():
+            return False
+        try:
+            validate_implementer_response(json.loads(rejected_path.read_text(encoding="utf-8")))
+        except (SchemaError, json.JSONDecodeError, OSError) as exc:
+            raise ControllerError(
+                "implementer evidence-handoff retry requires a schema-valid rejected handoff"
+            ) from exc
+        session_id = state.sessions.get("implementer", "")
+        if not session_id:
+            raise ControllerError("implementer evidence-handoff retry requires the saved Cursor session")
+        implementation = paths.worktrees / "implementation"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if not implementation.exists() or implementation.resolve() not in registered:
+            raise ControllerError(
+                "implementer evidence-handoff retry requires a registered implementation worktree"
+            )
+        if self.repository.status(implementation):
+            raise ControllerError(
+                "implementer evidence-handoff retry requires a clean implementation worktree"
+            )
+        head = self.repository.head(implementation)
+        if head != state.result_sha:
+            raise ControllerError(
+                "implementer evidence-handoff retry requires implementation HEAD to equal "
+                "the pinned result SHA"
+            )
+        if not self.repository.is_ancestor(state.base_sha, head):
+            raise ControllerError(
+                "implementer evidence-handoff retry requires implementation HEAD to "
+                "descend from the approved base"
+            )
+        boundary = self._verify_repository_boundary(require_clean=True)
+        if boundary.head == state.controller_sha:
+            raise ControllerError(
+                "implementer evidence-handoff retry requires a committed orchestration tooling repair"
+            )
+        self._verify_repair_checkout(state, boundary)
+
+        existing_corrected = self._evidence_corrected_handoff_glob(state, paths)
+        if existing_corrected:
+            corrected_path = existing_corrected[-1]
+            relative = self._relative_artifact(paths, corrected_path)
+            try:
+                validate_implementer_response(json.loads(corrected_path.read_text(encoding="utf-8")))
+            except (SchemaError, json.JSONDecodeError, OSError) as exc:
+                raise ControllerError(
+                    "implementer evidence-handoff retry found an unusable corrected handoff"
+                ) from exc
+            state.controller_sha = boundary.head
+            state.last_error = ""
+            state.active_implementer_handoff_path = relative
+            state.pending_implementer_prompt_path = ""
+            state.transition(RunStateName.VALIDATING_IMPLEMENTATION)
+            store.save(state)
+            events.emit(
+                run_id=state.run_id,
+                role="ORCHA",
+                state=state.state,
+                event="implementer_evidence_handoff_retry_idempotent",
+                message=(
+                    "Reusing the existing corrected implementer handoff without re-prompting Cursor"
+                ),
+                result_sha=state.result_sha,
+                handoff_path=relative,
+            )
+            return True
+
+        files_changed = [
+            line
+            for line in self.repository.run(
+                "diff", "--name-only", f"{state.base_sha}..{head}", cwd=implementation
+            ).splitlines()
+            if line
+        ]
+        contract = validate_phase_contract(json.loads(paths.contract_json.read_text(encoding="utf-8")))
+        prompt = self._build_implementer_evidence_handoff_prompt(
+            base_sha=state.base_sha,
+            result_sha=head,
+            files_changed=files_changed,
+            required_tests=list(contract["required_tests"]),
+        )
+        paths.prompts.mkdir(parents=True, exist_ok=True)
+        prompt_path = self._next_artifact_path(paths.prompts, "implementer-evidence-handoff", ".txt")
+        _atomic_text(prompt_path, prompt)
+        prompt_hash = _sha256_bytes(prompt.encode("utf-8"))
+        target = (
+            RunStateName.CORRECTING if state.correction_cycles > 0 else RunStateName.IMPLEMENTING
+        )
+        state.controller_sha = boundary.head
+        state.last_error = ""
+        state.latest_orcha_prompt_path = self._relative_artifact(paths, prompt_path)
+        state.latest_orcha_prompt_sha256 = prompt_hash
+        state.pending_implementer_prompt_path = state.latest_orcha_prompt_path
+        state.transition(target)
+        store.save(state)
+        events.emit(
+            run_id=state.run_id,
+            role="IMPLEMENTER",
+            state=state.state,
+            event="implementer_evidence_handoff_retry",
+            message=(
+                "Retrying saved Cursor session to correct executable test_commands after an "
+                "unapproved verification-command evidence failure"
+            ),
+            result_sha=state.result_sha,
+            prompt_path=state.pending_implementer_prompt_path,
+            prompt_sha256=prompt_hash,
+            session_id=session_id,
+            rejected_handoff=self._relative_artifact(paths, rejected_path),
         )
         return True
 
@@ -738,6 +933,13 @@ class OrchestrationController:
                 self._retry_implementer_strict_output_after_tooling_repair(state, paths, store, events)
             except (GitSafetyError, ControllerError, ValueError) as exc:
                 return self._fail_agent(state, store, events, "IMPLEMENTER", str(exc))
+        if resume and state.state == RunStateName.OPERATOR_ESCALATION.value:
+            try:
+                self._retry_implementer_evidence_handoff_after_tooling_repair(
+                    state, paths, store, events
+                )
+            except (GitSafetyError, ControllerError, ValueError) as exc:
+                return self._fail_agent(state, store, events, "ORCHA", str(exc))
         if (
             state.state == RunStateName.OPERATOR_ESCALATION.value
             and state.pending_operator_decision_path
@@ -831,6 +1033,60 @@ class OrchestrationController:
                 )
             current = RunStateName(state.state)
             if current in {RunStateName.IMPLEMENTING, RunStateName.CORRECTING}:
+                evidence_repair = self._is_evidence_handoff_repair_prompt(
+                    state.pending_implementer_prompt_path
+                )
+                if evidence_repair:
+                    existing_corrected = self._evidence_corrected_handoff_glob(state, paths)
+                    if existing_corrected:
+                        corrected_path = existing_corrected[-1]
+                        try:
+                            validate_implementer_response(
+                                json.loads(corrected_path.read_text(encoding="utf-8"))
+                            )
+                        except (SchemaError, json.JSONDecodeError, OSError) as exc:
+                            return self._fail_agent(
+                                state,
+                                store,
+                                events,
+                                "ORCHA",
+                                f"existing corrected implementer handoff is unusable: {exc}",
+                            )
+                        if self.repository.head(implementation_worktree) != state.result_sha:
+                            return self._fail_agent(
+                                state,
+                                store,
+                                events,
+                                "ORCHA",
+                                "implementation HEAD moved away from the pinned result SHA",
+                            )
+                        if self.repository.status(implementation_worktree):
+                            return self._fail_agent(
+                                state,
+                                store,
+                                events,
+                                "ORCHA",
+                                "implementation worktree became dirty during evidence-handoff repair",
+                            )
+                        state.active_implementer_handoff_path = self._relative_artifact(
+                            paths, corrected_path
+                        )
+                        state.pending_implementer_prompt_path = ""
+                        state.transition(RunStateName.VALIDATING_IMPLEMENTATION)
+                        store.save(state)
+                        events.emit(
+                            run_id=run_id,
+                            role="ORCHA",
+                            state=state.state,
+                            event="implementer_evidence_handoff_retry_idempotent",
+                            message=(
+                                "Reusing the existing corrected implementer handoff without "
+                                "re-prompting Cursor"
+                            ),
+                            result_sha=state.result_sha,
+                            handoff_path=state.active_implementer_handoff_path,
+                        )
+                        continue
                 if state.pending_implementer_prompt_path:
                     prompt = (paths.root / state.pending_implementer_prompt_path).read_text(
                         encoding="utf-8"
@@ -886,7 +1142,67 @@ class OrchestrationController:
                         "IMPLEMENTER",
                         "implementer handoff base SHA differs from approved contract",
                     )
+                if evidence_repair:
+                    if self.repository.head(implementation_worktree) != state.result_sha:
+                        return self._fail_agent(
+                            state,
+                            store,
+                            events,
+                            "IMPLEMENTER",
+                            "implementation HEAD moved away from the pinned result SHA",
+                        )
+                    if self.repository.status(implementation_worktree):
+                        return self._fail_agent(
+                            state,
+                            store,
+                            events,
+                            "IMPLEMENTER",
+                            "implementation worktree became dirty during evidence-handoff repair",
+                        )
+                    if handoff["status"] != "IMPLEMENTED":
+                        return self._fail_agent(
+                            state,
+                            store,
+                            events,
+                            "IMPLEMENTER",
+                            f"implementer status {handoff['status']}",
+                        )
+                    if handoff["result_sha"] != state.result_sha:
+                        return self._fail_agent(
+                            state,
+                            store,
+                            events,
+                            "IMPLEMENTER",
+                            "corrected handoff result_sha must remain pinned to the expected SHA",
+                        )
+                    corrected_path = self._next_artifact_path(
+                        paths.handoffs,
+                        f"implementer-{state.correction_cycles:02d}-evidence-corrected",
+                    )
+                    self._append_only_json(corrected_path, handoff)
+                    state.active_implementer_handoff_path = self._relative_artifact(
+                        paths, corrected_path
+                    )
+                    state.pending_implementer_prompt_path = ""
+                    state.pending_operator_decision_path = ""
+                    store.save(state)
+                    events.emit(
+                        run_id=run_id,
+                        role="IMPLEMENTER",
+                        state=state.state,
+                        event="implementer_evidence_handoff_corrected",
+                        message="Corrected implementer handoff captured without modifying the product",
+                        result_sha=state.result_sha,
+                        handoff_path=state.active_implementer_handoff_path,
+                        rejected_handoff=(
+                            f"handoffs/implementer-{state.correction_cycles:02d}.json"
+                        ),
+                    )
+                    state.transition(RunStateName.VALIDATING_IMPLEMENTATION)
+                    store.save(state)
+                    continue
                 self._save_handoff(paths, f"implementer-{state.correction_cycles:02d}.json", handoff)
+                state.active_implementer_handoff_path = ""
                 state.pending_implementer_prompt_path = ""
                 state.pending_operator_decision_path = ""
                 store.save(state)
@@ -1061,11 +1377,7 @@ class OrchestrationController:
                     )
                     continue
                 handoff = validate_implementer_response(
-                    json.loads(
-                        (paths.handoffs / f"implementer-{state.correction_cycles:02d}.json").read_text(
-                            encoding="utf-8"
-                        )
-                    )
+                    json.loads(self._implementer_handoff_path(state, paths).read_text(encoding="utf-8"))
                 )
                 if handoff["session_id"] and not state.sessions.get("implementer"):
                     state.sessions["implementer"] = handoff["session_id"]
@@ -1100,9 +1412,7 @@ class OrchestrationController:
             elif current == RunStateName.VALIDATING_IMPLEMENTATION:
                 try:
                     implementer_handoff = json.loads(
-                        (paths.handoffs / f"implementer-{state.correction_cycles:02d}.json").read_text(
-                            encoding="utf-8"
-                        )
+                        self._implementer_handoff_path(state, paths).read_text(encoding="utf-8")
                     )
                     executable_required_tests = {
                         command

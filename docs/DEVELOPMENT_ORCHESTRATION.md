@@ -70,6 +70,16 @@ the current correction cycle. It persists an exact no-file-change prompt that de
 for the already-committed HEAD (with the full base-to-result file list and required tests), emits
 `implementer_strict_output_retry`, and continues through the normal evidence boundary. Parsing and
 schema validation are not relaxed; the malformed prior message is never accepted as a handoff.
+Strict-output prompts list only executable `required_tests` (`make `, `git `, `.venv/` prefixes) inside
+`test_commands` instructions; narrative verification expectations stay narrative-only.
+
+If evidence validation rejects a schema-valid implementer handoff solely because `test_commands`
+included an unapproved non-executable narrative command, `resume` may retry after a committed tooling
+repair without changing the product commit. The rejected handoff remains append-only; a distinct
+corrected handoff artifact is written and selected through `active_implementer_handoff_path`. The
+implementation worktree must stay registered, clean, and pinned at `result_sha`, the returned
+`result_sha` must match that pin, and a second resume reuses the corrected artifact instead of
+re-prompting. Other evidence failures remain operator escalations.
 
 The explicit states are `PREPARING`, `AWAITING_PHASE_APPROVAL`, `IMPLEMENTING`,
 `IMPLEMENTER_QUESTION`, `ORCHA_DECISION`, `VALIDATING_IMPLEMENTATION`, `AUDITING`,
