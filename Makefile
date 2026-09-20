@@ -1,5 +1,5 @@
 .PHONY: check test lint migrate makemigrations migrations-check run up down superuser install \
-        start stop status db-wait verify secrets
+        start stop status db-wait verify verify-unlocked secrets
 
 VENV_PYTHON := .venv/bin/python
 VENV_RUFF := .venv/bin/ruff
@@ -8,6 +8,7 @@ PID_FILE := .cvbuilder-server.pid
 LOG_FILE := .cvbuilder-server.log
 DB_SERVICE := db
 DB_WAIT_RETRIES := 30
+VERIFY_LOCK_TIMEOUT ?= 600
 
 install:
 	python3 -m venv .venv
@@ -37,7 +38,11 @@ secrets:
 
 # verify: everything a milestone-completion check should run before commit/handover
 # (docs/MILESTONE_COMPLETION_CHECKLIST.md). Fails on the first failing step.
-verify: check migrations-check test lint
+verify:
+	$(VENV_PYTHON) tools/test_database_lock.py --timeout $(VERIFY_LOCK_TIMEOUT) -- \
+		$(MAKE) --no-print-directory verify-unlocked
+
+verify-unlocked: check migrations-check test lint
 	@echo "All verification checks passed."
 
 run:

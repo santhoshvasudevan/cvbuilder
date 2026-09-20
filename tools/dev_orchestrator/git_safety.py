@@ -135,14 +135,30 @@ class GitRepository:
             current[key] = value
         return records
 
+    def _worktree_environment_sources(self) -> tuple[Path, Path]:
+        virtualenv = self.root / ".venv"
+        environment = self.root / ".env"
+        if not virtualenv.is_dir():
+            raise GitSafetyError(f"root virtualenv is missing: {virtualenv}")
+        if not environment.is_file():
+            raise GitSafetyError(f"root environment file is missing: {environment}")
+        return virtualenv.resolve(), environment.resolve()
+
+    def _bootstrap_worktree_environment(self, path: Path, sources: tuple[Path, Path]) -> None:
+        virtualenv, environment = sources
+        (path / ".venv").symlink_to(virtualenv, target_is_directory=True)
+        (path / ".env").symlink_to(environment)
+
     def create_implementation_worktree(self, path: Path, branch: str, base_sha: str) -> None:
         registered = (Path(item["worktree"]).resolve() for item in self.worktrees())
         if path.exists() or path.resolve() in registered:
             raise GitSafetyError(f"implementation worktree path already exists: {path}")
         if not self.commit_exists(base_sha):
             raise GitSafetyError(f"implementation base SHA does not exist: {base_sha}")
+        environment_sources = self._worktree_environment_sources()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run("worktree", "add", "-b", branch, str(path), base_sha)
+        self._bootstrap_worktree_environment(path, environment_sources)
 
     def create_audit_worktree(self, path: Path, candidate_sha: str) -> None:
         registered = (Path(item["worktree"]).resolve() for item in self.worktrees())
@@ -150,8 +166,10 @@ class GitRepository:
             raise GitSafetyError(f"audit worktree path already exists: {path}")
         if not self.commit_exists(candidate_sha):
             raise GitSafetyError(f"audit candidate SHA does not exist: {candidate_sha}")
+        environment_sources = self._worktree_environment_sources()
         path.parent.mkdir(parents=True, exist_ok=True)
         self.run("worktree", "add", "--detach", str(path), candidate_sha)
+        self._bootstrap_worktree_environment(path, environment_sources)
 
     def create_audit_branch(self, path: Path, branch: str, candidate_sha: str) -> None:
         if self.status(path):
