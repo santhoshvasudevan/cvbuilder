@@ -57,6 +57,14 @@ drive state transitions or closure, and become authoritative only after an autho
 into a schema-valid pipeline handoff. State updates fsync a temporary
 file and atomically replace `state.json`; a crash cannot partially write a false `COMPLETED` state.
 
+After every agent subprocess invocation, the existing event ledger receives one passive
+`agent_invocation_metrics` record. It derives provider usage from the already-sanitized streamed
+events and records the durable run ID and role, provider task ID (`thread_id` for Codex or
+`request_id` for Cursor), candidate SHA when known, UTF-8 prompt and task-packet byte counts, normalized
+input/cached-input/output/reasoning-output token counts, unique tool-call count, UTF-8 bytes of captured
+completed tool results, retry reason, and correction count. Missing provider fields remain empty or
+zero. The record does not alter prompts, schemas, role selection, retry decisions, or run state.
+
 Every controller-created agent request begins with an explicit startup identity derived from the
 request worktree (not the root checkout) and from the durable `state.json` loaded via `StateStore`
 at request construction time (not a caller-supplied in-memory state): git branch or `DETACHED`,

@@ -18,6 +18,7 @@ from tools.dev_orchestrator.controller import ControllerError, OrchestrationCont
 from tools.dev_orchestrator.events import EventLog
 from tools.dev_orchestrator.evidence import EvidenceCollector, EvidenceError
 from tools.dev_orchestrator.git_safety import GitBoundary, GitRepository
+from tools.dev_orchestrator.invocation_metrics import InvocationMetrics
 from tools.dev_orchestrator.redaction import REDACTED, redact, redact_text
 from tools.dev_orchestrator.schemas import (
     SchemaError,
@@ -730,8 +731,16 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(resumed.state, "COMPLETED")
         self.assertEqual(resumed.controller_sha, repaired)
         self.assertEqual(adapters["reviewer"].requests[0].workdir, audit_worktree)
-        events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
-        self.assertIn("reviewer_recovery_retry", events)
+        event_records = [json.loads(line) for line in paths.events.read_text().splitlines()]
+        self.assertIn("reviewer_recovery_retry", [item["event"] for item in event_records])
+        reviewer_metrics = [
+            item
+            for item in event_records
+            if item["event"] == "agent_invocation_metrics" and item["role"] == "REVIEWER"
+        ]
+        self.assertEqual(
+            reviewer_metrics[0]["data"]["retry_reason"], "reviewer_tooling_recovery"
+        )
 
     def _prepare_implementer_strict_output_escalation(
         self,
@@ -841,6 +850,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(adapters["implementer"].requests), 1)
         request = adapters["implementer"].requests[0]
         self.assertEqual(request.session_id, "persisted-session")
+        self.assertEqual(request.retry_reason, "implementer_strict_output")
         self.assertEqual(request.workdir, implementation)
         self.assertIn("Do not modify any files", request.prompt)
         self.assertIn(CORRECTED, request.prompt)
@@ -1675,6 +1685,155 @@ class ControllerTests(unittest.TestCase):
 
 
 class ValidationAndSafetyTests(unittest.TestCase):
+    def test_invocation_metrics_normalize_codex_events(self):
+        metrics = InvocationMetrics()
+        metrics.observe({"type": "thread.started", "thread_id": "codex-task"})
+        metrics.observe(
+            {"type": "item.started", "item": {"id": "tool-1", "type": "command_execution"}}
+        )
+        metrics.observe(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "tool-1",
+                    "type": "command_execution",
+                    "aggregated_output": "åbc",
+                },
+            }
+        )
+        metrics.observe(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 80,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 7,
+                },
+            }
+        )
+
+        self.assertEqual(metrics.task_id, "codex-task")
+        self.assertEqual(metrics.input_tokens, 100)
+        self.assertEqual(metrics.cached_input_tokens, 80)
+        self.assertEqual(metrics.output_tokens, 20)
+        self.assertEqual(metrics.reasoning_output_tokens, 7)
+        self.assertEqual(metrics.tool_call_count, 1)
+        self.assertEqual(metrics.tool_output_bytes, len("åbc".encode("utf-8")))
+
+    def test_invocation_metrics_normalize_cursor_events_without_double_counting_tools(self):
+        metrics = InvocationMetrics()
+        started = {
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "cursor-tool",
+            "tool_call": {"readToolCall": {"args": {"path": "README.md"}}},
+        }
+        completed = {
+            **started,
+            "subtype": "completed",
+            "tool_call": {
+                "readToolCall": {"args": {"path": "README.md"}},
+                "result": {"success": {"content": "hello"}},
+            },
+        }
+        metrics.observe(started)
+        metrics.observe(completed)
+        metrics.observe(completed)
+        metrics.observe(
+            {
+                "type": "result",
+                "request_id": "cursor-task",
+                "usage": {"inputTokens": 30, "cacheReadTokens": 25, "outputTokens": 5},
+            }
+        )
+
+        self.assertEqual(metrics.task_id, "cursor-task")
+        self.assertEqual(metrics.input_tokens, 30)
+        self.assertEqual(metrics.cached_input_tokens, 25)
+        self.assertEqual(metrics.output_tokens, 5)
+        self.assertEqual(metrics.reasoning_output_tokens, 0)
+        self.assertEqual(metrics.tool_call_count, 1)
+        self.assertEqual(
+            metrics.tool_output_bytes,
+            len('{"success":{"content":"hello"}}'.encode("utf-8")),
+        )
+
+    def test_invoke_records_one_passive_metrics_event(self):
+        class EventAdapter:
+            def start(self, request, event_callback):
+                del request
+                event_callback("stdout", {"type": "thread.started", "thread_id": "task-1"})
+                event_callback(
+                    "stdout",
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 12,
+                            "cached_input_tokens": 9,
+                            "output_tokens": 3,
+                            "reasoning_output_tokens": 2,
+                        },
+                    },
+                )
+                return AdapterResult(
+                    status="COMPLETED",
+                    exit_code=0,
+                    handoff={"candidate_sha": RESULT},
+                )
+
+        request = AdapterRequest(
+            role="reviewer",
+            prompt="full prompt å",
+            workdir=REPOSITORY_ROOT,
+            model="test",
+            reasoning_effort=None,
+            permission_profile="read_only",
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            log_dir=REPOSITORY_ROOT / ".orchestration" / "test-logs",
+            packet_bytes=7,
+            retry_reason="reviewer_correction",
+        )
+        state = mock.Mock(
+            run_id="run-1",
+            state="AUDITING",
+            result_sha="",
+            correction_cycles=2,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            events = EventLog(Path(directory) / "events.jsonl")
+            result = OrchestrationController._invoke(
+                EventAdapter(),
+                request,
+                state=state,
+                events=events,
+            )
+            self.assertTrue(result.succeeded)
+            records = list(events.read())
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "agent_invocation_metrics")
+        self.assertEqual(records[0]["run_id"], "run-1")
+        self.assertEqual(records[0]["role"], "REVIEWER")
+        self.assertEqual(
+            records[0]["data"],
+            {
+                "cached_input_tokens": 9,
+                "candidate_sha": RESULT,
+                "correction_count": 2,
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "packet_bytes": 7,
+                "prompt_bytes": len("full prompt å".encode("utf-8")),
+                "reasoning_output_tokens": 2,
+                "retry_reason": "reviewer_correction",
+                "task_id": "task-1",
+                "tool_call_count": 0,
+                "tool_output_bytes": 0,
+            },
+        )
+
     def test_operator_decision_schema_is_strict(self):
         decision = {
             "run_id": "m3a-test",

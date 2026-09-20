@@ -23,6 +23,7 @@ from .config import OrchestratorConfig
 from .events import EventLog
 from .evidence import EvidenceCollector, EvidenceError
 from .git_safety import GitRepository, GitSafetyError
+from .invocation_metrics import InvocationMetrics
 from .schemas import (
     SchemaError,
     validate_audit_response,
@@ -1026,6 +1027,7 @@ class OrchestrationController:
         session_id: str = "",
         allow_write: bool = False,
         safety_verified: bool = False,
+        retry_reason: str = "",
     ) -> AdapterRequest:
         agent = self.config.agents[role]
         schema = (
@@ -1048,6 +1050,8 @@ class OrchestrationController:
             session_id=session_id,
             allow_write=allow_write,
             safety_verified=safety_verified,
+            packet_bytes=len(prompt.encode("utf-8")),
+            retry_reason=retry_reason,
         )
 
     @staticmethod
@@ -1055,10 +1059,52 @@ class OrchestrationController:
         adapter: AgentAdapter,
         request: AdapterRequest,
         *,
+        state: RunState,
+        events: EventLog,
         resume: bool = False,
         event_callback=None,
     ):
-        return adapter.resume(request, event_callback) if resume else adapter.start(request, event_callback)
+        metrics = InvocationMetrics()
+
+        def observe(stream: str, event: dict) -> None:
+            metrics.observe(event)
+            if event_callback:
+                event_callback(stream, event)
+
+        result = None
+        try:
+            result = adapter.resume(request, observe) if resume else adapter.start(request, observe)
+        finally:
+            handoff = result.handoff if result and result.handoff else {}
+            candidate_sha = next(
+                (
+                    value
+                    for key in ("result_sha", "candidate_sha", "final_sha")
+                    if isinstance((value := handoff.get(key)), str) and value
+                ),
+                state.result_sha,
+            )
+            display_role = "ORCHA" if request.role.startswith("orcha") else request.role.upper()
+            events.emit(
+                run_id=state.run_id,
+                role=display_role,
+                state=state.state,
+                event="agent_invocation_metrics",
+                message="Captured passive agent invocation metrics",
+                task_id=metrics.task_id,
+                candidate_sha=candidate_sha,
+                prompt_bytes=len(request.prompt.encode("utf-8")),
+                packet_bytes=request.packet_bytes,
+                input_tokens=metrics.input_tokens,
+                cached_input_tokens=metrics.cached_input_tokens,
+                output_tokens=metrics.output_tokens,
+                reasoning_output_tokens=metrics.reasoning_output_tokens,
+                tool_call_count=metrics.tool_call_count,
+                tool_output_bytes=metrics.tool_output_bytes,
+                retry_reason=request.retry_reason,
+                correction_count=state.correction_cycles,
+            )
+        return result
 
     def _save_handoff(self, paths: RunPaths, name: str, handoff: dict) -> None:
         _atomic_json(paths.handoffs / name, handoff)
@@ -1260,6 +1306,16 @@ class OrchestrationController:
                         "structured implementer handoff.\n\n" + json.dumps(contract, indent=2)
                     )
                 session_id = state.sessions.get("implementer", "")
+                if evidence_repair:
+                    retry_reason = "implementer_evidence_handoff"
+                elif state.pending_implementer_prompt_path:
+                    retry_reason = "implementer_strict_output"
+                elif current == RunStateName.CORRECTING:
+                    retry_reason = "implementer_correction"
+                elif session_id or resume:
+                    retry_reason = "implementer_session_resume"
+                else:
+                    retry_reason = ""
                 try:
                     request = self._request(
                         "implementer",
@@ -1270,6 +1326,7 @@ class OrchestrationController:
                         session_id=session_id,
                         allow_write=True,
                         safety_verified=True,
+                        retry_reason=retry_reason,
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "IMPLEMENTER", str(exc))
@@ -1288,6 +1345,8 @@ class OrchestrationController:
                 result = self._invoke(
                     implementer,
                     request,
+                    state=state,
+                    events=events,
                     resume=bool(session_id) or resume,
                     event_callback=callback("implementer"),
                 )
@@ -1470,12 +1529,16 @@ class OrchestrationController:
                             implementation_worktree,
                             paths,
                             "orcha-correction.schema.json",
+                            retry_reason="operator_recovery",
                         )
                     except ControllerError as exc:
                         return self._fail_agent(state, store, events, "ORCHA", str(exc))
-                    correction = orcha.start(
+                    correction = self._invoke(
+                        orcha,
                         correction_request,
-                        callback("orcha"),
+                        state=state,
+                        events=events,
+                        event_callback=callback("orcha"),
                     )
                     if not correction.succeeded:
                         return self._fail_agent(state, store, events, "ORCHA", correction.error)
@@ -1563,7 +1626,13 @@ class OrchestrationController:
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
-                decision = orcha.start(decision_request, callback("orcha"))
+                decision = self._invoke(
+                    orcha,
+                    decision_request,
+                    state=state,
+                    events=events,
+                    event_callback=callback("orcha"),
+                )
                 if not decision.succeeded:
                     return self._fail_agent(state, store, events, "ORCHA", decision.error)
                 payload = decision.handoff or {}
@@ -1670,6 +1739,12 @@ class OrchestrationController:
 
             elif current == RunStateName.AUDITING:
                 assert audit_worktree is not None
+                prior_events = list(events.read())
+                reviewer_retry_reason = (
+                    "reviewer_tooling_recovery"
+                    if prior_events and prior_events[-1].get("event") == "reviewer_recovery_retry"
+                    else "reviewer_correction" if state.correction_cycles else ""
+                )
                 try:
                     audit_request = self._request(
                         "reviewer",
@@ -1678,10 +1753,17 @@ class OrchestrationController:
                         audit_worktree,
                         paths,
                         "audit-response.schema.json",
+                        retry_reason=reviewer_retry_reason,
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "REVIEWER", str(exc))
-                result = reviewer.start(audit_request, callback("reviewer"))
+                result = self._invoke(
+                    reviewer,
+                    audit_request,
+                    state=state,
+                    events=events,
+                    event_callback=callback("reviewer"),
+                )
                 if not result.succeeded:
                     return self._fail_agent(state, store, events, "REVIEWER", result.error)
                 try:
@@ -1789,9 +1871,12 @@ class OrchestrationController:
                         )
                     except ControllerError as exc:
                         return self._fail_agent(state, store, events, "REVIEWER", str(exc))
-                    test_result = reviewer.start(
+                    test_result = self._invoke(
+                        reviewer,
                         test_request,
-                        callback("reviewer"),
+                        state=state,
+                        events=events,
+                        event_callback=callback("reviewer"),
                     )
                     if not test_result.succeeded:
                         return self._fail_agent(state, store, events, "REVIEWER", test_result.error)
@@ -1911,9 +1996,12 @@ class OrchestrationController:
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
-                correction = orcha.start(
+                correction = self._invoke(
+                    orcha,
                     correction_request,
-                    callback("orcha"),
+                    state=state,
+                    events=events,
+                    event_callback=callback("orcha"),
                 )
                 if not correction.succeeded:
                     return self._fail_agent(state, store, events, "ORCHA", correction.error)
@@ -1949,9 +2037,12 @@ class OrchestrationController:
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
-                closure = closure_agent.start(
+                closure = self._invoke(
+                    closure_agent,
                     closure_request,
-                    callback("orcha_closure"),
+                    state=state,
+                    events=events,
+                    event_callback=callback("orcha_closure"),
                 )
                 if not closure.succeeded:
                     return self._fail_agent(state, store, events, "ORCHA", closure.error)
