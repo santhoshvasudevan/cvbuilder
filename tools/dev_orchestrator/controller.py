@@ -225,6 +225,20 @@ class OrchestrationController:
             result["objective"] += "\n\n" + "\n\n".join(additions)
         return result
 
+    @classmethod
+    def _reviewer_prompt(cls, contract: dict) -> str:
+        """Build the provider-neutral live-review prompt from the effective phase contract."""
+        return (
+            "You are the Reviewer invoked by tools/dev_orchestrator with the effective phase "
+            "contract below. Follow AGENTS.md's controller-invoked role context-loading path and "
+            "its controller-tooling override. Independently audit the contract and candidate. "
+            "Run only executable test commands listed in contract.required_tests; tool availability "
+            "does not authorize additional test commands. "
+            f"{cls.REVIEWER_VERDICT_RULES} "
+            "Return only the audit schema.\n\n"
+            + json.dumps(contract, indent=2)
+        )
+
     @staticmethod
     def _next_artifact_path(directory: Path, stem: str, suffix: str = ".json") -> Path:
         index = 1
@@ -1826,13 +1840,7 @@ class OrchestrationController:
                 try:
                     audit_request = self._request(
                         "reviewer",
-                        "You are the Reviewer invoked by tools/dev_orchestrator with the phase "
-                        "contract below. Follow AGENTS.md's controller-invoked role context-loading "
-                        "path and its controller-tooling override. Independently audit the contract "
-                        "and candidate. "
-                        f"{self.REVIEWER_VERDICT_RULES} "
-                        "Return only the audit schema.\n\n"
-                        + json.dumps(contract, indent=2),
+                        self._reviewer_prompt(contract),
                         audit_worktree,
                         paths,
                         "audit-response.schema.json",
