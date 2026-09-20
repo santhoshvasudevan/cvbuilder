@@ -408,3 +408,5 @@ bootstrap has been independently accepted and `cvbuild2` has been operator-fast-
 the tooling. The versioned M3A contract preserves `437b179490b01697366ba70d75b6c72a6c83a7a4`
 as the product baseline and resolves the future implementation base to the orchestration-enabled HEAD
 when a run is planned.
+
+- 2026-09-20: Decision: abort M3A run `m3a-d2c0cc48b6aa`, with findings `AUDIT-002` and `CLAUDE-M3A-002` remaining open and deferred to a future bounded slice; see `docs/DEFERRED_FINDINGS.md`.
