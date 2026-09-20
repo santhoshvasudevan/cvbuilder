@@ -59,4 +59,13 @@ M1 established the Django project, `.env.example`, and root `Makefile`; read the
 for the canonical application commands. The external development-agent controller is documented in
 `docs/DEVELOPMENT_ORCHESTRATION.md` and operated through `python -m tools.dev_orchestrator` as
 described in `docs/DEVELOPMENT_RUNBOOK.md`. Its local `.orchestration/runs/` and worktree directories
-are never product workflow state and must not be committed.
+are never product workflow state and must not be committed. Within each run directory, `handoffs/`
+holds only controller pipeline artifacts that conform to the controller schemas; independently
+commissioned supplemental audits (for example Claude reviews with a different JSON schema) belong
+under the sibling `supplemental-audits/` directory via
+`python -m tools.dev_orchestrator record-supplemental-audit --run-id <run-id> --file <json-file>`
+and are evidence only until translated through an authorized, schema-valid controller path. Agent
+prompts carry a worktree-local startup identity
+(branch or `DETACHED`, HEAD, durable run ID/state loaded from that run's `state.json`, and the exact
+`docs/CURRENT_STATE.md` path/hash constrained inside the request worktree); never substitute the root
+checkout copy.

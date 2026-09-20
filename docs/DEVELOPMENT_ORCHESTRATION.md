@@ -43,8 +43,29 @@ performed before NDJSON persistence so sanitization cannot corrupt the JSON fram
 
 Each run contains `manifest.json`, atomic `state.json`, JSON/Markdown phase contracts,
 `context-manifest.json`, append-only `events.jsonl`, structured handoffs, deterministic evidence, and
-sanitized logs. State updates fsync a temporary file and atomically replace `state.json`; a crash cannot
-partially write a false `COMPLETED` state.
+sanitized logs. `handoffs/` is reserved for controller pipeline artifacts that match the controller
+schemas and naming/validation expectations (implementer/audit/closure/operator-decision/correction
+files). Independently commissioned Claude or other supplemental audits whose JSON intentionally uses
+a different schema are stored under the sibling per-run `supplemental-audits/` directory created at
+`plan` time. The sanctioned writer is
+`python -m tools.dev_orchestrator record-supplemental-audit --run-id <run-id> --file <json-file>`:
+it verifies durable `state.json` identity, accepts any JSON object without
+`validate_audit_response`, writes append-only under `supplemental-audits/` (never `handoffs/`), and
+emits `supplemental_audit_recorded` without transitioning or otherwise mutating `RunState`.
+Supplemental audits are evidence only: they are never loaded by `validate_audit_response`, never
+drive state transitions or closure, and become authoritative only after an authorized translation
+into a schema-valid pipeline handoff. State updates fsync a temporary
+file and atomically replace `state.json`; a crash cannot partially write a false `COMPLETED` state.
+
+Every controller-created agent request begins with an explicit startup identity derived from the
+request worktree (not the root checkout) and from the durable `state.json` loaded via `StateStore`
+at request construction time (not a caller-supplied in-memory state): git branch or `DETACHED`,
+exact HEAD, durable run ID and state, and the absolute worktree-local `docs/CURRENT_STATE.md` path
+plus its SHA-256. The resolved CURRENT_STATE path must remain inside the resolved request worktree
+(symlink/path escape fails closed). Agents must verify branch/HEAD and read that exact local file
+before acting; missing or corrupt durable state, run-id mismatch, or missing identity inputs fail
+closed without falling back to the root checkout copy. The identity block is context only and does
+not mutate durable `.orchestration` state.
 
 An escalated run may receive a strictly validated, append-only operator decision under its existing
 `handoffs/` directory. The original phase contract is never rewritten. Additional allowed paths are

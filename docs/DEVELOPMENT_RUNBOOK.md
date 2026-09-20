@@ -37,7 +37,23 @@ linkage, explicit operator selection, and static metadata ownership.
 
 `approve` refuses a dirty tree or changed HEAD. The live `run` creates implementation and audit
 worktrees under `.orchestration/worktrees/<run-id>/` and invokes the configured agents. It never merges
-or pushes. Cursor must be authenticated before this step.
+or pushes. Cursor must be authenticated before this step. Each agent prompt includes a worktree-local
+startup identity loaded from durable `state.json` plus that worktree's git branch/`DETACHED`, HEAD,
+and constrained `docs/CURRENT_STATE.md` path/hash; verify those values in the agent worktree, not the
+root checkout.
+
+`plan` also creates `supplemental-audits/` beside `handoffs/`. Record independently commissioned
+Claude or other non-pipeline audit JSON only through the sanctioned writer (never by hand-copying
+into `handoffs/`):
+
+```text
+.venv/bin/python -m tools.dev_orchestrator record-supplemental-audit --run-id <run-id> --file /tmp/claude-audit.json
+```
+
+The command validates durable run identity, accepts any JSON object (not the pipeline audit schema),
+preserves a safe source basename under `supplemental-audits/`, emits `supplemental_audit_recorded`,
+and does not mutate `RunState`. Pipeline handoffs remain the only state-machine inputs; supplemental
+files are evidence until translated through an authorized schema-valid controller path.
 
 Attach the observational dashboard from another terminal:
 
