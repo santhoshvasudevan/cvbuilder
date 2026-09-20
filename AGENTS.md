@@ -12,18 +12,25 @@ The repository — Git history, canonical documentation, tests, and `docs/CURREN
    git log -5 --oneline --decorate
    git status --short
    ```
-2. Read the canonical repository docs (in this order of precedence — see `docs/ENGINEERING_RULES.md` §A for the full explanation):
-   - `requirements.md`
-   - `docs/DECISIONS.md`
-   - `docs/ARCHITECTURE.md`
-   - `docs/IMPLEMENTATION_PLAN.md`
-   - `docs/TEST_STRATEGY.md`
-   - `docs/REQUIREMENT_TRACEABILITY.md`
-   - `docs/CURRENT_STATE.md`
-   - `docs/DEVELOPMENT_ORCHESTRATION.md`
-   - `docs/DEVELOPMENT_RUNBOOK.md`
-   - `docs/RESUME_OUTPUT_STRUCTURE.md`
-   - `docs/V2_REUSE_AUDIT.md` and `docs/QUALITY_BENCHMARK.md` (audit/history and methodology records — see below)
+2. Load repository context in tiers. These tiers control how much to read, not precedence; the
+   canonical precedence chain remains exactly as defined in `docs/ENGINEERING_RULES.md` §A.
+   - **Every session:** read `AGENTS.md`; confirm branch, HEAD, and status; inspect the applicable
+     durable run state (`.orchestration/runs/<run-id>/state.json`, or establish that no run is in
+     scope); read the worktree-local `docs/CURRENT_STATE.md`; read the current milestone section in
+     `docs/IMPLEMENTATION_PLAN.md`; and read the sections of `docs/ENGINEERING_RULES.md` relevant to
+     the task.
+   - **Task-dependent:** read only the requirement, architecture, and decision sections explicitly
+     named by the task contract. Follow references needed to understand those named sections, but do
+     not preload the entire canonical set by default.
+   - **Milestone boundary:** perform one full canonical reconciliation across `requirements.md`,
+     `docs/DECISIONS.md`, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN.md`,
+     `docs/TEST_STRATEGY.md`, `docs/REQUIREMENT_TRACEABILITY.md`, `docs/CURRENT_STATE.md`,
+     `docs/DEVELOPMENT_ORCHESTRATION.md`, `docs/DEVELOPMENT_RUNBOOK.md`,
+     `docs/RESUME_OUTPUT_STRUCTURE.md`, `docs/V2_REUSE_AUDIT.md`, and
+     `docs/QUALITY_BENCHMARK.md`.
+   - **Escape hatch:** if `docs/CURRENT_STATE.md` contradicts Git or durable run state, or the task
+     touches anything not covered by the contract's named sections, read and reconcile the full
+     canonical set above before proceeding. Never weaken or skip this escalation.
 
 ## Standing rules
 
