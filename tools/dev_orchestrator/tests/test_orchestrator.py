@@ -315,6 +315,55 @@ class ControllerTests(unittest.TestCase):
         reviewer_prompt = adapters["reviewer"].requests[0].prompt
         self.assertIn("PASS requires every finding to have status CLOSED", reviewer_prompt)
         self.assertIn("Any OPEN finding requires verdict CORRECTION_REQUIRED or BLOCKED", reviewer_prompt)
+        self.assertIn("controller-invoked role context-loading path", reviewer_prompt)
+        self.assertIn("Run only executable test commands listed in contract.required_tests", reviewer_prompt)
+        live_instructions = reviewer_prompt.split("\n\n{", 1)[0].lower()
+        self.assertNotIn("override repository documentation", live_instructions)
+        self.assertNotIn("disregard repository documentation", live_instructions)
+        self.assertNotIn("suppress", live_instructions)
+        self.assertNotIn("historical worktree", live_instructions)
+        self.assertNotIn("explicitly authorized", live_instructions)
+
+    def test_reviewer_receives_operator_amendments_and_prior_corrections(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()], reviewer_responses=[audit()]
+        )
+        run_id = self.prepare_run(controller)
+        paths = controller.paths(run_id)
+        _atomic_json(
+            paths.handoffs / "operator-decision-01.json",
+            {
+                "run_id": run_id,
+                "decision": "APPROVED",
+                "reason": "the milestone boundary test must advance",
+                "additional_allowed_paths": ["job_applications/tests/test_settings.py"],
+                "constraints": ["Preserve unrelated assertions."],
+            },
+        )
+        _atomic_json(
+            paths.handoffs / "correction-01.json",
+            {
+                "decision": "CORRECT",
+                "prompt": "Keep the prior collision-safe ordering correction.",
+                "finding_ids": ["AUDIT-001"],
+            },
+        )
+
+        state = controller.execute(run_id)
+
+        self.assertEqual(state.state, "COMPLETED")
+        prompt = adapters["reviewer"].requests[0].prompt
+        marker = "Return only the audit schema.\n\n"
+        effective_contract = json.loads(prompt.split(marker, 1)[1])
+        self.assertIn(
+            "job_applications/tests/test_settings.py",
+            effective_contract["allowed_paths"],
+        )
+        self.assertIn("Approved operator amendment", effective_contract["objective"])
+        self.assertIn(
+            "Correction: Keep the prior collision-safe ordering correction.",
+            effective_contract["objective"],
+        )
 
     def test_reviewer_semantic_error_gets_one_same_session_repair(self):
         open_finding = finding()
@@ -1684,7 +1733,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(str(audit_state.resolve()), reviewer_prompt)
         self.assertIn(audit_hash, reviewer_prompt)
         self.assertIn("`AUDITING`", reviewer_prompt)
-        self.assertIn("invoked by tools/dev_orchestrator with the phase contract", reviewer_prompt)
+        self.assertIn("invoked by tools/dev_orchestrator with the effective phase contract", reviewer_prompt)
         self.assertIn("controller-invoked role context-loading path", reviewer_prompt)
         root_current = (REPOSITORY_ROOT / "docs" / "CURRENT_STATE.md").resolve()
         self.assertNotIn(str(root_current), implementer_prompt)
@@ -1768,6 +1817,9 @@ class ValidationAndSafetyTests(unittest.TestCase):
         allowed = command[command.index("--allowedTools") + 1]
         disallowed = command[command.index("--disallowedTools") + 1]
         self.assertIn("Bash(make verify)", allowed)
+        self.assertIn("Bash(make migrations-check)", allowed)
+        self.assertIn("Bash(make secrets)", allowed)
+        self.assertIn("Bash(.venv/bin/python manage.py test *)", allowed)
         self.assertIn("Bash(git diff *)", allowed)
         self.assertNotIn("Edit", allowed)
         self.assertEqual(disallowed, "Edit,Write,NotebookEdit")

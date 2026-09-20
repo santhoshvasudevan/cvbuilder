@@ -48,6 +48,12 @@ contract. A fail-closed keyword guard prevents this compatibility shim from sile
 
 The shared reviewer prompt states the controller's cross-field rule explicitly: `PASS` requires
 every finding to be `CLOSED`, while any `OPEN` finding requires `CORRECTION_REQUIRED` or `BLOCKED`.
+The prompt is provider-neutral and receives the effective contract assembled by the controller: the
+immutable phase contract plus approved operator amendments, clarifications, and prior correction
+prompts. Its test authority comes only from executable entries in that effective contract's
+`required_tests`; adapter tool availability is capability, not permission to add test commands.
+Live prompts never instruct a reviewer to override repository documentation, suppress findings, or
+self-authorize commands. Historical-candidate proof scaffolding stays outside the live controller.
 Because JSON Schema constrains structure rather than that semantic relationship, the controller may
 make one bounded same-session repair request when those fields conflict. The request names the exact
 violation, disables Claude tools, and requires the reviewer to preserve its audit, findings, statuses,
