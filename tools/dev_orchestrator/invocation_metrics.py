@@ -43,7 +43,16 @@ class InvocationMetrics:
 
     @staticmethod
     def _identifier(event: dict) -> str:
-        for key in ("task_id", "taskId", "request_id", "requestId", "thread_id", "threadId"):
+        for key in (
+            "task_id",
+            "taskId",
+            "request_id",
+            "requestId",
+            "thread_id",
+            "threadId",
+            "session_id",
+            "sessionId",
+        ):
             value = event.get(key)
             if isinstance(value, str) and value:
                 return value

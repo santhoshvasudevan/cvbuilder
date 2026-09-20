@@ -20,6 +20,7 @@ ROLE_NAMES = frozenset(
         "orcha_closure",
         "implementer",
         "reviewer",
+        "codex_reviewer",
         "escalation_reviewer",
         "architecture_escalation",
         "claude_orchestrator",

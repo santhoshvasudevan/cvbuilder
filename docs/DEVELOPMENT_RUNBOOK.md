@@ -1,7 +1,8 @@
 # Development Orchestrator Runbook
 
-Run every command from the repository root. No command below makes a paid/live model call until the
-explicit `run` step, and `run` is refused until a clean contract has been approved.
+Run every command from the repository root. `doctor` makes one minimal live Claude call when Claude is
+the configured reviewer; no other command below makes a paid/live model call until the explicit `run`
+step, and `run` is refused until a clean contract has been approved.
 
 ## Qualification and planning
 
@@ -13,8 +14,10 @@ explicit `run` step, and `run` is refused until a clean contract has been approv
 
 `doctor` checks Git boundary/ancestry, Git/tmux/jq, installed Codex machine-output flags and login,
 Cursor binary/login, configured model syntax, runtime/worktree safety, redaction, and disabled optional
-adapters. It never calls a model. `WARN Cursor authentication: Not logged in` must be resolved with the
-operator's normal Cursor login flow before the first live run.
+adapters. When the reviewer role is routed to Claude, it also resolves the Claude binary, records its
+version, checks the installed structured-output flags, and makes one minimal live dry-audit call that
+must pass `audit-response.schema.json` and controller validation. `WARN Cursor authentication: Not
+logged in` must be resolved with the operator's normal Cursor login flow before the first live run.
 
 The planning command prints the run ID and generated contract path. Inspect both representations:
 

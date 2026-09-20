@@ -21,8 +21,10 @@ non-zero exit, timeout, missing final output, read-only-to-isolated audit-test c
 interrupted Orcha/closure state. Temporary Git
 repositories exercise dirty-worktree, invalid-SHA/ancestry, unauthorized-path, requirements-change,
 failed-verification, and accepted-candidate evidence behavior. Further tests cover strict unknown
-roles/adapters/states/limits, recursive secret redaction, disabled Claude behavior, atomic state
-replacement, and tmux fixture rendering.
+roles/adapters/states/limits, recursive secret redaction, Claude structured-output command/usage
+normalization, fail-closed malformed audit handling, and the one-attempt same-session repair of the
+reviewer verdict/finding-status invariant. Structural errors and a second semantic failure still
+escalate. Further tests cover atomic state replacement and tmux fixture rendering.
 
 This development tooling is outside the three product-quality layers below: its tests prove the
 supervisor, not resume-content quality or provider qualification. Live development-agent calls are
