@@ -21,17 +21,51 @@ decoding restores the exact SHA.
 - Orcha: Codex, read-only, prepares/clarifies/corrects/closes against repository evidence.
 - Implementer: Cursor CLI in a dedicated implementation worktree. Write mode is refused unless the
   request identifies that permission profile and the controller has verified isolation.
-- Reviewer: fresh Codex invocation in a different audit worktree. It starts read-only. If that audit
+- Reviewer: fresh Claude Code invocation in a different audit worktree, using the CLI's
+  `--json-schema` support against `audit-response.schema.json`. It starts read-only. If that audit
   requests an adversarial test, a second invocation may write only on a safety-verified audit branch;
   the controller rejects non-test changes and never transfers the resulting commit automatically.
-- Claude orchestrator/reviewer: disabled placeholders. Disabled selection performs no binary lookup,
-  authentication check, or subprocess launch.
+- The prior Codex reviewer remains a disabled rollback profile. The Claude orchestrator remains a
+  disabled placeholder; disabled selection performs no binary lookup, authentication check, or
+  subprocess launch.
 
 Adapters use `subprocess` argument arrays, never `shell=True`. They stream stdout/stderr into separate
 sanitized logs, parse NDJSON events, capture session IDs/final messages/handoffs/exit codes, enforce a
 timeout, emit heartbeats, and terminate the process group on timeout. Agent subprocesses receive a
 small environment allowlist rather than inherited API keys or credentials. Codex flags are based on
-the installed `codex exec --help`; Cursor uses documented print + `stream-json` mode and session resume.
+the installed `codex exec --help`; Cursor uses documented print + `stream-json` mode and session
+resume. Claude uses print mode, receives the prompt on stdin, requests JSON output constrained by the
+audit schema, and normalizes its input/cache-read/output/thinking usage into the common invocation
+metrics event. Read-only Claude invocations use `dontAsk` with an explicit allowlist for repository
+inspection and the controller's deterministic Git/Python/Make checks; `Edit`, `Write`, and
+`NotebookEdit` are explicitly denied. Operations outside that allowlist are denied without an
+interactive prompt. Claude Code 2.1.267
+lacks the draft 2020-12 meta-schema, so the adapter deep-copies the
+canonical schema in memory and changes only its `$schema` declaration to draft-07 before invoking the
+CLI. The canonical file remains unchanged and controller validation still uses the canonical
+contract. A fail-closed keyword guard prevents this compatibility shim from silently downgrading
+2020-12 constraints; remove it once Claude ships a 2020-12 validator.
+
+The shared reviewer prompt states the controller's cross-field rule explicitly: `PASS` requires
+every finding to be `CLOSED`, while any `OPEN` finding requires `CORRECTION_REQUIRED` or `BLOCKED`.
+Because JSON Schema constrains structure rather than that semantic relationship, the controller may
+make one bounded same-session repair request when those fields conflict. The request names the exact
+violation, disables Claude tools, and requires the reviewer to preserve its audit, findings, statuses,
+and test results while correcting only the verdict and summary. A missing session, any structural
+schema error, or a second invalid response fails closed as before.
+
+`doctor` performs the normal non-mutating environment checks and explicitly qualifies the configured
+Claude reviewer with four checks: binary resolution, version, presence of the structured-output CLI
+flags, and one minimal live dry audit that must pass both the JSON schema and
+`validate_audit_response()`. Automated tests continue to use scripted adapters and never make this
+live call.
+
+### Reviewer rollback
+
+The Codex reviewer profile remains defined as `codex_reviewer` with `enabled: false`. To revert the
+active reviewer, change only the YAML merge line under `agents.reviewer` from
+`<<: *claude_reviewer` to `<<: *codex_reviewer`; the role-local `enabled: true` override activates the
+selected profile. No controller code change is required.
 
 For Cursor, the controller treats a complete schema-shaped `assistant` event as the authoritative
 handoff candidate and immediately serializes it into the invocation's durable `.final.json` file.
@@ -59,8 +93,9 @@ file and atomically replace `state.json`; a crash cannot partially write a false
 
 After every agent subprocess invocation, the existing event ledger receives one passive
 `agent_invocation_metrics` record. It derives provider usage from the already-sanitized streamed
-events and records the durable run ID and role, provider task ID (`thread_id` for Codex or
-`request_id` for Cursor), candidate SHA when known, UTF-8 prompt and task-packet byte counts, normalized
+events and records the durable run ID and role, provider task ID (`thread_id` for Codex,
+`request_id` for Cursor, or `session_id` for Claude), candidate SHA when known, UTF-8 prompt and
+task-packet byte counts, normalized
 input/cached-input/output/reasoning-output token counts, unique tool-call count, UTF-8 bytes of captured
 completed tool results, retry reason, and correction count. Missing provider fields remain empty or
 zero. The record does not alter prompts, schemas, role selection, retry decisions, or run state.

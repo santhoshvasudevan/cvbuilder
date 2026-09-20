@@ -28,12 +28,24 @@ agents:
     model: auto
     permission_profile: implementation_worktree
 
-  reviewer:
+  codex_reviewer: &codex_reviewer
     adapter: codex
     binary: codex
     model: gpt-5.6-terra
     reasoning_effort: high
     permission_profile: audit_worktree
+    enabled: false
+
+  claude_reviewer: &claude_reviewer
+    adapter: claude
+    binary: claude
+    enabled: true
+    model: sonnet
+    permission_profile: audit_worktree
+
+  reviewer:
+    <<: *claude_reviewer
+    enabled: true
 
   escalation_reviewer:
     adapter: codex
@@ -55,13 +67,6 @@ agents:
     enabled: false
     model: sonnet
     permission_profile: read_only
-
-  claude_reviewer:
-    adapter: claude
-    binary: claude
-    enabled: false
-    model: sonnet
-    permission_profile: audit_worktree
 
 limits:
   max_correction_cycles: 3

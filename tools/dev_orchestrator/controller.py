@@ -14,6 +14,7 @@ from typing import Any
 
 from .adapters import (
     AdapterRequest,
+    AdapterResult,
     AgentAdapter,
     ClaudeAdapter,
     CodexAdapter,
@@ -141,6 +142,18 @@ def _contract_markdown(contract: dict) -> str:
 
 
 class OrchestrationController:
+    REVIEWER_VERDICT_RULES = (
+        "Verdict/status invariant: PASS requires every finding to have status CLOSED. "
+        "Any OPEN finding requires verdict CORRECTION_REQUIRED or BLOCKED. "
+        "CORRECTION_REQUIRED requires at least one OPEN finding."
+    )
+    REPAIRABLE_AUDIT_SEMANTIC_ERRORS = frozenset(
+        {
+            "PASS cannot contain open findings",
+            "CORRECTION_REQUIRED requires at least one open finding",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -1106,6 +1119,71 @@ class OrchestrationController:
             )
         return result
 
+    def _validate_or_repair_audit(
+        self,
+        *,
+        adapter: AgentAdapter,
+        request: AdapterRequest,
+        result: AdapterResult,
+        state: RunState,
+        events: EventLog,
+        event_callback=None,
+    ) -> tuple[dict, AdapterResult]:
+        """Validate an audit, allowing one same-session repair of verdict/status semantics."""
+        try:
+            return validate_audit_response(result.handoff or {}), result
+        except SchemaError as exc:
+            violation = str(exc)
+            if violation not in self.REPAIRABLE_AUDIT_SEMANTIC_ERRORS or not result.session_id:
+                raise
+
+        repair_prompt = (
+            "Your previous audit completed, but the controller rejected its final JSON for this "
+            f"specific semantic violation: {violation}\n\n"
+            f"{self.REVIEWER_VERDICT_RULES}\n\n"
+            "Correct the verdict/status inconsistency using only the audit already in this session. "
+            "Do not inspect files, reread the diff, call tools, or rerun tests. Preserve base_sha, "
+            "candidate_sha, findings (including their statuses), test_commands, audit-test fields, "
+            "and substantive conclusions. Change only the verdict and summary as needed to make the "
+            "existing findings semantically consistent. Return only the corrected audit JSON."
+        )
+        repair_request = dataclasses.replace(
+            request,
+            prompt=repair_prompt,
+            session_id=result.session_id,
+            allow_write=False,
+            safety_verified=False,
+            packet_bytes=len(repair_prompt.encode("utf-8")),
+            retry_reason="reviewer_semantic_repair",
+        )
+        events.emit(
+            run_id=state.run_id,
+            role="REVIEWER",
+            state=state.state,
+            event="reviewer_semantic_repair",
+            message="Requesting one same-session repair of reviewer verdict/status semantics",
+            violation=violation,
+            candidate_sha=state.result_sha,
+        )
+        repaired = self._invoke(
+            adapter,
+            repair_request,
+            state=state,
+            events=events,
+            resume=True,
+            event_callback=event_callback,
+        )
+        if not repaired.succeeded:
+            raise SchemaError(
+                "reviewer semantic repair invocation failed: " + (repaired.error or repaired.status)
+            )
+        try:
+            return validate_audit_response(repaired.handoff or {}), repaired
+        except SchemaError as exc:
+            raise SchemaError(
+                f"reviewer audit remained invalid after one semantic repair attempt: {exc}"
+            ) from exc
+
     def _save_handoff(self, paths: RunPaths, name: str, handoff: dict) -> None:
         _atomic_json(paths.handoffs / name, handoff)
 
@@ -1748,7 +1826,12 @@ class OrchestrationController:
                 try:
                     audit_request = self._request(
                         "reviewer",
-                        "Independently audit the contract and candidate. Return only the audit schema.\n\n"
+                        "You are the Reviewer invoked by tools/dev_orchestrator with the phase "
+                        "contract below. Follow AGENTS.md's controller-invoked role context-loading "
+                        "path and its controller-tooling override. Independently audit the contract "
+                        "and candidate. "
+                        f"{self.REVIEWER_VERDICT_RULES} "
+                        "Return only the audit schema.\n\n"
                         + json.dumps(contract, indent=2),
                         audit_worktree,
                         paths,
@@ -1767,7 +1850,14 @@ class OrchestrationController:
                 if not result.succeeded:
                     return self._fail_agent(state, store, events, "REVIEWER", result.error)
                 try:
-                    latest_audit = validate_audit_response(result.handoff or {})
+                    latest_audit, result = self._validate_or_repair_audit(
+                        adapter=reviewer,
+                        request=audit_request,
+                        result=result,
+                        state=state,
+                        events=events,
+                        event_callback=callback("reviewer"),
+                    )
                 except SchemaError as exc:
                     return self._fail_agent(state, store, events, "REVIEWER", str(exc))
                 if (
@@ -1881,7 +1971,14 @@ class OrchestrationController:
                     if not test_result.succeeded:
                         return self._fail_agent(state, store, events, "REVIEWER", test_result.error)
                     try:
-                        test_audit = validate_audit_response(test_result.handoff or {})
+                        test_audit, test_result = self._validate_or_repair_audit(
+                            adapter=reviewer,
+                            request=test_request,
+                            result=test_result,
+                            state=state,
+                            events=events,
+                            event_callback=callback("reviewer"),
+                        )
                         if (
                             test_audit["base_sha"] != state.base_sha
                             or test_audit["candidate_sha"] != state.result_sha

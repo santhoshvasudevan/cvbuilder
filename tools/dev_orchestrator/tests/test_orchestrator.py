@@ -13,6 +13,11 @@ import yaml
 
 from tools.dev_orchestrator.adapters import AdapterResult, ClaudeAdapter, CursorAdapter, FakeAdapter
 from tools.dev_orchestrator.adapters.base import AdapterRequest, ProcessAdapter
+from tools.dev_orchestrator.adapters.claude_schema import (
+    DRAFT_07,
+    DRAFT_2020_12,
+    schema_for_claude_cli,
+)
 from tools.dev_orchestrator.config import ConfigError, load_config
 from tools.dev_orchestrator.controller import ControllerError, OrchestrationController, _atomic_json
 from tools.dev_orchestrator.events import EventLog
@@ -302,11 +307,52 @@ class ControllerTests(unittest.TestCase):
         return target
 
     def test_implementation_audit_pass_closure(self):
-        controller, _ = self.make_controller(
+        controller, adapters = self.make_controller(
             implementer_responses=[implementer()], reviewer_responses=[audit()]
         )
         state = controller.execute(self.prepare_run(controller))
         self.assertEqual(state.state, "COMPLETED")
+        reviewer_prompt = adapters["reviewer"].requests[0].prompt
+        self.assertIn("PASS requires every finding to have status CLOSED", reviewer_prompt)
+        self.assertIn("Any OPEN finding requires verdict CORRECTION_REQUIRED or BLOCKED", reviewer_prompt)
+
+    def test_reviewer_semantic_error_gets_one_same_session_repair(self):
+        open_finding = finding()
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[
+                audit("PASS", [open_finding]),
+                audit("BLOCKED", [open_finding]),
+            ],
+        )
+
+        state = controller.execute(self.prepare_run(controller))
+
+        self.assertEqual(state.state, "BLOCKED")
+        requests = adapters["reviewer"].requests
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1].session_id, "fake-session")
+        self.assertEqual(requests[1].retry_reason, "reviewer_semantic_repair")
+        self.assertIn("PASS cannot contain open findings", requests[1].prompt)
+        self.assertIn("Do not inspect files, reread the diff, call tools, or rerun tests", requests[1].prompt)
+        events = [json.loads(line) for line in controller.paths(state.run_id).events.read_text().splitlines()]
+        self.assertEqual(
+            len([event for event in events if event["event"] == "reviewer_semantic_repair"]),
+            1,
+        )
+
+    def test_reviewer_semantic_repair_is_capped_at_one_attempt(self):
+        invalid = audit("PASS", [finding()])
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[invalid, invalid],
+        )
+
+        state = controller.execute(self.prepare_run(controller))
+
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        self.assertIn("remained invalid after one semantic repair attempt", state.last_error)
+        self.assertEqual(len(adapters["reviewer"].requests), 2)
 
     def test_dry_run_plan_cannot_be_approved(self):
         controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
@@ -1638,6 +1684,8 @@ class ControllerTests(unittest.TestCase):
         self.assertIn(str(audit_state.resolve()), reviewer_prompt)
         self.assertIn(audit_hash, reviewer_prompt)
         self.assertIn("`AUDITING`", reviewer_prompt)
+        self.assertIn("invoked by tools/dev_orchestrator with the phase contract", reviewer_prompt)
+        self.assertIn("controller-invoked role context-loading path", reviewer_prompt)
         root_current = (REPOSITORY_ROOT / "docs" / "CURRENT_STATE.md").resolve()
         self.assertNotIn(str(root_current), implementer_prompt)
         self.assertNotIn(str(root_current), reviewer_prompt)
@@ -1685,6 +1733,166 @@ class ControllerTests(unittest.TestCase):
 
 
 class ValidationAndSafetyTests(unittest.TestCase):
+    def test_reviewer_routes_to_enabled_claude_and_keeps_codex_rollback_disabled(self):
+        config = load_config(REPOSITORY_ROOT / ".orchestration/config.yaml")
+
+        self.assertEqual(config.agents["reviewer"].adapter, "claude")
+        self.assertTrue(config.agents["reviewer"].enabled)
+        self.assertEqual(config.agents["reviewer"].permission_profile, "audit_worktree")
+        self.assertEqual(config.agents["claude_reviewer"].adapter, "claude")
+        self.assertTrue(config.agents["claude_reviewer"].enabled)
+        self.assertEqual(config.agents["codex_reviewer"].adapter, "codex")
+        self.assertFalse(config.agents["codex_reviewer"].enabled)
+
+    def test_claude_adapter_builds_structured_stdin_command_and_respects_write_gate(self):
+        schema_path = REPOSITORY_ROOT / "tools/dev_orchestrator/schemas/audit-response.schema.json"
+        request = AdapterRequest(
+            role="reviewer",
+            prompt="prompt is piped on stdin",
+            workdir=REPOSITORY_ROOT,
+            model="sonnet",
+            reasoning_effort="high",
+            permission_profile="audit_worktree",
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            log_dir=REPOSITORY_ROOT / ".orchestration/test-logs",
+            output_schema=schema_path,
+        )
+        adapter = ClaudeAdapter("claude", enabled=True)
+
+        command = adapter.build_command(request, Path("unused"))
+
+        self.assertEqual(command[:4], ["claude", "--print", "--output-format", "json"])
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        allowed = command[command.index("--allowedTools") + 1]
+        disallowed = command[command.index("--disallowedTools") + 1]
+        self.assertIn("Bash(make verify)", allowed)
+        self.assertIn("Bash(git diff *)", allowed)
+        self.assertNotIn("Edit", allowed)
+        self.assertEqual(disallowed, "Edit,Write,NotebookEdit")
+        self.assertNotIn(request.prompt, command)
+        schema = json.loads(command[command.index("--json-schema") + 1])
+        self.assertEqual(schema["$schema"], DRAFT_07)
+        self.assertEqual(schema["properties"]["verdict"]["enum"], [
+            "PASS",
+            "CORRECTION_REQUIRED",
+            "BLOCKED",
+        ])
+
+        writable = dataclasses.replace(request, allow_write=True, safety_verified=True)
+        write_command = adapter.build_command(writable, Path("unused"))
+        self.assertEqual(write_command[write_command.index("--permission-mode") + 1], "acceptEdits")
+        self.assertNotIn("--disallowedTools", write_command)
+
+        semantic_repair = dataclasses.replace(
+            request,
+            session_id="claude-session",
+            retry_reason="reviewer_semantic_repair",
+        )
+        repair_command = adapter.build_command(semantic_repair, Path("unused"))
+        self.assertEqual(repair_command[repair_command.index("--tools") + 1], "")
+        self.assertNotIn("--allowedTools", repair_command)
+        self.assertNotIn("--disallowedTools", repair_command)
+        self.assertEqual(repair_command[repair_command.index("--resume") + 1], "claude-session")
+
+    def test_claude_schema_transformation_changes_only_declaration_on_deep_copy(self):
+        schema_path = REPOSITORY_ROOT / "tools/dev_orchestrator/schemas/audit-response.schema.json"
+        before = schema_path.read_bytes()
+        canonical = json.loads(before)
+        expected = json.loads(before)
+        expected["$schema"] = DRAFT_07
+
+        transformed = schema_for_claude_cli(canonical)
+
+        self.assertEqual(canonical["$schema"], DRAFT_2020_12)
+        self.assertEqual(transformed, expected)
+        self.assertIsNot(transformed, canonical)
+        self.assertIsNot(transformed["$defs"], canonical["$defs"])
+        self.assertEqual(schema_path.read_bytes(), before)
+        validate_audit_response(audit())
+
+    def test_claude_adapter_extracts_structured_output_and_normalizes_usage(self):
+        handoff = audit()
+        event = json.dumps(
+            {
+                "type": "result",
+                "session_id": "claude-session",
+                "structured_output": handoff,
+                "result": json.dumps(handoff),
+                "usage": {
+                    "input_tokens": 2,
+                    "cache_creation_input_tokens": 10,
+                    "cache_read_input_tokens": 3,
+                    "output_tokens": 4,
+                    "output_tokens_details": {"thinking_tokens": 1},
+                },
+            }
+        )
+
+        class ScriptedClaude(ClaudeAdapter):
+            def build_command(self, request, final_output_path):
+                del request, final_output_path
+                return [sys.executable, "-c", f"print({event!r})"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            observed = []
+            result = ScriptedClaude("unused", enabled=True).start(
+                AdapterRequest(
+                    role="reviewer",
+                    prompt="prompt",
+                    workdir=root,
+                    model="sonnet",
+                    reasoning_effort=None,
+                    permission_profile="audit_worktree",
+                    timeout_seconds=10,
+                    heartbeat_seconds=1,
+                    log_dir=root / "logs",
+                    output_schema=REPOSITORY_ROOT
+                    / "tools/dev_orchestrator/schemas/audit-response.schema.json",
+                ),
+                lambda stream, payload: observed.append((stream, payload)),
+            )
+
+        self.assertTrue(result.succeeded)
+        self.assertEqual(result.session_id, "claude-session")
+        self.assertEqual(result.handoff, handoff)
+        metrics = InvocationMetrics()
+        metrics.observe(observed[0][1])
+        self.assertEqual(metrics.task_id, "claude-session")
+        self.assertEqual(metrics.input_tokens, 12)
+        self.assertEqual(metrics.cached_input_tokens, 3)
+        self.assertEqual(metrics.output_tokens, 4)
+        self.assertEqual(metrics.reasoning_output_tokens, 1)
+
+    def test_claude_reviewer_malformed_response_fails_closed_in_controller_validation(self):
+        malformed_event = json.dumps(
+            {
+                "type": "result",
+                "session_id": "claude-malformed",
+                "structured_output": {"verdict": "PASS"},
+            }
+        )
+
+        class ScriptedClaude(ClaudeAdapter):
+            def build_command(self, request, final_output_path):
+                del request, final_output_path
+                return [sys.executable, "-c", f"print({malformed_event!r})"]
+
+        case = ControllerTests(methodName="test_implementation_audit_pass_closure")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        controller, adapters = case.make_controller(
+            implementer_responses=[implementer()], reviewer_responses=[]
+        )
+        adapters["reviewer"] = ScriptedClaude("unused", enabled=True)
+
+        state = controller.execute(case.prepare_run(controller))
+
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        self.assertIn("audit_response fields invalid", state.last_error)
+
     def test_invocation_metrics_normalize_codex_events(self):
         metrics = InvocationMetrics()
         metrics.observe({"type": "thread.started", "thread_id": "codex-task"})

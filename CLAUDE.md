@@ -23,6 +23,6 @@ The primary goal is expert-quality candidate positioning and persuasive relevanc
 - If the working tree already has uncommitted changes from a prior session (this one's or another agent's) when you start, do not silently mix them into your own commit — inspect them, understand what they are, and report the situation before proceeding (`docs/HANDOVER_PROTOCOL.md` §B).
 - When updating canonical docs, keep `docs/CURRENT_STATE.md` concise and operational — full history belongs in `docs/DECISIONS.md`, not restated there.
 - The external development orchestrator is documented in `docs/DEVELOPMENT_ORCHESTRATION.md`.
-  Its Claude orchestrator/reviewer adapters are intentionally disabled in the initial release:
-  do not resolve the Claude binary, check Claude authentication, or invoke Claude from automated
-  tests while those configuration entries remain disabled.
+  Its reviewer role is configured for Claude Code structured output; the Claude orchestrator remains
+  disabled. Automated tests use scripted subprocesses and must never invoke a live model. The explicit
+  `doctor` command is the sole qualification path and includes a minimal live Claude dry audit.
