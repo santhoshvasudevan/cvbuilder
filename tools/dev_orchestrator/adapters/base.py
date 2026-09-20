@@ -33,6 +33,8 @@ class AdapterRequest:
     session_id: str = ""
     allow_write: bool = False
     safety_verified: bool = False
+    packet_bytes: int = 0
+    retry_reason: str = ""
 
 
 @dataclasses.dataclass
