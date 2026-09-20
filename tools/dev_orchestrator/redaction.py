@@ -23,10 +23,13 @@ SENSITIVE_NAMES = frozenset(
         "cookie",
         "key",
         "signature",
+        "database_url",
+        "pgpassword",
     }
 )
 _ASSIGNMENT = re.compile(
     r"(?i)\b(api[_-]?key|authorization|credential|password|client[_-]?secret|secret|"
+    r"database[_-]?url|pgpassword|"
     r"access[_-]?token|refresh[_-]?token|id[_-]?token|token|private[_-]?key|cookie)"
     r"[\"']?\s*[:=]\s*([^\s,;]+)"
 )

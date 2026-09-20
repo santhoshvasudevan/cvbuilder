@@ -17,7 +17,7 @@ from tools.dev_orchestrator.config import ConfigError, load_config
 from tools.dev_orchestrator.controller import ControllerError, OrchestrationController, _atomic_json
 from tools.dev_orchestrator.events import EventLog
 from tools.dev_orchestrator.evidence import EvidenceCollector, EvidenceError
-from tools.dev_orchestrator.git_safety import GitBoundary, GitRepository
+from tools.dev_orchestrator.git_safety import GitBoundary, GitRepository, GitSafetyError
 from tools.dev_orchestrator.invocation_metrics import InvocationMetrics
 from tools.dev_orchestrator.redaction import REDACTED, redact, redact_text
 from tools.dev_orchestrator.schemas import (
@@ -1928,15 +1928,20 @@ class ValidationAndSafetyTests(unittest.TestCase):
             self.assertIn("valid structured final output", result.error)
 
     def test_secret_redaction_is_recursive_and_event_log_is_sanitized(self):
+        database_url = "postgresql://user:database-secret@db.invalid/app"  # pragma: allowlist secret
         value = redact(
             {
                 "authorization": "Bearer sample-secret",
                 "nested": "token=abc123",
                 "refresh_token": "refresh-secret",  # pragma: allowlist secret
+                "DATABASE_URL": database_url,
+                "PGPASSWORD": "postgres-password",  # pragma: allowlist secret
             }
         )
         self.assertEqual(value["authorization"], REDACTED)
         self.assertEqual(value["refresh_token"], REDACTED)
+        self.assertEqual(value["DATABASE_URL"], REDACTED)
+        self.assertEqual(value["PGPASSWORD"], REDACTED)
         self.assertNotIn("abc123", value["nested"])
         with tempfile.TemporaryDirectory() as directory:
             log = EventLog(Path(directory) / "events.jsonl")
@@ -1948,6 +1953,64 @@ class ValidationAndSafetyTests(unittest.TestCase):
                 message="api_key=sample-secret",
             )
             self.assertNotIn("sample-secret", log.path.read_text(encoding="utf-8"))
+
+    def test_database_credentials_are_redacted_from_process_logs_and_events(self):
+        database_url = "postgresql://user:database-secret@db.invalid/app"  # pragma: allowlist secret
+        pgpassword = "postgres-password"  # pragma: allowlist secret
+        handoff = implementer("QUESTION")
+        final_event = json.dumps({"type": "result", "result": json.dumps(handoff)})
+        script = (
+            "import sys; "
+            f"print('DATABASE_URL={database_url} PGPASSWORD={pgpassword}'); "
+            f"print('PGPASSWORD={pgpassword}', file=sys.stderr); "
+            f"print({final_event!r})"
+        )
+
+        class ScriptedAdapter(ProcessAdapter):
+            def build_command(self, request, final_output_path):
+                del request, final_output_path
+                return [sys.executable, "-c", script]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            events = EventLog(root / "events.jsonl")
+
+            def capture(stream, event):
+                events.emit(
+                    run_id="run",
+                    role="IMPLEMENTER",
+                    state="IMPLEMENTING",
+                    event="agent_output",
+                    message=stream,
+                    payload=event,
+                )
+
+            result = ScriptedAdapter("unused").start(
+                AdapterRequest(
+                    role="implementer",
+                    prompt="prompt",
+                    workdir=root,
+                    model="unused",
+                    reasoning_effort=None,
+                    permission_profile="implementation_worktree",
+                    timeout_seconds=10,
+                    heartbeat_seconds=1,
+                    log_dir=root / "logs",
+                ),
+                capture,
+            )
+
+            self.assertTrue(result.succeeded)
+            captured = "\n".join(
+                [
+                    Path(result.stdout_log).read_text(encoding="utf-8"),
+                    Path(result.stderr_log).read_text(encoding="utf-8"),
+                    events.path.read_text(encoding="utf-8"),
+                ]
+            )
+            self.assertNotIn(database_url, captured)
+            self.assertNotIn(pgpassword, captured)
+            self.assertIn(REDACTED, captured)
 
     def test_disabled_claude_never_resolves_or_launches_binary(self):
         adapter = ClaudeAdapter("/definitely/missing/claude", enabled=False)
@@ -2032,6 +2095,72 @@ class ValidationAndSafetyTests(unittest.TestCase):
             self.assertFalse(repository.is_ancestor("f" * 40))
             self.assertFalse(repository.commit_exists("f" * 40))
 
+    def test_worktree_creation_bootstraps_clean_environment_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            container = Path(directory)
+            root = container / "repository"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"], check=True
+            )
+            (root / ".gitignore").write_text(".env\n.venv\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+            (root / ".venv").mkdir()
+            (root / ".env").write_text("DATABASE_URL=postgresql://example.invalid/db\n")
+
+            repository = GitRepository(root)
+            candidate_sha = repository.head()
+            audit = container / "audit"
+            implementation = container / "implementation"
+            repository.create_audit_worktree(audit, candidate_sha)
+            repository.create_implementation_worktree(
+                implementation, "agent/test/implementation", candidate_sha
+            )
+
+            for worktree in (audit, implementation):
+                self.assertTrue((worktree / ".venv").is_symlink())
+                self.assertTrue((worktree / ".env").is_symlink())
+                self.assertEqual((worktree / ".venv").resolve(), (root / ".venv").resolve())
+                self.assertEqual((worktree / ".env").resolve(), (root / ".env").resolve())
+                self.assertEqual(repository.status(worktree), [])
+
+    def test_worktree_creation_fails_before_add_when_root_environment_is_missing(self):
+        for missing in (".venv", ".env"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                container = Path(directory)
+                root = container / "repository"
+                root.mkdir()
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                subprocess.run(
+                    ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+                    check=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(root), "config", "user.name", "Test"], check=True
+                )
+                (root / ".gitignore").write_text(".env\n.venv\n", encoding="utf-8")
+                (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+                subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+                subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+                if missing != ".venv":
+                    (root / ".venv").mkdir()
+                if missing != ".env":
+                    (root / ".env").write_text("DATABASE_URL=postgresql://example.invalid/db\n")
+
+                worktree = container / "audit"
+                with self.assertRaisesRegex(GitSafetyError, "root (virtualenv|environment file)"):
+                    GitRepository(root).create_audit_worktree(
+                        worktree, GitRepository(root).head()
+                    )
+                self.assertFalse(worktree.exists())
+
     def test_redaction_handles_bearer_and_query_secret(self):
         safe = redact_text(
             "Bearer abc123 https://x.invalid?a=1&token=query-secret "
@@ -2044,13 +2173,36 @@ class ValidationAndSafetyTests(unittest.TestCase):
         self.assertIn(REDACTED, safe)
 
     def test_agent_subprocess_environment_excludes_credentials(self):
+        database_url = "postgresql://user:password@db.invalid/app"  # pragma: allowlist secret
         with mock.patch.dict(
             "os.environ",
-            {"PATH": "/bin", "HOME": "/tmp/home", "OPENAI_API_KEY": "secret"},  # pragma: allowlist secret
+            {
+                "PATH": "/bin",
+                "HOME": "/tmp/home",
+                "OPENAI_API_KEY": "secret",  # pragma: allowlist secret
+                "PGHOST": "db.invalid",
+                "PGPORT": "5432",
+                "PGUSER": "cvbuilder",
+                "PGPASSWORD": "postgres-password",  # pragma: allowlist secret
+                "PGDATABASE": "cvbuilder",
+                "DATABASE_URL": database_url,
+            },
             clear=True,
         ):
             environment = ProcessAdapter.safe_environment()
-        self.assertEqual(environment, {"PATH": "/bin", "HOME": "/tmp/home"})
+        self.assertEqual(
+            environment,
+            {
+                "PATH": "/bin",
+                "HOME": "/tmp/home",
+                "PGHOST": "db.invalid",
+                "PGPORT": "5432",
+                "PGUSER": "cvbuilder",
+                "PGPASSWORD": "postgres-password",  # pragma: allowlist secret
+                "PGDATABASE": "cvbuilder",
+                "DATABASE_URL": database_url,
+            },
+        )
 
     def test_nested_reasoning_event_is_classified_for_omission(self):
         self.assertTrue(

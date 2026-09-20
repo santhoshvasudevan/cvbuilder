@@ -96,6 +96,12 @@ class ProcessAdapter(AgentAdapter):
             "TERM",
             "COLORTERM",
             "NO_COLOR",
+            "PGHOST",
+            "PGPORT",
+            "PGUSER",
+            "PGPASSWORD",
+            "PGDATABASE",
+            "DATABASE_URL",
         }
         return {key: value for key, value in os.environ.items() if key in allowed}
 
@@ -246,6 +252,7 @@ class ProcessAdapter(AgentAdapter):
                     continue
                 stream_name, raw_line = item
                 event = None
+                safe_line = redact_text(raw_line)
                 if stream_name == "stdout":
                     parsed = self.parse_event(raw_line)
                     if parsed.get("type") == "text" and parsed.get("message") == redact_text(raw_line):
