@@ -6,6 +6,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -30,7 +31,7 @@ from .schemas import (
     validate_operator_decision,
     validate_phase_contract,
 )
-from .state import TERMINAL_STATES, RunState, RunStateName, StateStore, utc_now
+from .state import TERMINAL_STATES, RunState, RunStateName, StateError, StateStore, utc_now
 
 
 class ControllerError(RuntimeError):
@@ -47,6 +48,7 @@ class RunPaths:
     context_manifest: Path
     events: Path
     handoffs: Path
+    supplemental_audits: Path
     prompts: Path
     logs: Path
     evidence: Path
@@ -64,6 +66,7 @@ class RunPaths:
             context_manifest=root / "context-manifest.json",
             events=root / "events.jsonl",
             handoffs=root / "handoffs",
+            supplemental_audits=root / "supplemental-audits",
             prompts=root / "prompts",
             logs=root / "logs",
             evidence=root / "evidence.json",
@@ -302,7 +305,7 @@ class OrchestrationController:
         last = records[-1]
         if last.get("event") != "agent_failure" or last.get("role") != "REVIEWER":
             return False
-        if (paths.handoffs / f"audit-{state.correction_cycles:02d}.json").exists():
+        if self.pipeline_audit_handoff_path(paths, state.correction_cycles).exists():
             return False
         implementation = paths.worktrees / "implementation"
         audit = paths.worktrees / f"audit-{state.correction_cycles:02d}"
@@ -778,6 +781,7 @@ class OrchestrationController:
         state = RunState(run_id=run_id, phase=phase, base_sha=head)
         paths.root.mkdir(parents=True, exist_ok=False)
         paths.handoffs.mkdir()
+        paths.supplemental_audits.mkdir()
         paths.prompts.mkdir()
         paths.logs.mkdir()
         _atomic_json(paths.contract_json, contract)
@@ -862,6 +866,155 @@ class OrchestrationController:
         )
         return state
 
+    _SAFE_SUPPLEMENTAL_AUDIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.json$")
+
+    def supplemental_audit_path(self, paths: RunPaths, relative_name: str) -> Path:
+        """Return a single-file destination under supplemental-audits/ (never under handoffs/)."""
+        if not relative_name or relative_name != Path(relative_name).name:
+            raise ControllerError(
+                "supplemental audit path must be a single safe .json filename"
+            )
+        if not self._SAFE_SUPPLEMENTAL_AUDIT_NAME.fullmatch(relative_name):
+            raise ControllerError(
+                "supplemental audit path must be a single safe .json filename"
+            )
+        paths.supplemental_audits.mkdir(parents=True, exist_ok=True)
+        base = paths.supplemental_audits.resolve()
+        candidate = (paths.supplemental_audits / relative_name).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError as exc:
+            raise ControllerError(
+                "supplemental audit path resolves outside supplemental-audits/ "
+                f"({candidate}); refusing path escape or symlink escape"
+            ) from exc
+        if candidate.name != relative_name:
+            raise ControllerError(
+                "supplemental audit path must be a single safe .json filename"
+            )
+        return candidate
+
+    def record_supplemental_audit(self, run_id: str, source_file: Path | str) -> Path:
+        """Append-only record a non-pipeline audit under supplemental-audits/ without mutating RunState."""
+        paths = self.paths(run_id)
+        if not paths.state.is_file():
+            raise ControllerError(f"run {run_id!r} not found or missing durable state")
+        try:
+            durable = StateStore(paths.state).load()
+        except StateError as exc:
+            raise ControllerError(f"unable to load durable run state: {exc}") from exc
+        if durable.run_id != run_id or durable.run_id != paths.root.name:
+            raise ControllerError(
+                f"durable run_id {durable.run_id!r} does not match run directory "
+                f"{paths.root.name!r}"
+            )
+
+        source = Path(source_file)
+        basename = source.name
+        destination = self.supplemental_audit_path(paths, basename)
+        if destination.exists() or destination.is_symlink():
+            raise ControllerError(
+                f"supplemental audit destination already exists: "
+                f"{self._relative_artifact(paths, destination)}"
+            )
+
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise ControllerError(f"supplemental audit source not found: {source}") from exc
+        except OSError as exc:
+            raise ControllerError(f"unable to read supplemental audit source: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ControllerError(f"invalid supplemental audit JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ControllerError("supplemental audit JSON must be an object")
+
+        self._append_only_json(destination, payload)
+        relative = self._relative_artifact(paths, destination)
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=durable.state,
+            event="supplemental_audit_recorded",
+            message="Append-only supplemental audit recorded outside pipeline handoffs",
+            artifact_path=relative,
+        )
+        return destination
+
+    @staticmethod
+    def pipeline_audit_handoff_path(paths: RunPaths, correction_cycles: int) -> Path:
+        """Controller pipeline audit handoffs live only under handoffs/."""
+        return paths.handoffs / f"audit-{correction_cycles:02d}.json"
+
+    @staticmethod
+    def list_pipeline_audit_handoffs(paths: RunPaths) -> list[Path]:
+        """List schema-bound pipeline audits; never includes supplemental-audits/."""
+        return sorted(
+            path
+            for path in paths.handoffs.glob("audit-*.json")
+            if re.fullmatch(r"audit-\d{2}\.json", path.name)
+        )
+
+    def _worktree_startup_identity(self, workdir: Path, paths: RunPaths) -> str:
+        """Build a fail-closed startup identity from the request worktree and durable state.json."""
+        try:
+            durable = StateStore(paths.state).load()
+        except StateError as exc:
+            raise ControllerError(
+                f"unable to load durable run state for startup identity: {exc}"
+            ) from exc
+        expected_run_id = paths.root.name
+        if durable.run_id != expected_run_id:
+            raise ControllerError(
+                f"durable run_id {durable.run_id!r} does not match run directory "
+                f"{expected_run_id!r}"
+            )
+        try:
+            branch = self.repository.branch(workdir).strip() or "DETACHED"
+            head = self.repository.head(workdir).strip()
+        except GitSafetyError as exc:
+            raise ControllerError(
+                f"unable to read git identity for agent worktree {workdir}: {exc}"
+            ) from exc
+        if not head:
+            raise ControllerError(f"unable to resolve HEAD for agent worktree {workdir}")
+        workdir_resolved = workdir.resolve()
+        current_state_path = (workdir / "docs" / "CURRENT_STATE.md").resolve()
+        try:
+            current_state_path.relative_to(workdir_resolved)
+        except ValueError as exc:
+            raise ControllerError(
+                "worktree-local docs/CURRENT_STATE.md resolves outside the request worktree "
+                f"({current_state_path}); refusing path escape or symlink escape"
+            ) from exc
+        try:
+            if not current_state_path.is_file():
+                raise ControllerError(
+                    "worktree-local docs/CURRENT_STATE.md is missing at "
+                    f"{current_state_path}; refusing to fall back to the root checkout copy"
+                )
+            content_hash = _sha256_bytes(current_state_path.read_bytes())
+        except OSError as exc:
+            raise ControllerError(
+                f"unable to read worktree-local docs/CURRENT_STATE.md at {current_state_path}: {exc}"
+            ) from exc
+        return (
+            "## Startup identity (verify before acting)\n"
+            f"- Git branch: `{branch}`\n"
+            f"- Exact HEAD: `{head}`\n"
+            f"- Durable run ID: `{durable.run_id}`\n"
+            f"- Durable run state: `{durable.state}`\n"
+            f"- Worktree-local CURRENT_STATE.md path: `{current_state_path}`\n"
+            f"- CURRENT_STATE.md SHA-256: `{content_hash}`\n"
+            "\n"
+            "Before acting: verify `git branch --show-current` (or detached HEAD) and "
+            "`git rev-parse HEAD` match this identity, then read the exact worktree-local "
+            "CURRENT_STATE.md path above. Do not substitute the root checkout copy of "
+            "CURRENT_STATE.md or any other worktree's copy.\n"
+            "This identity block is context only. Durable `.orchestration` run state remains "
+            "authoritative and must not be mutated from this preamble.\n"
+        )
+
     def _request(
         self,
         role: str,
@@ -880,9 +1033,10 @@ class OrchestrationController:
             if schema_name
             else None
         )
+        identity = self._worktree_startup_identity(workdir, paths)
         return AdapterRequest(
             role=role,
-            prompt=prompt,
+            prompt=f"{identity}\n{prompt}",
             workdir=workdir,
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
@@ -1010,7 +1164,7 @@ class OrchestrationController:
         audit_candidate = paths.worktrees / f"audit-{state.correction_cycles:02d}"
         audit_worktree: Path | None = audit_candidate if audit_candidate.exists() else None
         latest_audit: dict | None = None
-        latest_audit_path = paths.handoffs / f"audit-{state.correction_cycles:02d}.json"
+        latest_audit_path = self.pipeline_audit_handoff_path(paths, state.correction_cycles)
         if latest_audit_path.exists():
             latest_audit = validate_audit_response(json.loads(latest_audit_path.read_text(encoding="utf-8")))
 
@@ -1106,16 +1260,19 @@ class OrchestrationController:
                         "structured implementer handoff.\n\n" + json.dumps(contract, indent=2)
                     )
                 session_id = state.sessions.get("implementer", "")
-                request = self._request(
-                    "implementer",
-                    prompt,
-                    implementation_worktree,
-                    paths,
-                    "implementer-response.schema.json",
-                    session_id=session_id,
-                    allow_write=True,
-                    safety_verified=True,
-                )
+                try:
+                    request = self._request(
+                        "implementer",
+                        prompt,
+                        implementation_worktree,
+                        paths,
+                        "implementer-response.schema.json",
+                        session_id=session_id,
+                        allow_write=True,
+                        safety_verified=True,
+                    )
+                except ControllerError as exc:
+                    return self._fail_agent(state, store, events, "IMPLEMENTER", str(exc))
                 if state.pending_implementer_prompt_path:
                     events.emit(
                         run_id=run_id,
@@ -1305,15 +1462,19 @@ class OrchestrationController:
                             "terminal presentation truncation."
                         ),
                     }
-                    correction = orcha.start(
-                        self._request(
+                    try:
+                        correction_request = self._request(
                             "orcha",
                             "Generate the bounded operator-authorized recovery prompt from this evidence.\n\n"
                             + json.dumps(orcha_context, indent=2),
                             implementation_worktree,
                             paths,
                             "orcha-correction.schema.json",
-                        ),
+                        )
+                    except ControllerError as exc:
+                        return self._fail_agent(state, store, events, "ORCHA", str(exc))
+                    correction = orcha.start(
+                        correction_request,
                         callback("orcha"),
                     )
                     if not correction.succeeded:
@@ -1391,14 +1552,17 @@ class OrchestrationController:
                 if handoff["session_id"] and not state.sessions.get("implementer"):
                     state.sessions["implementer"] = handoff["session_id"]
                     store.save(state)
-                decision_request = self._request(
-                    "orcha",
-                    "Answer from existing authoritative documents only; otherwise escalate.\n\n"
-                    + json.dumps(handoff, indent=2),
-                    implementation_worktree,
-                    paths,
-                    "orcha-decision.schema.json",
-                )
+                try:
+                    decision_request = self._request(
+                        "orcha",
+                        "Answer from existing authoritative documents only; otherwise escalate.\n\n"
+                        + json.dumps(handoff, indent=2),
+                        implementation_worktree,
+                        paths,
+                        "orcha-decision.schema.json",
+                    )
+                except ControllerError as exc:
+                    return self._fail_agent(state, store, events, "ORCHA", str(exc))
                 decision = orcha.start(decision_request, callback("orcha"))
                 if not decision.succeeded:
                     return self._fail_agent(state, store, events, "ORCHA", decision.error)
@@ -1506,14 +1670,17 @@ class OrchestrationController:
 
             elif current == RunStateName.AUDITING:
                 assert audit_worktree is not None
-                audit_request = self._request(
-                    "reviewer",
-                    "Independently audit the contract and candidate. Return only the audit schema.\n\n"
-                    + json.dumps(contract, indent=2),
-                    audit_worktree,
-                    paths,
-                    "audit-response.schema.json",
-                )
+                try:
+                    audit_request = self._request(
+                        "reviewer",
+                        "Independently audit the contract and candidate. Return only the audit schema.\n\n"
+                        + json.dumps(contract, indent=2),
+                        audit_worktree,
+                        paths,
+                        "audit-response.schema.json",
+                    )
+                except ControllerError as exc:
+                    return self._fail_agent(state, store, events, "REVIEWER", str(exc))
                 result = reviewer.start(audit_request, callback("reviewer"))
                 if not result.succeeded:
                     return self._fail_agent(state, store, events, "REVIEWER", result.error)
@@ -1608,8 +1775,8 @@ class OrchestrationController:
                         event="audit_test_write_started",
                         message="Safety-verified audit branch enabled for adversarial tests only",
                     )
-                    test_result = reviewer.start(
-                        self._request(
+                    try:
+                        test_request = self._request(
                             "reviewer",
                             "Add and commit only the adversarial tests requested by this read-only audit. "
                             "Do not modify production code. Return the updated audit schema.\n\n"
@@ -1619,7 +1786,11 @@ class OrchestrationController:
                             "audit-response.schema.json",
                             allow_write=True,
                             safety_verified=True,
-                        ),
+                        )
+                    except ControllerError as exc:
+                        return self._fail_agent(state, store, events, "REVIEWER", str(exc))
+                    test_result = reviewer.start(
+                        test_request,
                         callback("reviewer"),
                     )
                     if not test_result.succeeded:
@@ -1729,15 +1900,19 @@ class OrchestrationController:
                 open_ids = [
                     item["finding_id"] for item in latest_audit["findings"] if item["status"] == "OPEN"
                 ]
-                correction = orcha.start(
-                    self._request(
+                try:
+                    correction_request = self._request(
                         "orcha",
                         "Create a bounded correction prompt from these stable audit findings.\n\n"
                         + json.dumps(latest_audit, indent=2),
                         implementation_worktree,
                         paths,
                         "orcha-correction.schema.json",
-                    ),
+                    )
+                except ControllerError as exc:
+                    return self._fail_agent(state, store, events, "ORCHA", str(exc))
+                correction = orcha.start(
+                    correction_request,
                     callback("orcha"),
                 )
                 if not correction.succeeded:
@@ -1763,15 +1938,19 @@ class OrchestrationController:
                 resume = True
 
             elif current == RunStateName.CLOSURE_REVIEW:
-                closure = closure_agent.start(
-                    self._request(
+                try:
+                    closure_request = self._request(
                         "orcha_closure",
                         "Evaluate deterministic evidence and audit; do not merge or push.\n\n"
                         + json.dumps(latest_audit or {}, indent=2),
                         audit_worktree or implementation_worktree,
                         paths,
                         "closure-response.schema.json",
-                    ),
+                    )
+                except ControllerError as exc:
+                    return self._fail_agent(state, store, events, "ORCHA", str(exc))
+                closure = closure_agent.start(
+                    closure_request,
                     callback("orcha_closure"),
                 )
                 if not closure.succeeded:

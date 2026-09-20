@@ -150,6 +150,12 @@ class FakeRepository:
     def create_audit_worktree(self, path: Path, candidate_sha: str) -> None:
         del candidate_sha
         path.mkdir(parents=True)
+        docs = path / "docs"
+        docs.mkdir(exist_ok=True)
+        (docs / "CURRENT_STATE.md").write_text(
+            "audit worktree current state fixture\n",
+            encoding="utf-8",
+        )
 
     def assert_isolated_worktrees(self, implementation: Path, audit: Path) -> None:
         if implementation.resolve() == audit.resolve():
@@ -219,6 +225,12 @@ class TestController(OrchestrationController):
         del state
         worktree = paths.worktrees / "implementation"
         worktree.mkdir(parents=True, exist_ok=True)
+        docs = worktree / "docs"
+        docs.mkdir(exist_ok=True)
+        current_state = docs / "CURRENT_STATE.md"
+        if not current_state.exists():
+            source = REPOSITORY_ROOT / "docs" / "CURRENT_STATE.md"
+            current_state.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         return worktree, None
 
 
@@ -259,6 +271,7 @@ class ControllerTests(unittest.TestCase):
         paths = controller.paths(run_id)
         paths.root.mkdir(parents=True, exist_ok=True)
         paths.handoffs.mkdir(exist_ok=True)
+        paths.supplemental_audits.mkdir(exist_ok=True)
         paths.logs.mkdir(exist_ok=True)
         contract = json.loads(
             (REPOSITORY_ROOT / ".orchestration/contracts/M3A.json").read_text(encoding="utf-8")
@@ -276,6 +289,16 @@ class ControllerTests(unittest.TestCase):
             state.sessions["implementer"] = session_id
         StateStore(paths.state).save(state)
         return run_id
+
+    @staticmethod
+    def seed_worktree_current_state(worktree: Path, content: str | None = None) -> Path:
+        docs = worktree / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        target = docs / "CURRENT_STATE.md"
+        if content is None:
+            content = (REPOSITORY_ROOT / "docs" / "CURRENT_STATE.md").read_text(encoding="utf-8")
+        target.write_text(content, encoding="utf-8")
+        return target
 
     def test_implementation_audit_pass_closure(self):
         controller, _ = self.make_controller(
@@ -525,6 +548,7 @@ class ControllerTests(unittest.TestCase):
         StateStore(paths.state).save(state)
         _atomic_json(paths.handoffs / "audit-00.json", audit())
         (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
 
         resumed = controller.execute(run_id, resume=True)
 
@@ -595,7 +619,11 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(resumed.state, "COMPLETED")
         self.assertEqual(resumed.correction_cycles, 1)
         self.assertEqual(adapters["implementer"].requests[0].session_id, "persisted-session")
-        self.assertEqual(adapters["implementer"].requests[0].prompt, generated_prompt)
+        self.assertIn(generated_prompt, adapters["implementer"].requests[0].prompt)
+        self.assertIn(
+            "## Startup identity (verify before acting)",
+            adapters["implementer"].requests[0].prompt,
+        )
         self.assertEqual(adapters["implementer"].requests[0].workdir, implementation_path)
         self.assertIn("job_applications/tests/test_settings.py", adapters["orcha"].requests[0].prompt)
         self.assertEqual(len(list(paths.worktrees.glob("implementation"))), 1)
@@ -650,7 +678,7 @@ class ControllerTests(unittest.TestCase):
         resumed = controller.execute(run_id, resume=True)
 
         self.assertEqual(resumed.state, "COMPLETED")
-        self.assertEqual(adapters["implementer"].requests[0].prompt, generated_prompt)
+        self.assertIn(generated_prompt, adapters["implementer"].requests[0].prompt)
         events = [json.loads(line)["event"] for line in paths.events.read_text().splitlines()]
         self.assertIn("operator_recovery_retry", events)
 
@@ -664,6 +692,8 @@ class ControllerTests(unittest.TestCase):
         audit_worktree = paths.worktrees / "audit-00"
         implementation.mkdir(parents=True)
         audit_worktree.mkdir(parents=True)
+        self.seed_worktree_current_state(implementation)
+        self.seed_worktree_current_state(audit_worktree)
         controller.repository.registered_worktrees.extend([implementation, audit_worktree])  # type: ignore[attr-defined]
         state = StateStore(paths.state).load()
         state.result_sha = RESULT
@@ -1336,6 +1366,298 @@ class ControllerTests(unittest.TestCase):
                 else:
                     self.assertEqual(adapters["implementer"].requests, [])
                     self.assertTrue(resumed.last_error)
+
+    def test_plan_creates_supplemental_audits_directory(self):
+        import shutil
+
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        contracts = self.runtime / "contracts"
+        contracts.mkdir(parents=True)
+        shutil.copy(
+            REPOSITORY_ROOT / ".orchestration/contracts/M3A.json",
+            contracts / "M3A.json",
+        )
+        boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=BASE,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+        with mock.patch.object(controller, "_verify_repository_boundary", return_value=boundary):
+            run_id, _contract = controller.plan("M3A", dry_run=True)
+        paths = controller.paths(run_id)
+        self.assertTrue(paths.handoffs.is_dir())
+        self.assertTrue(paths.supplemental_audits.is_dir())
+        self.assertEqual(paths.supplemental_audits.name, "supplemental-audits")
+        self.assertEqual(paths.supplemental_audits.parent, paths.root)
+        self.assertNotEqual(paths.supplemental_audits, paths.handoffs)
+
+    def test_supplemental_audits_are_outside_handoffs_and_ignored_by_pipeline_loading(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller)
+        paths = controller.paths(run_id)
+        pipeline = controller.pipeline_audit_handoff_path(paths, 0)
+        _atomic_json(pipeline, audit())
+        verification = paths.handoffs / "audit-verification-00.json"
+        _atomic_json(
+            verification,
+            {"commands": [], "failed_reviewer_commands": [], "implementation_evidence_path": ""},
+        )
+        supplemental = controller.supplemental_audit_path(paths, "claude-extra-audit.json")
+        _atomic_json(
+            supplemental,
+            {
+                "schema": "claude-supplemental-v1",
+                "verdict": "NOTE",
+                "notes": "intentionally not validate_audit_response compatible",
+            },
+        )
+        listed = controller.list_pipeline_audit_handoffs(paths)
+        self.assertEqual(listed, [pipeline])
+        self.assertNotIn(verification, listed)
+        self.assertTrue(supplemental.exists())
+        self.assertTrue(supplemental.is_relative_to(paths.supplemental_audits))
+        self.assertFalse(supplemental.is_relative_to(paths.handoffs))
+        with self.assertRaises(ControllerError):
+            controller.supplemental_audit_path(paths, "../escape.json")
+        with self.assertRaises(ControllerError):
+            controller.supplemental_audit_path(paths, "nested/dir.json")
+        # Loading only the pipeline audit name remains schema-valid; verification is not listed.
+        validate_audit_response(json.loads(listed[0].read_text(encoding="utf-8")))
+
+    def test_record_supplemental_audit_success_preserves_state_and_emits_event(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION)
+        paths = controller.paths(run_id)
+        before_state = paths.state.read_bytes()
+        before_state_obj = StateStore(paths.state).load()
+        source = Path(self.temp.name) / "claude-extra-audit.json"
+        payload = {
+            "schema": "claude-supplemental-v1",
+            "verdict": "NOTE",
+            "notes": "not validate_audit_response compatible",
+            "findings": [{"id": "NOTE-1", "detail": "observation only"}],
+        }
+        source.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaises(SchemaError):
+            validate_audit_response(payload)
+
+        destination = controller.record_supplemental_audit(run_id, source)
+
+        self.assertEqual(destination, paths.supplemental_audits / "claude-extra-audit.json")
+        self.assertTrue(destination.is_relative_to(paths.supplemental_audits))
+        self.assertFalse(destination.is_relative_to(paths.handoffs))
+        self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), payload)
+        self.assertEqual(paths.state.read_bytes(), before_state)
+        after_state = StateStore(paths.state).load()
+        self.assertEqual(after_state.state, before_state_obj.state)
+        self.assertEqual(after_state.correction_cycles, before_state_obj.correction_cycles)
+        events = [
+            event
+            for event in EventLog(paths.events).read()
+            if event["event"] == "supplemental_audit_recorded"
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["state"], before_state_obj.state)
+        self.assertEqual(
+            events[0]["data"]["artifact_path"],
+            "supplemental-audits/claude-extra-audit.json",
+        )
+        self.assertEqual(controller.list_pipeline_audit_handoffs(paths), [])
+
+    def test_record_supplemental_audit_rejection_cases(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller)
+        paths = controller.paths(run_id)
+        source_dir = Path(self.temp.name) / "sources"
+        source_dir.mkdir()
+
+        missing_run_source = source_dir / "ok.json"
+        missing_run_source.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ControllerError, "not found or missing durable state"):
+            controller.record_supplemental_audit("m3a-missing", missing_run_source)
+
+        mismatched = StateStore(paths.state).load()
+        mismatched.run_id = "other-run-id"
+        StateStore(paths.state).save(mismatched)
+        with self.assertRaisesRegex(ControllerError, "does not match run directory"):
+            controller.record_supplemental_audit(run_id, missing_run_source)
+        fixed = StateStore(paths.state).load()
+        fixed.run_id = run_id
+        StateStore(paths.state).save(fixed)
+
+        unsafe = source_dir / "not-json.txt"
+        unsafe.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(ControllerError, "single safe .json filename"):
+            controller.record_supplemental_audit(run_id, unsafe)
+
+        with self.assertRaisesRegex(ControllerError, "single safe .json filename"):
+            controller.supplemental_audit_path(paths, "../escape.json")
+        with self.assertRaisesRegex(ControllerError, "single safe .json filename"):
+            controller.supplemental_audit_path(paths, "nested/escape.json")
+
+        array_source = source_dir / "array.json"
+        array_source.write_text("[1, 2]", encoding="utf-8")
+        with self.assertRaisesRegex(ControllerError, "must be an object"):
+            controller.record_supplemental_audit(run_id, array_source)
+
+        outside = Path(self.temp.name) / "outside-target.json"
+        outside.write_text("{}", encoding="utf-8")
+        escape_link = paths.supplemental_audits / "escape-link.json"
+        escape_link.symlink_to(outside)
+        escape_source = source_dir / "escape-link.json"
+        escape_source.write_text('{"ok": true}', encoding="utf-8")
+        with self.assertRaisesRegex(ControllerError, "outside supplemental-audits|already exists"):
+            controller.record_supplemental_audit(run_id, escape_source)
+        escape_link.unlink()
+
+        good = source_dir / "once.json"
+        good.write_text('{"schema": "claude-supplemental-v1", "ok": true}', encoding="utf-8")
+        first = controller.record_supplemental_audit(run_id, good)
+        self.assertTrue(first.exists())
+        with self.assertRaisesRegex(ControllerError, "already exists"):
+            controller.record_supplemental_audit(run_id, good)
+
+    def test_startup_identity_uses_persisted_state_not_caller_memory(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller, state_name=RunStateName.IMPLEMENTING)
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        self.seed_worktree_current_state(implementation, content="persisted-state fixture\n")
+        durable = StateStore(paths.state).load()
+        durable.state = RunStateName.CORRECTING.value
+        durable.correction_cycles = 2
+        StateStore(paths.state).save(durable)
+        request = controller._request(
+            "implementer",
+            "body-only prompt",
+            implementation,
+            paths,
+            "implementer-response.schema.json",
+        )
+        self.assertIn("`CORRECTING`", request.prompt)
+        self.assertIn(f"`{run_id}`", request.prompt)
+        self.assertNotIn("`IMPLEMENTING`", request.prompt)
+
+        mismatched = StateStore(paths.state).load()
+        mismatched.run_id = "other-run-id"
+        StateStore(paths.state).save(mismatched)
+        with self.assertRaisesRegex(ControllerError, "does not match run directory"):
+            controller._request("implementer", "body", implementation, paths, None)
+
+        paths.state.write_text("{not-json", encoding="utf-8")
+        with self.assertRaisesRegex(ControllerError, "unable to load durable run state"):
+            controller._request("implementer", "body", implementation, paths, None)
+
+    def test_startup_identity_rejects_current_state_symlink_escape(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller)
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        docs = implementation / "docs"
+        docs.mkdir(parents=True)
+        outside_dir = Path(self.temp.name) / "outside-checkout"
+        outside_dir.mkdir()
+        outside = outside_dir / "CURRENT_STATE.md"
+        outside.write_text("escaped root-like CURRENT_STATE\n", encoding="utf-8")
+        (docs / "CURRENT_STATE.md").symlink_to(outside)
+        with self.assertRaisesRegex(ControllerError, "outside the request worktree|path escape"):
+            controller._request(
+                "implementer",
+                "body",
+                implementation,
+                paths,
+                "implementer-response.schema.json",
+            )
+
+    def test_startup_identity_for_implementation_and_detached_audit_worktrees(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[audit()],
+        )
+        run_id = self.prepare_run(controller)
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        impl_state = self.seed_worktree_current_state(
+            implementation, content="implementation CURRENT_STATE fixture\n"
+        )
+        audit_worktree = paths.worktrees / "audit-00"
+        audit_worktree.mkdir(parents=True)
+        audit_state = self.seed_worktree_current_state(
+            audit_worktree, content="detached audit CURRENT_STATE fixture\n"
+        )
+        impl_hash = __import__("hashlib").sha256(impl_state.read_bytes()).hexdigest()
+        audit_hash = __import__("hashlib").sha256(audit_state.read_bytes()).hexdigest()
+
+        def branch(cwd=None):
+            if cwd and Path(cwd).name.startswith("audit-"):
+                return ""  # detached
+            if cwd and Path(cwd).name == "implementation":
+                return "agent/m3a-test/implementation"
+            return "buildwithAgent"
+
+        def head(cwd=None):
+            if cwd and Path(cwd).name.startswith("audit-"):
+                return RESULT
+            if cwd and Path(cwd).name == "implementation":
+                return RESULT
+            return BASE
+
+        with (
+            mock.patch.object(controller.repository, "branch", side_effect=branch),
+            mock.patch.object(controller.repository, "head", side_effect=head),
+        ):
+            state = controller.execute(run_id)
+
+        self.assertEqual(state.state, "COMPLETED")
+        implementer_prompt = adapters["implementer"].requests[0].prompt
+        reviewer_prompt = adapters["reviewer"].requests[0].prompt
+        self.assertIn("## Startup identity (verify before acting)", implementer_prompt)
+        self.assertIn("`agent/m3a-test/implementation`", implementer_prompt)
+        self.assertIn(f"`{RESULT}`", implementer_prompt)
+        self.assertIn(f"`{run_id}`", implementer_prompt)
+        self.assertIn("`IMPLEMENTING`", implementer_prompt)
+        self.assertIn(str(impl_state.resolve()), implementer_prompt)
+        self.assertIn(impl_hash, implementer_prompt)
+        self.assertIn("Do not substitute the root checkout copy", implementer_prompt)
+        self.assertIn("`DETACHED`", reviewer_prompt)
+        self.assertIn(str(audit_state.resolve()), reviewer_prompt)
+        self.assertIn(audit_hash, reviewer_prompt)
+        self.assertIn("`AUDITING`", reviewer_prompt)
+        root_current = (REPOSITORY_ROOT / "docs" / "CURRENT_STATE.md").resolve()
+        self.assertNotIn(str(root_current), implementer_prompt)
+        self.assertNotIn(str(root_current), reviewer_prompt)
+
+    def test_startup_identity_fails_closed_when_current_state_missing(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[],
+        )
+        run_id = self.prepare_run(controller)
+
+        class BareWorktreeController(TestController):
+            def _prepare_worktrees(self, state, paths):
+                del state
+                worktree = paths.worktrees / "implementation"
+                worktree.mkdir(parents=True, exist_ok=True)
+                return worktree, None
+
+        bare = BareWorktreeController(
+            repository_root=REPOSITORY_ROOT,
+            runtime_root=self.runtime,
+            config=self.config,
+            adapters=adapters,
+            evidence_collector=AcceptEvidence(),
+        )
+        bare.repository = FakeRepository()
+        state = bare.execute(run_id)
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        self.assertIn("CURRENT_STATE.md is missing", state.last_error)
+        self.assertEqual(adapters["implementer"].requests, [])
 
     def test_codex_output_schemas_give_const_and_enum_nodes_explicit_types(self):
         def walk(value):

@@ -67,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     decision_parser = sub.add_parser("record-decision")
     decision_parser.add_argument("--run-id", required=True)
     decision_parser.add_argument("--file", required=True, type=Path)
+    supplemental_parser = sub.add_parser("record-supplemental-audit")
+    supplemental_parser.add_argument("--run-id", required=True)
+    supplemental_parser.add_argument("--file", required=True, type=Path)
     abort_parser = sub.add_parser("abort")
     abort_parser.add_argument("--run-id", required=True)
     pane_parser = sub.add_parser("tmux-pane", help=argparse.SUPPRESS)
@@ -145,6 +148,21 @@ def main(argv: list[str] | None = None) -> int:
                         "run_id": args.run_id,
                         "state": state.state,
                         "operator_decision": str(artifact),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "record-supplemental-audit":
+            artifact = controller.record_supplemental_audit(args.run_id, args.file)
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "artifact": str(artifact),
+                        "relative_path": str(
+                            artifact.relative_to(controller.paths(args.run_id).root)
+                        ),
                     },
                     indent=2,
                 )
