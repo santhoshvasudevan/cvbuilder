@@ -7,14 +7,13 @@ from django.conf import settings
 from django.db import connection
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 
-# App names that must not appear until their own milestone (M3A candidate_memory, M3B
-# candidate_context, M4 job_intake, M5 candidate_matching/positioning_strategy, M6
-# resume_builder, and reviews for Gate 1/2) creates them. llm_provider was in this set through
-# M1 and is removed here now that M2 has built it (docs/IMPLEMENTATION_PLAN.md M2) -- this is
-# not a weakened invariant, it is this same check tracking the milestone boundary it always
+# App names that must not appear until their own milestone (M3B candidate_context, M4
+# job_intake, M5 candidate_matching/positioning_strategy, M6 resume_builder, and reviews for
+# Gate 1/2) creates them. llm_provider was removed when M2 built it; candidate_memory is
+# removed here now that M3A has built it (docs/IMPLEMENTATION_PLAN.md M3A) -- this is not a
+# weakened invariant, it is this same check tracking the milestone boundary it always
 # described; every app still listed below remains genuinely not-yet-built.
 NOT_YET_BUILT_APPS = {
-    "candidate_memory",
     "candidate_context",
     "job_intake",
     "candidate_matching",
@@ -62,12 +61,13 @@ class SettingsValidationTests(TestCase):
         self.assertIn("formatters", settings.LOGGING)
         self.assertIn("console", settings.LOGGING["handlers"])
 
-    def test_only_m1_and_m2_pipeline_apps_are_installed(self):
-        # docs/IMPLEMENTATION_PLAN.md M1/M2 scope, V2-D036: job_applications (M1) and
-        # llm_provider (M2) are implemented -- every other app boundary is created when its own
-        # milestone begins.
+    def test_only_built_pipeline_apps_are_installed(self):
+        # docs/IMPLEMENTATION_PLAN.md M1/M2/M3A: job_applications (M1), llm_provider (M2), and
+        # candidate_memory (M3A) are implemented -- every other app boundary is created when its
+        # own milestone begins.
         self.assertIn("job_applications", settings.INSTALLED_APPS)
         self.assertIn("llm_provider", settings.INSTALLED_APPS)
+        self.assertIn("candidate_memory", settings.INSTALLED_APPS)
         installed = set(settings.INSTALLED_APPS)
         overlap = installed & NOT_YET_BUILT_APPS
         self.assertEqual(overlap, set(), f"apps installed ahead of their milestone: {overlap}")

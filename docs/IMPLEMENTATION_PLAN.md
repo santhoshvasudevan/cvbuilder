@@ -184,10 +184,18 @@ Establish candidate factual knowledge and the deterministic static resume profil
 - operator-controlled `ExperienceSlot` selection UI (V2-D031): select engagement → create/activate slot → order (1/2/3) → edit static metadata if authorized → validate exactly three — never automatic selection
 
 ### Acceptance
-- candidate source documents ingest into structured claims;
+- candidate source documents ingest into structured claims with immutable provenance; generated
+  snapshot docs are never treated as evidence;
 - exactly three `ExperienceSlot` rows with `is_primary=True, is_active=True` exist and are correctly sequenced for the current candidate, created via the operator-controlled selection UI, not an automated choice;
 - static company/date/title/location metadata is deterministic and never model-generated;
-- operator corrections/preferences are captured and available to downstream stages.
+- certifications and languages remain static profile content;
+- unresolved source contradictions are preserved for operator review;
+- operator corrections/preferences, career direction, target-role families, gaps, technology-depth, privacy/naming preferences, and prior positioning history are durably available downstream.
+
+### Implementation note (M3A)
+Implemented on the isolated `agent/m3a-d2c0cc48b6aa/implementation` worktree from orchestration base
+`2fea4b43ffdb74dec314f68086d172db8570a95e`. ExperienceSlot metadata uses copy-on-create from
+`CareerEngagement` while retaining the source FK. `candidate_context` remains uncreated until M3B.
 
 ## M3B — CandidateContextSnapshot
 
