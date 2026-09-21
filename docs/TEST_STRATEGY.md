@@ -79,6 +79,15 @@ These tests gate M3B's acceptance criteria (V2-D025) — AC (M5) must not depend
 - renderer uses static metadata;
 - `ExperienceSlot` creation/activation only occurs through the operator-controlled selection UI (select engagement → create/activate → order → validate), never automatically (V2-D031).
 
+### Candidate memory / M3A deterministic suite
+- source ingestion fixtures cover provenance, content-hash idempotency, conflict preservation, and
+  exclusion of `docs/CANDIDATE_MEMORY_SNAPSHOT.md` / `GENERATED_REFERENCE_ONLY` inputs;
+- ExperienceSlot model/service/UI tests cover explicit selection, ordering, uniqueness, cardinality
+  failure, and static-metadata ownership;
+- architecture/import tests prove `candidate_context` and later M4+ apps were not introduced;
+- fresh disposable PostgreSQL migrate-from-zero, second-run no-op, and candidate_memory
+  unapply/reapply are covered in `candidate_memory.tests.test_migrations`.
+
 ### AJ
 Schema tests for stable requirement IDs, the three orthogonal requirement dimensions (`requirement_priority`/`requirement_domain`/`origin` — V2-D033), role identity, ranked hiring signals, screen-out risks, recruiter questions, and RecruiterDecisionModel fields.
 

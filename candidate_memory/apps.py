@@ -1,0 +1,7 @@
+from django.apps import AppConfig
+
+
+class CandidateMemoryConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "candidate_memory"
+    verbose_name = "Candidate Memory"

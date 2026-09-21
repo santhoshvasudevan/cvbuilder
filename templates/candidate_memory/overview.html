@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}Candidate memory #{{ memory.id }}{% endblock %}
+
+{% block breadcrumbs %}
+  <a href="{% url 'job_applications:home' %}">Home</a>
+  <span class="sep">/</span>
+  Candidate memory #{{ memory.id }}
+{% endblock %}
+
+{% block content %}
+  <h1>Candidate memory #{{ memory.id }}</h1>
+  <p class="lede">
+    Durable candidate factual knowledge for label <strong>{{ memory.label }}</strong>.
+    Corrections and confirmations happen here; job-specific context remains a later
+    <code>candidate_context</code> app (V2-D030).
+  </p>
+
+  <p>
+    <a class="btn" href="{% url 'candidate_memory:experience_slots' memory.id %}">
+      ExperienceSlot selection workspace
+    </a>
+  </p>
+
+  <section class="card">
+    <h2>Source documents</h2>
+    {% if source_documents %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Path</th>
+              <th>Kind</th>
+              <th>Precedence</th>
+              <th>SHA-256</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for doc in source_documents %}
+              <tr>
+                <td>{{ doc.source_path }}</td>
+                <td>{{ doc.source_kind }}</td>
+                <td>{{ doc.precedence_rank }}</td>
+                <td><code>{{ doc.content_sha256 }}</code></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-state">No source documents ingested yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Unresolved conflicts</h2>
+    {% if conflicts %}
+      <ul>
+        {% for conflict in conflicts %}
+          <li><strong>{{ conflict.topic }}</strong>: {{ conflict.description }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>No unresolved conflicts recorded.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Profile / preferences snapshot</h2>
+    {% if profile %}
+      <dl class="kv">
+        <dt>Career direction</dt><dd>{{ profile.career_direction|default:"—" }}</dd>
+        <dt>Target role families</dt><dd>{{ profile.target_role_families }}</dd>
+        <dt>Known gaps</dt><dd>{{ profile.known_gaps }}</dd>
+        <dt>Development areas</dt><dd>{{ profile.development_areas }}</dd>
+        <dt>Technology depth</dt><dd>{{ profile.technology_depth }}</dd>
+        <dt>Privacy preferences</dt><dd>{{ profile.privacy_preferences|default:"—" }}</dd>
+        <dt>Naming preferences</dt><dd>{{ profile.employer_naming_preferences|default:"—" }}</dd>
+      </dl>
+    {% else %}
+      <p>No CandidateProfile row yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Static resume profile</h2>
+    {% if static_profile %}
+      <dl class="kv">
+        <dt>Candidate name</dt><dd>{{ static_profile.candidate_name|default:"—" }}</dd>
+        <dt>Certifications (static)</dt><dd>{{ static_profile.static_certifications }}</dd>
+        <dt>Languages (static)</dt><dd>{{ static_profile.static_languages }}</dd>
+      </dl>
+    {% else %}
+      <p>No StaticResumeProfile row yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Operator corrections</h2>
+    {% if corrections %}
+      <ul>
+        {% for item in corrections %}
+          <li><code>{{ item.field_path }}</code>: {{ item.correction_text }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>None recorded.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Previous positioning history</h2>
+    {% if positioning_history %}
+      <ul>
+        {% for item in positioning_history %}
+          <li>
+            <strong>{{ item.employer_or_context }}</strong>
+            {% if item.was_successful %}(successful){% endif %}:
+            {{ item.summary }}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>None recorded.</p>
+    {% endif %}
+  </section>
+{% endblock %}

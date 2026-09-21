@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Experience slots — CandidateMemory #{{ memory.id }}{% endblock %}
+
+{% block breadcrumbs %}
+  <a href="{% url 'job_applications:home' %}">Home</a>
+  <span class="sep">/</span>
+  <a href="{% url 'candidate_memory:overview' memory.id %}">Candidate memory #{{ memory.id }}</a>
+  <span class="sep">/</span>
+  Experience slots
+{% endblock %}
+
+{% block content %}
+  <h1>Operator ExperienceSlot selection</h1>
+  <p class="lede">
+    Select three distinct career engagements, assign explicit order 1/2/3, then validate.
+    There is no automatic selection path (V2-D031). Static company, title, location, and dates
+    remain operator-owned copies linked to the source engagement.
+  </p>
+
+  <section class="card">
+    <h2>HARD_INTEGRITY status</h2>
+    {% if integrity_ok %}
+      <p><span class="badge badge-success">PASS</span> Exactly three active primary slots with sequences 1, 2, and 3.</p>
+    {% else %}
+      <p><span class="badge badge-danger">FAIL</span> Active primary slot state is not valid.</p>
+      <ul>
+        {% for finding in integrity_findings %}
+          <li><code>{{ finding.code }}</code>: {{ finding.message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Create / activate / order</h2>
+    {% if engagements %}
+      <form method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          {% for error in form.non_field_errors %}
+            <p class="error">{{ error }}</p>
+          {% endfor %}
+        {% endif %}
+        {% for field in form %}
+          <div class="field-row">
+            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% for error in field.errors %}
+              <p class="error">{{ error }}</p>
+            {% endfor %}
+          </div>
+        {% endfor %}
+        <button type="submit" class="btn">Save ordered primary slots and validate</button>
+      </form>
+    {% else %}
+      <p class="empty-state">
+        No CareerEngagement records exist yet. Create them in admin (operator-owned source roster),
+        then return here to select and order exactly three primary slots.
+      </p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Current ExperienceSlots</h2>
+    {% if slots %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Sequence</th>
+              <th>Primary</th>
+              <th>Active</th>
+              <th>Company</th>
+              <th>Title</th>
+              <th>Location</th>
+              <th>Dates</th>
+              <th>Source engagement</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for slot in slots %}
+              <tr>
+                <td>{{ slot.sequence }}</td>
+                <td>{{ slot.is_primary }}</td>
+                <td>{{ slot.is_active }}</td>
+                <td>{{ slot.company_name }}</td>
+                <td>{{ slot.role_title }}</td>
+                <td>{{ slot.location }}</td>
+                <td>{{ slot.start_date }} – {{ slot.end_date_or_present }}</td>
+                <td>#{{ slot.career_engagement_id }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="empty-state">No ExperienceSlot rows yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}

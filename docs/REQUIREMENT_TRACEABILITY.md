@@ -16,13 +16,13 @@
 | Orthogonal requirement taxonomy (priority/domain/origin) | AJ-002, V2-D033 | job_intake | M4 | schema/enum test |
 | Recruiter Decision Model | AJ-003..005 | job_intake | M4 | schema + manual quality review |
 | Language/source retention | AJ-006..007 | job_intake | M4 | unit/manual tests |
-| Candidate profile | §6.1 | candidate_memory | M3A | model/UI tests |
-| candidate_context is a distinct app; candidate_memory is source of truth | V2-D030 | candidate_memory/candidate_context | M1/M3A/M3B | app-boundary/import review |
-| Candidate preferences | CTX-004 | candidate_memory | M3A | UI/model test |
-| Three static experience slots (sequenced collection) | STATIC-001, V2-D024 | static profile | M3A | model + HARD_INTEGRITY test |
-| Operator-controlled ExperienceSlot selection UI | V2-D031 | static profile / candidate_memory | M3A | UI walkthrough + HARD_INTEGRITY test |
-| Static company/date/title/location | STATIC-002 | static profile / renderer | M3A/M6 | renderer test |
-| Static cert/language later | STATIC-003 | static profile | M3A/M6 | absence of LLM generation |
+| Candidate profile | §6.1 | candidate_memory | M3A | model/UI tests — M3A IMPLEMENTED (`CandidateProfile`, preferences, positioning history persistence tests) |
+| candidate_context is a distinct app; candidate_memory is source of truth | V2-D030 | candidate_memory/candidate_context | M1/M3A/M3B | app-boundary/import review — M3A IMPLEMENTED (`candidate_memory` present; `candidate_context` absent; architecture import tests) |
+| Candidate preferences | CTX-004 | candidate_memory | M3A | UI/model test — M3A IMPLEMENTED (`OperatorCorrection`, profile preference fields) |
+| Three static experience slots (sequenced collection) | STATIC-001, V2-D024 | static profile | M3A | model + HARD_INTEGRITY test — M3A IMPLEMENTED (`validate_experience_slot_cardinality`, UI/service tests) |
+| Operator-controlled ExperienceSlot selection UI | V2-D031 | static profile / candidate_memory | M3A | UI walkthrough + HARD_INTEGRITY test — M3A IMPLEMENTED (server-rendered workspace + admin explicit-selection action; no auto-select path) |
+| Static company/date/title/location | STATIC-002 | static profile / renderer | M3A/M6 | renderer test — M3A partial VERIFIED (`reject_model_static_metadata_write`); renderer remains M6 |
+| Static cert/language later | STATIC-003 | static profile | M3A/M6 | absence of LLM generation — M3A IMPLEMENTED (static JSON on `StaticResumeProfile` only) |
 | Projects deferred | STATIC-004 | future | Deferred | n/a |
 | Minimum sufficient context | CTX-001 | candidate_context | M3B | retrieval regression test |
 | Five context buckets | CTX-002 | candidate_context | M3B | fixture test |
@@ -64,5 +64,5 @@
 | Token optimization | TOKEN-001..006 | llm_provider/reporting | M2/M8 | usage reports — M2 VERIFIED for TOKEN-001 only (`LLMCallLog` captures input/cached-input/output/total tokens per call); TOKEN-002..006 (compaction, reporting, tuning) remain M8 |
 | Selective main reuse | §20 | project-wide | M1/M2 | reuse audit — see `docs/V2_REUSE_AUDIT.md`; M1 infra reuse VERIFIED (file-by-file cherry-pick from `main`, no bulk merge); M2 `llm_provider` reuse VERIFIED (file-by-file from `main`'s original M2 commit `8627a93` + OpenRouter from `a541a0a`, adapted per V2-D039/040/041, no bulk merge — `docs/IMPLEMENTATION_PLAN.md` M2 implementation note) |
 | Quality benchmark methodology | V2-D028 | project-wide | M8 | `docs/QUALITY_BENCHMARK.md` |
-| Repository-native multi-agent continuity | §23, V2-D035, V2-D045 | project-wide + external `tools/dev_orchestrator` | M0.2/ongoing | Entry-point/protocol docs plus deterministic external controller, strict handoffs, atomic state, Git evidence, isolated worktrees, and operator gates — orchestration bootstrap VERIFIED; M3A not implemented |
+| Repository-native multi-agent continuity | §23, V2-D035, V2-D045 | project-wide + external `tools/dev_orchestrator` | M0.2/ongoing | Entry-point/protocol docs plus deterministic external controller, strict handoffs, atomic state, Git evidence, isolated worktrees, and operator gates — orchestration bootstrap VERIFIED; M3A implemented in isolated worktree pending operator acceptance |
 | Plain Django orchestration | §21 | project-wide | M1-M7 | architecture/code review |
