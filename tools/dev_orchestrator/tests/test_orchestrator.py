@@ -29,6 +29,7 @@ from tools.dev_orchestrator.redaction import REDACTED, redact, redact_text
 from tools.dev_orchestrator.schemas import (
     SchemaError,
     validate_audit_response,
+    validate_implementer_narrative,
     validate_implementer_response,
     validate_operator_decision,
     validate_phase_contract,
@@ -84,6 +85,19 @@ def implementer(status: str = "IMPLEMENTED", result_sha: str = RESULT) -> dict:
         "decisions_required": [],
         "summary": "implemented" if status == "IMPLEMENTED" else "question",
     }
+
+
+def implementer_narrative(status: str = "IMPLEMENTED", **overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "status": status,
+        "summary": "implemented" if status == "IMPLEMENTED" else "question",
+        "known_gaps": [],
+        "questions": ["Which design?"] if status == "QUESTION" else [],
+        "decisions_required": [],
+    }
+    payload.update(overrides)
+    return payload
 
 
 def finding(finding_id: str = "AUD-001", status: str = "OPEN") -> dict:
@@ -142,6 +156,18 @@ class FakeRepository:
 
     def __init__(self):
         self.registered_worktrees = []
+        # Default to RESULT so controller-derived result_sha matches audit fixtures.
+        self.implementation_head = RESULT
+        self.changed_files = (
+            "candidate_memory/models.py\n"
+            "candidate_memory/migrations/0001_initial.py\n"
+            "candidate_memory/tests/test_models.py\n"
+            "docs/CURRENT_STATE.md\n"
+            "docs/IMPLEMENTATION_PLAN.md\n"
+            "docs/TEST_STRATEGY.md\n"
+            "docs/REQUIREMENT_TRACEABILITY.md"
+        )
+        self.added_files = "candidate_memory/tests/test_models.py\n"
 
     def verify_bootstrap_boundary(self, **kwargs) -> GitBoundary:
         del kwargs
@@ -186,7 +212,7 @@ class FakeRepository:
 
     def head(self, cwd=None):
         del cwd
-        return BASE
+        return self.implementation_head
 
     def branch(self, cwd=None):
         del cwd
@@ -197,11 +223,18 @@ class FakeRepository:
         return []
 
     def run(self, *args, cwd=None):
-        del cwd
         if args[:2] == ("diff", "--stat"):
             return "candidate_memory/models.py | 1 +"
-        if args[:2] == ("diff", "--name-only"):
+        if len(args) >= 3 and args[0] == "diff" and args[1] == "--name-only":
+            if "--diff-filter=A" in args:
+                return self.added_files if cwd is not None else ""
+            if "--diff-filter=D" in args:
+                return ""
+            if cwd is not None:
+                return self.changed_files
             return "tools/dev_orchestrator/controller.py"
+        if args[:2] == ("diff", "--numstat"):
+            return ""
         return ""
 
 
@@ -212,6 +245,37 @@ class AcceptEvidence:
     def validate_test_commands(self, worktree, reported):
         del worktree
         return tuple((item["command"], item["exit_code"]) for item in reported)
+
+    def derive_implementer_fields(
+        self,
+        *,
+        worktree,
+        base_sha,
+        result_sha,
+        required_tests,
+        required_documentation_updates=None,
+    ):
+        del worktree, base_sha, result_sha
+        required_documentation_updates = required_documentation_updates or []
+        executable = [
+            command
+            for command in required_tests
+            if command.startswith(("make ", "git ", ".venv/"))
+        ]
+        return {
+            "files_changed": [
+                "candidate_memory/models.py",
+                "candidate_memory/migrations/0001_initial.py",
+                "candidate_memory/tests/test_models.py",
+                *required_documentation_updates,
+            ],
+            "migrations": ["candidate_memory/migrations/0001_initial.py"],
+            "tests_added": ["candidate_memory/tests/test_models.py"],
+            "documentation_updated": list(required_documentation_updates),
+            "test_commands": [
+                {"command": command, "exit_code": 0} for command in executable
+            ],
+        }
 
 
 class RejectEvidence:
@@ -224,6 +288,10 @@ class RejectEvidence:
 
     def validate_test_commands(self, worktree, reported):
         del worktree, reported
+        raise EvidenceError(self.message)
+
+    def derive_implementer_fields(self, **kwargs):
+        del kwargs
         raise EvidenceError(self.message)
 
 
@@ -324,6 +392,205 @@ class ControllerTests(unittest.TestCase):
         self.assertNotIn("suppress", live_instructions)
         self.assertNotIn("historical worktree", live_instructions)
         self.assertNotIn("explicitly authorized", live_instructions)
+
+    def test_implementer_fenced_only_narrative_succeeds(self):
+        narrative = implementer_narrative()
+        message = f"```json\n{json.dumps(narrative)}\n```"
+        controller, adapters = self.make_controller(
+            implementer_responses=[
+                AdapterResult(
+                    status="COMPLETED",
+                    exit_code=0,
+                    session_id="cursor-session",
+                    final_message=message,
+                    handoff=None,
+                )
+            ],
+            reviewer_responses=[audit()],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        paths = controller.paths("m3a-test")
+        saved = json.loads((paths.handoffs / "implementer-00.json").read_text(encoding="utf-8"))
+        validate_implementer_response(saved)
+        self.assertEqual(saved["result_sha"], RESULT)
+        self.assertIn("narrative JSON", adapters["implementer"].requests[0].prompt)
+        self.assertIn(
+            "implementer-narrative.schema.json",
+            str(adapters["implementer"].requests[0].output_schema),
+        )
+
+    def test_implementer_prose_before_and_after_fence_succeeds(self):
+        narrative = implementer_narrative(summary="M3A-C1 complete")
+        message = (
+            "Here is the handoff after finishing the work.\n"
+            f"```json\n{json.dumps(narrative)}\n```\n"
+            "Thanks — ready for review.\n"
+        )
+        controller, _ = self.make_controller(
+            implementer_responses=[
+                AdapterResult(
+                    status="COMPLETED",
+                    exit_code=0,
+                    session_id="cursor-session",
+                    final_message=message,
+                    handoff=None,
+                )
+            ],
+            reviewer_responses=[audit()],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        paths = controller.paths("m3a-test")
+        saved = json.loads((paths.handoffs / "implementer-00.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["summary"], "M3A-C1 complete")
+        self.assertEqual(saved["result_sha"], RESULT)
+
+    def test_implementer_invalid_narrative_repairs_once_then_succeeds(self):
+        bad = AdapterResult(
+            status="COMPLETED",
+            exit_code=0,
+            session_id="cursor-session",
+            final_message="```json\n{\"schema_version\":1,\"status\":\"IMPLEMENTED\"}\n```",
+            handoff=None,
+        )
+        good = AdapterResult(
+            status="COMPLETED",
+            exit_code=0,
+            session_id="cursor-session",
+            final_message=f"```json\n{json.dumps(implementer_narrative())}\n```",
+            handoff=None,
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[bad, good],
+            reviewer_responses=[audit()],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        self.assertEqual(len(adapters["implementer"].requests), 2)
+        self.assertEqual(
+            adapters["implementer"].requests[1].retry_reason, "implementer_narrative_repair"
+        )
+        repair_prompt = adapters["implementer"].requests[1].prompt
+        self.assertNotIn("completed the product work", repair_prompt)
+        self.assertIn(
+            "Do not change your assessment of what happened in your previous turn",
+            repair_prompt,
+        )
+        self.assertIn("only fix the JSON formatting/shape so it validates", repair_prompt)
+        events = [
+            json.loads(line)["event"]
+            for line in controller.paths("m3a-test").events.read_text().splitlines()
+        ]
+        self.assertIn("implementer_narrative_repair", events)
+
+    def test_implementer_narrative_repair_status_drift_is_recorded(self):
+        blocked_invalid = AdapterResult(
+            status="COMPLETED",
+            exit_code=0,
+            session_id="cursor-session",
+            final_message='```json\n{"schema_version":1,"status":"BLOCKED"}\n```',
+            handoff=None,
+        )
+        drifted = AdapterResult(
+            status="COMPLETED",
+            exit_code=0,
+            session_id="cursor-session",
+            final_message=f"```json\n{json.dumps(implementer_narrative(status='IMPLEMENTED'))}\n```",
+            handoff=None,
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[blocked_invalid, drifted],
+            reviewer_responses=[audit()],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        self.assertEqual(len(adapters["implementer"].requests), 2)
+        repair_prompt = adapters["implementer"].requests[1].prompt
+        self.assertNotIn("completed the product work", repair_prompt)
+        paths = controller.paths("m3a-test")
+        events = [json.loads(line) for line in paths.events.read_text().splitlines()]
+        drifts = [
+            item for item in events if item["event"] == "implementer_narrative_repair_status_drift"
+        ]
+        self.assertEqual(len(drifts), 1)
+        self.assertEqual(drifts[0]["data"]["original_status"], "BLOCKED")
+        self.assertEqual(drifts[0]["data"]["repaired_status"], "IMPLEMENTED")
+        saved = json.loads((paths.handoffs / "implementer-00.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "IMPLEMENTED")
+
+    def test_implementer_second_invalid_narrative_after_repair_escalates(self):
+        bad = AdapterResult(
+            status="COMPLETED",
+            exit_code=0,
+            session_id="cursor-session",
+            final_message="```json\n{\"schema_version\":1,\"status\":\"IMPLEMENTED\"}\n```",
+            handoff=None,
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[bad, bad],
+            reviewer_responses=[],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        self.assertIn("after one repair attempt", state.last_error)
+        self.assertEqual(len(adapters["implementer"].requests), 2)
+
+    def test_implementer_derived_fields_match_git_and_tests_not_cursor_claims(self):
+        claimed = implementer_narrative(
+            files_changed=["forged/path.py"],
+            result_sha="f" * 40,
+            test_commands=[{"command": "make verify", "exit_code": 99}],
+        )
+        observed: list[tuple[list[str], Path]] = []
+
+        def runner(argv, cwd):
+            observed.append((list(argv), Path(cwd)))
+            return 0
+
+        evidence = EvidenceCollector(
+            repository=FakeRepository(),
+            command_runner=runner,
+        )
+        controller, _ = self.make_controller(
+            implementer_responses=[claimed],
+            reviewer_responses=[audit()],
+            evidence=evidence,
+        )
+        controller.repository = FakeRepository()
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        paths = controller.paths("m3a-test")
+        saved = json.loads((paths.handoffs / "implementer-00.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["result_sha"], RESULT)
+        self.assertNotIn("forged/path.py", saved["files_changed"])
+        self.assertIn("candidate_memory/models.py", saved["files_changed"])
+        self.assertIn("candidate_memory/migrations/0001_initial.py", saved["migrations"])
+        self.assertIn("candidate_memory/tests/test_models.py", saved["tests_added"])
+        self.assertTrue(any(item["command"] == "make verify" for item in saved["test_commands"]))
+        self.assertTrue(all(item["exit_code"] == 0 for item in saved["test_commands"]))
+        self.assertTrue(observed)
+
+    def test_implementer_disagreeing_derived_field_records_mismatch_without_failing(self):
+        claimed = implementer_narrative(
+            files_changed=["forged/path.py"],
+            migrations=["forged/migrations/0001.py"],
+        )
+        controller, _ = self.make_controller(
+            implementer_responses=[claimed],
+            reviewer_responses=[audit()],
+        )
+        state = controller.execute(self.prepare_run(controller))
+        self.assertEqual(state.state, "COMPLETED")
+        paths = controller.paths("m3a-test")
+        events = [json.loads(line) for line in paths.events.read_text().splitlines()]
+        mismatches = [
+            item for item in events if item["event"] == "implementer_derived_field_mismatch"
+        ]
+        self.assertGreaterEqual(len(mismatches), 1)
+        saved = json.loads((paths.handoffs / "implementer-00.json").read_text(encoding="utf-8"))
+        self.assertNotIn("forged/path.py", saved["files_changed"])
+        self.assertEqual(saved["result_sha"], RESULT)
 
     def test_reviewer_receives_operator_amendments_and_prior_corrections(self):
         controller, adapters = self.make_controller(
@@ -682,6 +949,7 @@ class ControllerTests(unittest.TestCase):
         implementation_path = paths.worktrees / "implementation"
         implementation_path.mkdir(parents=True)
         controller.repository.registered_worktrees.append(implementation_path)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = BASE  # type: ignore[attr-defined]
         question = implementer("QUESTION")
         assistant_event = {
             "type": "assistant",
@@ -713,6 +981,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(paths.contract_json.read_bytes(), original_contract)
         self.assertEqual(json.loads(decision_path.read_text(encoding="utf-8")), decision)
 
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
         resumed = controller.execute(run_id, resume=True)
 
         self.assertEqual(resumed.state, "COMPLETED")
@@ -1460,21 +1729,33 @@ class ControllerTests(unittest.TestCase):
                 ):
                     resumed = controller.execute(run_id, resume=True)
 
-                self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
                 self.assertEqual(rejected_path.read_bytes(), rejected_bytes)
                 events = [
                     json.loads(line)["event"] for line in paths.events.read_text().splitlines()
                 ]
-                self.assertNotIn("implementer_evidence_handoff_corrected", events)
                 if options.get("expect_no_invoke"):
+                    self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
                     self.assertEqual(adapters["implementer"].requests, [])
                     self.assertNotIn("implementer_evidence_handoff_retry", events)
+                    self.assertNotIn("implementer_evidence_handoff_corrected", events)
                 elif name == "returned_sha_mismatch":
+                    # Controller derives result_sha from HEAD; Cursor's claimed SHA is recorded
+                    # as a mismatch event and does not fail the run.
+                    self.assertEqual(resumed.state, "COMPLETED")
                     self.assertEqual(len(adapters["implementer"].requests), 1)
-                    self.assertIn("pinned", resumed.last_error)
+                    self.assertIn("implementer_derived_field_mismatch", events)
+                    self.assertIn("implementer_evidence_handoff_corrected", events)
+                    corrected = sorted(
+                        paths.handoffs.glob("implementer-*-evidence-corrected-*.json")
+                    )
+                    self.assertEqual(len(corrected), 1)
+                    saved = json.loads(corrected[0].read_text(encoding="utf-8"))
+                    self.assertEqual(saved["result_sha"], RESULT)
                 else:
+                    self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
                     self.assertEqual(adapters["implementer"].requests, [])
                     self.assertTrue(resumed.last_error)
+                    self.assertNotIn("implementer_evidence_handoff_corrected", events)
 
     def test_plan_creates_supplemental_audits_directory(self):
         import shutil
@@ -1668,6 +1949,7 @@ class ControllerTests(unittest.TestCase):
         implementation_path = paths.worktrees / "implementation"
         implementation_path.mkdir(parents=True)
         controller.repository.registered_worktrees.append(implementation_path)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = BASE  # type: ignore[attr-defined]
         question = implementer("QUESTION")
         assistant_event = {
             "type": "assistant",
@@ -1691,6 +1973,7 @@ class ControllerTests(unittest.TestCase):
         }
         recorded, _ = controller.record_operator_decision(run_id, decision)
         self.assertEqual(recorded.state, "ORCHA_DECISION")
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
         resumed = controller.execute(run_id, resume=True)
         self.assertEqual(resumed.state, "COMPLETED")
         orcha_prompt = adapters["orcha"].requests[0].prompt
@@ -1995,6 +2278,54 @@ class ControllerTests(unittest.TestCase):
 
 
 class ValidationAndSafetyTests(unittest.TestCase):
+    def test_extract_last_json_object_fenced_only(self):
+        payload = {"schema_version": 1, "status": "IMPLEMENTED"}
+        message = f"```json\n{json.dumps(payload)}\n```"
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), payload)
+
+    def test_extract_last_json_object_prose_before_fence(self):
+        payload = {"schema_version": 1, "status": "IMPLEMENTED"}
+        message = f"Done.\n```json\n{json.dumps(payload)}\n```"
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), payload)
+
+    def test_extract_last_json_object_prose_after_fence(self):
+        payload = {"schema_version": 1, "status": "IMPLEMENTED"}
+        message = f"```json\n{json.dumps(payload)}\n```\nThanks."
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), payload)
+
+    def test_extract_last_json_object_prose_both_sides(self):
+        payload = {"schema_version": 1, "status": "IMPLEMENTED", "summary": "ok"}
+        message = (
+            "Here is the handoff.\n"
+            f"```json\n{json.dumps(payload)}\n```\n"
+            "Ready for review.\n"
+        )
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), payload)
+        self.assertIsNone(ProcessAdapter._parse_handoff(message))
+
+    def test_extract_last_json_object_unfenced_with_prose(self):
+        payload = {"schema_version": 1, "status": "QUESTION", "questions": ["A?"]}
+        message = f"Asking:\n{json.dumps(payload)}\nPlease advise."
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), payload)
+
+    def test_extract_last_json_object_no_json_returns_none(self):
+        self.assertIsNone(ProcessAdapter._extract_last_json_object("no structured output here"))
+
+    def test_extract_last_json_object_multiple_takes_last(self):
+        first = {"schema_version": 1, "status": "BLOCKED", "summary": "first"}
+        second = {"schema_version": 1, "status": "IMPLEMENTED", "summary": "second"}
+        message = (
+            f"```json\n{json.dumps(first)}\n```\n"
+            f"later:\n```json\n{json.dumps(second)}\n```\n"
+        )
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), second)
+
+    def test_validate_implementer_narrative_allows_extra_fields(self):
+        payload = implementer_narrative(files_changed=["x.py"])
+        validated = validate_implementer_narrative(payload)
+        self.assertEqual(validated["status"], "IMPLEMENTED")
+        self.assertEqual(validated["files_changed"], ["x.py"])
+
     def test_live_config_enables_exactly_one_reviewer_profile_matching_role(self):
         config = load_config(REPOSITORY_ROOT / ".orchestration/config.yaml")
         claude = config.agents["claude_reviewer"]

@@ -20,6 +20,7 @@ from .adapters import (
     CodexAdapter,
     CursorAdapter,
 )
+from .adapters.base import ProcessAdapter
 from .config import OrchestratorConfig
 from .events import EventLog
 from .evidence import EvidenceCollector, EvidenceError
@@ -29,6 +30,7 @@ from .schemas import (
     SchemaError,
     validate_audit_response,
     validate_closure_response,
+    validate_implementer_narrative,
     validate_implementer_response,
     validate_operator_decision,
     validate_phase_contract,
@@ -1243,6 +1245,202 @@ class OrchestrationController:
                 f"reviewer audit remained invalid after one semantic repair attempt: {exc}"
             ) from exc
 
+    @staticmethod
+    def _raw_implementer_payload(result: AdapterResult) -> dict | None:
+        """Prefer tolerant extraction from raw final_message; fall back to adapter handoff dict."""
+        extracted = ProcessAdapter._extract_last_json_object(result.final_message)
+        if extracted is not None:
+            return extracted
+        if isinstance(result.handoff, dict):
+            return result.handoff
+        return None
+
+    def _validate_or_repair_implementer_narrative(
+        self,
+        *,
+        adapter: AgentAdapter,
+        request: AdapterRequest,
+        result: AdapterResult,
+        state: RunState,
+        events: EventLog,
+        event_callback=None,
+    ) -> tuple[dict, dict, AdapterResult]:
+        """Validate narrative JSON; allow one same-session repair of format only."""
+        raw = self._raw_implementer_payload(result)
+        try:
+            if raw is None:
+                raise SchemaError("implementer returned no JSON object")
+            return validate_implementer_narrative(raw), raw, result
+        except SchemaError as exc:
+            violation = str(exc)
+            if not result.session_id:
+                raise SchemaError(
+                    f"implementer narrative invalid and no session available for repair: {violation}"
+                ) from exc
+
+        repair_prompt = (
+            "Your previous implementer turn returned a narrative JSON handoff the controller could "
+            f"not validate: {violation}\n\n"
+            "Return ONLY the narrative JSON object with these fields: schema_version (1), status "
+            "(IMPLEMENTED, QUESTION, BLOCKED, or FAILED), summary, known_gaps, questions, and "
+            "decisions_required. Report status for whatever actually happened in your previous turn "
+            "(IMPLEMENTED only if that work genuinely completed; QUESTION, BLOCKED, or FAILED "
+            "otherwise). Do not change your assessment of what happened in your previous turn — "
+            "only fix the JSON formatting/shape so it validates. Do not change files, do not "
+            "re-read the diff, and do not re-run tests. The controller derives files_changed, "
+            "migrations, tests_added, test_commands, and documentation_updated itself. A single "
+            "json code fence is accepted even with short prose around it. Return only the "
+            "corrected narrative JSON."
+        )
+        repair_request = dataclasses.replace(
+            request,
+            prompt=repair_prompt,
+            output_schema=self.repository_root
+            / "tools"
+            / "dev_orchestrator"
+            / "schemas"
+            / "implementer-narrative.schema.json",
+            session_id=result.session_id,
+            allow_write=False,
+            safety_verified=False,
+            packet_bytes=len(repair_prompt.encode("utf-8")),
+            retry_reason="implementer_narrative_repair",
+        )
+        events.emit(
+            run_id=state.run_id,
+            role="IMPLEMENTER",
+            state=state.state,
+            event="implementer_narrative_repair",
+            message="Requesting one same-session repair of implementer narrative JSON",
+            violation=violation,
+        )
+        repaired = self._invoke(
+            adapter,
+            repair_request,
+            state=state,
+            events=events,
+            resume=True,
+            event_callback=event_callback,
+        )
+        if repaired.exit_code not in (0, None) or repaired.status != "COMPLETED":
+            raise SchemaError(
+                "implementer narrative repair invocation failed: "
+                + (repaired.error or repaired.status)
+            )
+        raw_repaired = self._raw_implementer_payload(repaired)
+        try:
+            if raw_repaired is None:
+                raise SchemaError("implementer repair returned no JSON object")
+            narrative = validate_implementer_narrative(raw_repaired)
+        except SchemaError as exc:
+            raise SchemaError(
+                "implementer narrative remained invalid after one repair attempt: " + str(exc)
+            ) from exc
+        original_status = raw.get("status") if isinstance(raw, dict) else None
+        if (
+            original_status in {"IMPLEMENTED", "QUESTION", "BLOCKED", "FAILED"}
+            and narrative["status"] != original_status
+        ):
+            events.emit(
+                run_id=state.run_id,
+                role="IMPLEMENTER",
+                state=state.state,
+                event="implementer_narrative_repair_status_drift",
+                message=(
+                    "Repaired implementer narrative status differs from the original raw payload"
+                ),
+                original_status=original_status,
+                repaired_status=narrative["status"],
+            )
+        return narrative, raw_repaired, repaired
+
+    def _assemble_implementer_handoff(
+        self,
+        *,
+        narrative: dict,
+        raw_payload: dict,
+        state: RunState,
+        contract: dict,
+        implementation_worktree: Path,
+        result: AdapterResult,
+        events: EventLog,
+    ) -> dict:
+        """Build full implementer-response from narrative + controller-derived git/test evidence."""
+        result_sha = self.repository.head(implementation_worktree).strip()
+        derived_fields = {
+            "files_changed": [],
+            "migrations": [],
+            "tests_added": [],
+            "documentation_updated": [],
+            "test_commands": [],
+        }
+        if narrative["status"] == "IMPLEMENTED":
+            try:
+                derived_fields = self.evidence_collector.derive_implementer_fields(
+                    worktree=implementation_worktree,
+                    base_sha=state.base_sha,
+                    result_sha=result_sha,
+                    required_tests=list(contract["required_tests"]),
+                    required_documentation_updates=list(
+                        contract["required_documentation_updates"]
+                    ),
+                )
+            except EvidenceError as exc:
+                raise ControllerError(str(exc)) from exc
+
+        for field in (
+            "files_changed",
+            "migrations",
+            "tests_added",
+            "documentation_updated",
+            "test_commands",
+            "result_sha",
+            "base_sha",
+            "requirements_addressed",
+        ):
+            if field not in raw_payload:
+                continue
+            claimed = raw_payload[field]
+            expected = (
+                result_sha
+                if field == "result_sha"
+                else state.base_sha
+                if field == "base_sha"
+                else list(contract["requirement_ids"])
+                if field == "requirements_addressed"
+                else derived_fields.get(field)
+            )
+            if claimed != expected:
+                events.emit(
+                    run_id=state.run_id,
+                    role="IMPLEMENTER",
+                    state=state.state,
+                    event="implementer_derived_field_mismatch",
+                    message="Cursor-supplied derived-looking field disagreed with controller derivation",
+                    field=field,
+                    claimed_value=claimed,
+                    derived_value=expected,
+                )
+
+        assembled = {
+            "schema_version": 1,
+            "status": narrative["status"],
+            "base_sha": state.base_sha,
+            "result_sha": result_sha if narrative["status"] == "IMPLEMENTED" else "",
+            "session_id": result.session_id or state.sessions.get("implementer", ""),
+            "requirements_addressed": list(contract["requirement_ids"]),
+            "files_changed": list(derived_fields["files_changed"]),
+            "migrations": list(derived_fields["migrations"]),
+            "tests_added": list(derived_fields["tests_added"]),
+            "test_commands": list(derived_fields["test_commands"]),
+            "documentation_updated": list(derived_fields["documentation_updated"]),
+            "known_gaps": list(narrative["known_gaps"]),
+            "questions": list(narrative["questions"]),
+            "decisions_required": list(narrative["decisions_required"]),
+            "summary": narrative["summary"],
+        }
+        return validate_implementer_response(assembled)
+
     def _save_handoff(self, paths: RunPaths, name: str, handoff: dict) -> None:
         _atomic_json(paths.handoffs / name, handoff)
 
@@ -1439,8 +1637,14 @@ class OrchestrationController:
                     )
                 else:
                     prompt = (
-                        "Implement only the attached approved phase contract. Return only the required "
-                        "structured implementer handoff.\n\n" + json.dumps(contract, indent=2)
+                        "Implement only the attached approved phase contract. When finished, return "
+                        "ONLY the narrative JSON object with these fields: schema_version (must be 1), "
+                        "status (IMPLEMENTED, QUESTION, BLOCKED, or FAILED), summary, known_gaps, "
+                        "questions, and decisions_required. The controller independently derives "
+                        "result_sha, files_changed, migrations, tests_added, test_commands, and "
+                        "documentation_updated from git and by running the contract's required tests — "
+                        "do not attempt to enumerate those derived fields.\n\n"
+                        + json.dumps(contract, indent=2)
                     )
                 session_id = state.sessions.get("implementer", "")
                 if evidence_repair:
@@ -1459,7 +1663,7 @@ class OrchestrationController:
                         prompt,
                         implementation_worktree,
                         paths,
-                        "implementer-response.schema.json",
+                        "implementer-narrative.schema.json",
                         session_id=session_id,
                         allow_write=True,
                         safety_verified=True,
@@ -1490,11 +1694,37 @@ class OrchestrationController:
                 if result.session_id:
                     state.sessions["implementer"] = result.session_id
                     store.save(state)
-                if not result.succeeded:
+                if result.timed_out or result.status == "TIMEOUT":
                     return self._fail_agent(state, store, events, "IMPLEMENTER", result.error)
+                if result.exit_code not in (0, None):
+                    return self._fail_agent(state, store, events, "IMPLEMENTER", result.error)
+                if result.status != "COMPLETED":
+                    return self._fail_agent(
+                        state,
+                        store,
+                        events,
+                        "IMPLEMENTER",
+                        result.error or f"implementer status {result.status}",
+                    )
                 try:
-                    handoff = validate_implementer_response(result.handoff or {})
-                except SchemaError as exc:
+                    narrative, raw_payload, result = self._validate_or_repair_implementer_narrative(
+                        adapter=implementer,
+                        request=request,
+                        result=result,
+                        state=state,
+                        events=events,
+                        event_callback=callback("implementer"),
+                    )
+                    handoff = self._assemble_implementer_handoff(
+                        narrative=narrative,
+                        raw_payload=raw_payload,
+                        state=state,
+                        contract=contract,
+                        implementation_worktree=implementation_worktree,
+                        result=result,
+                        events=events,
+                    )
+                except (SchemaError, ControllerError) as exc:
                     return self._fail_agent(state, store, events, "IMPLEMENTER", str(exc))
                 if handoff["base_sha"] != state.base_sha:
                     return self._fail_agent(

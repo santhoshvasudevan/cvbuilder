@@ -162,6 +162,46 @@ class ProcessAdapter(AgentAdapter):
             return None
         return value if isinstance(value, dict) else None
 
+    @staticmethod
+    def _extract_last_json_object(final_message: str) -> dict | None:
+        """Tolerant extract: last JSON object in fenced blocks or balanced braces amid prose."""
+        if not final_message:
+            return None
+        parsed: list[dict] = []
+        fence_pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL)
+        for match in fence_pattern.finditer(final_message):
+            block = match.group(1).strip()
+            try:
+                value = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                parsed.append(value)
+        if parsed:
+            return parsed[-1]
+
+        candidates: list[str] = []
+        depth = 0
+        start: int | None = None
+        for index, char in enumerate(final_message):
+            if char == "{":
+                if depth == 0:
+                    start = index
+                depth += 1
+            elif char == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(final_message[start : index + 1])
+                    start = None
+        for candidate in reversed(candidates):
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+        return None
+
     def start(
         self, request: AdapterRequest, event_callback: Callable[[str, dict], None] | None = None
     ) -> AdapterResult:
@@ -298,6 +338,8 @@ class ProcessAdapter(AgentAdapter):
                 final_message = redact_text(raw_final)
             final_path.write_text(final_message, encoding="utf-8")
         handoff = self._parse_handoff(final_message)
+        if handoff is None and request.role == "implementer":
+            handoff = self._extract_last_json_object(final_message)
         if exit_code != 0:
             status = "FAILED"
             error = f"agent exited with code {exit_code}"

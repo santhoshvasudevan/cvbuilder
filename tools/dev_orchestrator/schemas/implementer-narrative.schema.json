@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "status",
+    "summary",
+    "known_gaps",
+    "questions",
+    "decisions_required"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "status": {
+      "type": "string",
+      "enum": ["IMPLEMENTED", "QUESTION", "BLOCKED", "FAILED"]
+    },
+    "summary": {"type": "string"},
+    "known_gaps": {"type": "array", "items": {"type": "string"}},
+    "questions": {"type": "array", "items": {"type": "string"}},
+    "decisions_required": {"type": "array", "items": {"type": "string"}}
+  }
+}

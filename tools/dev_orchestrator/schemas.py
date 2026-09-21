@@ -69,6 +69,16 @@ IMPLEMENTER_FIELDS = frozenset(
         "summary",
     }
 )
+IMPLEMENTER_NARRATIVE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "summary",
+        "known_gaps",
+        "questions",
+        "decisions_required",
+    }
+)
 AUDIT_FIELDS = frozenset(
     {
         "schema_version",
@@ -225,6 +235,27 @@ def validate_implementer_response(value: dict[str, Any]) -> dict[str, Any]:
     _test_commands(value)
     if value["status"] == "IMPLEMENTED" and not value["result_sha"]:
         raise SchemaError("IMPLEMENTED requires result_sha")
+    if value["status"] == "QUESTION" and not value["questions"]:
+        raise SchemaError("QUESTION requires at least one question")
+    return value
+
+
+def validate_implementer_narrative(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate Cursor's narrative subset; additional properties are allowed and ignored by callers."""
+    if not isinstance(value, dict):
+        raise SchemaError("implementer_narrative must be an object")
+    missing = IMPLEMENTER_NARRATIVE_FIELDS - set(value)
+    if missing:
+        raise SchemaError(
+            f"implementer_narrative fields invalid: missing={sorted(missing)}"
+        )
+    if value.get("schema_version") != 1:
+        raise SchemaError("implementer_narrative.schema_version must be 1")
+    if value["status"] not in IMPLEMENTER_STATUSES:
+        raise SchemaError(f"Unknown implementer status: {value['status']!r}")
+    _string(value, "summary")
+    for key in ("known_gaps", "questions", "decisions_required"):
+        _string_list(value, key)
     if value["status"] == "QUESTION" and not value["questions"]:
         raise SchemaError("QUESTION requires at least one question")
     return value

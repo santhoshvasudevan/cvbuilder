@@ -252,6 +252,80 @@ class EvidenceCollector:
         """Re-run an agent's allowlisted verification commands and compare its exit codes."""
         return self._execute_test_commands(worktree, reported)
 
+    def derive_implementer_fields(
+        self,
+        *,
+        worktree: Path,
+        base_sha: str,
+        result_sha: str,
+        required_tests: list[str],
+        required_documentation_updates: list[str] | None = None,
+    ) -> dict:
+        """Derive files_changed/migrations/tests_added/docs/test_commands from git + live tests."""
+        required_documentation_updates = required_documentation_updates or []
+        changed = [
+            line
+            for line in self.repository.run(
+                "diff", "--name-only", f"{base_sha}..{result_sha}", cwd=worktree
+            ).splitlines()
+            if line
+        ]
+        added = [
+            line
+            for line in self.repository.run(
+                "diff",
+                "--name-only",
+                "--diff-filter=A",
+                f"{base_sha}..{result_sha}",
+                cwd=worktree,
+            ).splitlines()
+            if line
+        ]
+        migrations = [path for path in changed if "/migrations/" in path]
+        tests_added = [
+            path
+            for path in added
+            if "/tests/" in path or Path(path).name.startswith("test_")
+        ]
+        documentation_updated = [
+            path
+            for path in changed
+            if path.startswith("docs/") or path in required_documentation_updates
+        ]
+        # Preserve contract-listed documentation paths that appear in the diff under any form.
+        for path in required_documentation_updates:
+            if path in changed and path not in documentation_updated:
+                documentation_updated.append(path)
+        executable = [
+            command
+            for command in required_tests
+            if command.startswith(("make ", "git ", ".venv/"))
+        ]
+        test_commands: list[dict] = []
+        for command in executable:
+            try:
+                argv = shlex.split(command)
+            except ValueError as exc:
+                raise EvidenceError(
+                    f"verification command is not parseable: {command!r}: {exc}"
+                ) from exc
+            if not argv:
+                raise EvidenceError("verification command cannot be empty")
+            if any(token in {"|", "||", "&&", ";", ">", ">>", "<", "`"} for token in argv):
+                raise EvidenceError(
+                    f"verification command requires forbidden shell syntax: {command!r}"
+                )
+            exec_argv = self._prepare_verification_argv(argv, worktree)
+            exit_code = self.command_runner(exec_argv, worktree)
+            test_commands.append({"command": command, "exit_code": exit_code})
+        return {
+            "files_changed": changed,
+            "migrations": migrations,
+            "tests_added": tests_added,
+            "documentation_updated": documentation_updated,
+            "test_commands": test_commands,
+        }
+
     @staticmethod
     def _matches(path: str, patterns: list[str]) -> bool:
         return any(
