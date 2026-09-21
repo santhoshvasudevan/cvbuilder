@@ -26,7 +26,7 @@ class CandidateMemoryMigrationReproducibilityTests(SimpleTestCase):
         repo = Path(settings.BASE_DIR)
         container = f"cvbuilder-m3a-mig-{uuid.uuid4().hex[:8]}"
         host_port = "55433"
-        password = "cvbuilder"
+        password = settings.DATABASES["default"]["PASSWORD"]
         db_name = "cvbuilder"
         user = "cvbuilder"
 
