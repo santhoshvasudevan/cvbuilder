@@ -386,6 +386,40 @@ class OrchestrationController:
         ]
 
     @staticmethod
+    def _operator_correction_required_markers(
+        *,
+        original_contract: dict,
+        effective_contract: dict,
+        operator_decision: dict,
+    ) -> set[str]:
+        """Derive ORCHA correction-prompt markers from the active contract (not phase literals)."""
+        del original_contract  # path/test markers come from the effective contract
+        markers = {
+            "commit",
+            "handoff",
+            "IMPLEMENTED",
+            "BLOCKED",
+            "QUESTION",
+            "merge",
+            "push",
+            "rebase",
+            "reset",
+        }
+        additional = set(operator_decision["additional_allowed_paths"])
+        for path in effective_contract["allowed_paths"]:
+            if path.endswith("/**"):
+                markers.add(path[: -len("/**")])
+            elif path in additional:
+                markers.add(path)
+        for path in additional:
+            markers.add(path)
+        for command in OrchestrationController._executable_required_tests(
+            list(effective_contract["required_tests"])
+        ):
+            markers.add(command)
+        return markers
+
+    @staticmethod
     def _narrative_required_tests(required_tests: list[str]) -> list[str]:
         executable = set(OrchestrationController._executable_required_tests(required_tests))
         return [command for command in required_tests if command not in executable]
@@ -778,8 +812,11 @@ class OrchestrationController:
         return state, decision_path
 
     def plan(self, phase: str, *, dry_run: bool = False) -> tuple[str, dict]:
-        if phase != "M3A":
-            raise ControllerError(f"unknown phase: {phase}")
+        if phase not in self.config.repository.enabled_phases:
+            raise ControllerError(
+                f"phase {phase!r} is not enabled "
+                f"(enabled_phases={list(self.config.repository.enabled_phases)})"
+            )
         try:
             boundary = self._verify_repository_boundary(
                 require_clean=self.config.repository.require_clean_base and not dry_run
@@ -793,6 +830,14 @@ class OrchestrationController:
             contract = json.loads(template_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ControllerError(f"unable to load phase template {template_path}: {exc}") from exc
+        if not isinstance(contract, dict):
+            raise ControllerError(f"phase template {template_path} must be a JSON object")
+        try:
+            validate_phase_contract(contract)
+        except SchemaError as exc:
+            raise ControllerError(
+                f"phase template {template_path} failed schema validation: {exc}"
+            ) from exc
         head = boundary.head
         contract.update(
             {
@@ -1583,14 +1628,23 @@ class OrchestrationController:
                         ),
                     }
                     correction_id = f"OPERATOR-DECISION-{state.operator_decision_count:02d}"
+                    executable_tests = self._executable_required_tests(
+                        list(contract["required_tests"])
+                    )
                     orcha_context = {
                         "task": (
                             "Generate the exact bounded correction/resume prompt for Cursor. Return "
                             "CORRECT with this finding_ids value and a prompt that preserves completed "
-                            "M3A work; applies only the original allowed paths plus the approved added "
-                            "path; makes only the candidate_memory milestone-boundary update there; "
-                            "preserves all other unimplemented-app assertions; runs the targeted boundary "
-                            "test and make verify; fixes causes without weakening tests; commits M3A; "
+                            f"{contract['milestone']} work; applies only the original contract "
+                            "allowed_paths plus the approved additional_allowed_paths; makes only the "
+                            "operator-authorized changes within those paths; preserves unrelated "
+                            "assertions; runs the applicable contract required_tests"
+                            + (
+                                f" ({', '.join(executable_tests)})"
+                                if executable_tests
+                                else ""
+                            )
+                            + "; fixes causes without weakening tests; commits within the phase scope; "
                             "returns a concise schema-valid handoff; reports IMPLEMENTED only after all "
                             "verification passes and otherwise reports BLOCKED or QUESTION; and forbids "
                             "merge, push, rebase, reset, or main-checkout modification."
@@ -1643,21 +1697,11 @@ class OrchestrationController:
                         return self._fail_agent(
                             state, store, events, "ORCHA", "malformed operator correction contract"
                         )
-                    required_prompt_markers = {
-                        "job_applications/tests/test_settings.py",
-                        "candidate_memory",
-                        "targeted",
-                        "make verify",
-                        "commit",
-                        "handoff",
-                        "IMPLEMENTED",
-                        "BLOCKED",
-                        "QUESTION",
-                        "merge",
-                        "push",
-                        "rebase",
-                        "reset",
-                    }
+                    required_prompt_markers = self._operator_correction_required_markers(
+                        original_contract=orcha_context["original_approved_contract"],
+                        effective_contract=contract,
+                        operator_decision=operator_decision,
+                    )
                     missing_markers = {
                         marker for marker in required_prompt_markers if marker not in payload["prompt"]
                     }

@@ -653,9 +653,11 @@ class ControllerTests(unittest.TestCase):
 
     def test_operator_decision_recovers_same_run_and_resumes_saved_cursor_session(self):
         generated_prompt = (
-            "Preserve completed candidate_memory work. Modify only "
-            "job_applications/tests/test_settings.py and original paths; run the targeted test and "
-            "make verify; fix causes without weakening tests; commit M3A; return a concise handoff. "
+            "Preserve completed candidate_memory and templates work. Modify only "
+            "job_applications/tests/test_settings.py and original paths; run "
+            ".venv/bin/python manage.py test candidate_memory, make migrations-check, "
+            "make verify, make secrets, and git diff --check; fix causes without weakening "
+            "tests; commit within phase scope; return a concise handoff. "
             "Use IMPLEMENTED only on success, otherwise BLOCKED or QUESTION. Never merge, push, "
             "rebase, reset, or modify the main checkout."
         )
@@ -731,9 +733,10 @@ class ControllerTests(unittest.TestCase):
 
     def test_pending_operator_decision_can_retry_orcha_after_escalation(self):
         generated_prompt = (
-            "Preserve candidate_memory and update job_applications/tests/test_settings.py. Run the "
-            "targeted test and make verify, then commit and return a handoff using IMPLEMENTED, "
-            "BLOCKED, or QUESTION. "
+            "Preserve candidate_memory and templates; update job_applications/tests/test_settings.py. "
+            "Run .venv/bin/python manage.py test candidate_memory, make migrations-check, "
+            "make verify, make secrets, and git diff --check, then commit and return a handoff "
+            "using IMPLEMENTED, BLOCKED, or QUESTION. "
             "Never merge, push, rebase, reset, or modify/check out `main`."
         )
         controller, adapters = self.make_controller(
@@ -1498,6 +1501,215 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(paths.supplemental_audits.name, "supplemental-audits")
         self.assertEqual(paths.supplemental_audits.parent, paths.root)
         self.assertNotEqual(paths.supplemental_audits, paths.handoffs)
+
+    @staticmethod
+    def _minimal_phase_contract(
+        *,
+        milestone: str,
+        allowed_paths: list[str],
+        required_tests: list[str],
+    ) -> dict:
+        return {
+            "schema_version": 1,
+            "run_id": "TEMPLATE",
+            "milestone": milestone,
+            "slice": f"{milestone} slice",
+            "base_sha": BASE,
+            "product_baseline_sha": BASE,
+            "orchestration_tooling_sha": "",
+            "future_implementation_base_sha": BASE,
+            "objective": f"Implement {milestone} without M3A leakage.",
+            "requirement_ids": ["FACT-002"],
+            "governing_decision_ids": ["V2-D024"],
+            "dependencies": ["M1"],
+            "in_scope": [f"{milestone} in scope"],
+            "out_of_scope": ["merge", "push"],
+            "allowed_paths": allowed_paths,
+            "prohibited_paths": ["requirements.md"],
+            "acceptance_criteria": [f"{milestone} acceptance"],
+            "required_tests": required_tests,
+            "required_documentation_updates": ["docs/CURRENT_STATE.md"],
+            "operator_gates": ["Operator approves this phase contract"],
+        }
+
+    def _write_enabled_phases_config(self, phases: list[str], contracts: dict[str, dict]) -> Path:
+        import shutil
+
+        config_dir = Path(self.temp.name) / "config-root"
+        contracts_dir = config_dir / "contracts"
+        contracts_dir.mkdir(parents=True)
+        shutil.copy(
+            REPOSITORY_ROOT / ".orchestration/contracts/M3A.json",
+            contracts_dir / "M3A.json",
+        )
+        for phase, contract in contracts.items():
+            _atomic_json(contracts_dir / f"{phase}.json", contract)
+        raw = yaml.safe_load(
+            (REPOSITORY_ROOT / ".orchestration/config.yaml").read_text(encoding="utf-8")
+        )
+        raw["repository"]["enabled_phases"] = phases
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        return config_path
+
+    def test_second_enabled_phase_plans_with_own_contract(self):
+        import shutil
+
+        second = self._minimal_phase_contract(
+            milestone="M9X",
+            allowed_paths=["other_app/**", "docs/CURRENT_STATE.md"],
+            required_tests=["make verify", "git diff --check"],
+        )
+        config_path = self._write_enabled_phases_config(
+            ["M3A", "M9X"],
+            {"M9X": second},
+        )
+        config = load_config(config_path)
+        self.assertEqual(config.repository.enabled_phases, ("M3A", "M9X"))
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], config=config
+        )
+        contracts = self.runtime / "contracts"
+        contracts.mkdir(parents=True)
+        shutil.copy(config_path.parent / "contracts" / "M9X.json", contracts / "M9X.json")
+        boundary = GitBoundary(
+            branch="buildwithAgent",
+            head=BASE,
+            clean=True,
+            default_branch_is_ancestor=True,
+            bootstrap_base_is_ancestor=True,
+            excluded_ancestors=(),
+        )
+        with mock.patch.object(controller, "_verify_repository_boundary", return_value=boundary):
+            run_id, contract = controller.plan("M9X", dry_run=True)
+        self.assertTrue(run_id.startswith("m9x-"))
+        self.assertEqual(contract["milestone"], "M9X")
+        self.assertEqual(contract["allowed_paths"], second["allowed_paths"])
+        self.assertEqual(contract["required_tests"], second["required_tests"])
+
+    def test_non_enabled_phase_is_rejected(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        with self.assertRaisesRegex(ControllerError, "is not enabled"):
+            controller.plan("M9X", dry_run=True)
+
+    def test_enabled_phases_require_valid_contract_files(self):
+        config_dir = Path(self.temp.name) / "bad-config"
+        contracts_dir = config_dir / "contracts"
+        contracts_dir.mkdir(parents=True)
+        import shutil
+
+        shutil.copy(
+            REPOSITORY_ROOT / ".orchestration/contracts/M3A.json",
+            contracts_dir / "M3A.json",
+        )
+        raw = yaml.safe_load(
+            (REPOSITORY_ROOT / ".orchestration/config.yaml").read_text(encoding="utf-8")
+        )
+        raw["repository"]["enabled_phases"] = ["M3A", "MISSING"]
+        config_path = config_dir / "config.yaml"
+        config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "requires contract file"):
+            load_config(config_path)
+
+        invalid = self._minimal_phase_contract(
+            milestone="BAD",
+            allowed_paths=["other_app/**"],
+            required_tests=["make verify"],
+        )
+        del invalid["acceptance_criteria"]
+        bad_path = self._write_enabled_phases_config(["M3A", "BAD"], {"BAD": invalid})
+        with self.assertRaisesRegex(ConfigError, "failed schema validation"):
+            load_config(bad_path)
+
+    def test_correction_prompt_markers_follow_active_contract_without_m3a_leak(self):
+        second = self._minimal_phase_contract(
+            milestone="M9X",
+            allowed_paths=["other_app/**", "docs/CURRENT_STATE.md"],
+            required_tests=["make verify", "git diff --check"],
+        )
+        config_path = self._write_enabled_phases_config(["M3A", "M9X"], {"M9X": second})
+        config = load_config(config_path)
+        generated_prompt = (
+            "Preserve completed other_app work. Modify only fixture_app/tests/test_extra.py; "
+            "run make verify and git diff --check; commit within phase scope; return a concise "
+            "handoff. Use IMPLEMENTED only on success, otherwise BLOCKED or QUESTION. Never merge, "
+            "push, rebase, reset, or modify the main checkout."
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[implementer()],
+            reviewer_responses=[audit()],
+            orcha_responses=[
+                {
+                    "decision": "CORRECT",
+                    "prompt": generated_prompt,
+                    "finding_ids": ["OPERATOR-DECISION-01"],
+                }
+            ],
+            config=config,
+        )
+        run_id = "m9x-test"
+        paths = controller.paths(run_id)
+        paths.root.mkdir(parents=True, exist_ok=True)
+        paths.handoffs.mkdir(exist_ok=True)
+        paths.supplemental_audits.mkdir(exist_ok=True)
+        paths.logs.mkdir(exist_ok=True)
+        contract = dict(second)
+        contract.update({"run_id": run_id, "base_sha": BASE, "future_implementation_base_sha": BASE})
+        _atomic_json(paths.contract_json, contract)
+        state = RunState(
+            run_id=run_id,
+            phase="M9X",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            base_sha=BASE,
+        )
+        state.sessions["implementer"] = "persisted-session"
+        StateStore(paths.state).save(state)
+        implementation_path = paths.worktrees / "implementation"
+        implementation_path.mkdir(parents=True)
+        controller.repository.registered_worktrees.append(implementation_path)  # type: ignore[attr-defined]
+        question = implementer("QUESTION")
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": f"```json\n{json.dumps(question)}\n```"}]
+            },
+            "session_id": "persisted-session",
+        }
+        (paths.logs / "implementer-001.stdout.log").write_text(
+            json.dumps(assistant_event) + "\n"
+            + json.dumps({"type": "result", "result": "{…[TRUNCATED]"})
+            + "\n",
+            encoding="utf-8",
+        )
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "boundary advanced for M9X",
+            "additional_allowed_paths": ["fixture_app/tests/test_extra.py"],
+            "constraints": ["Preserve unrelated assertions."],
+        }
+        recorded, _ = controller.record_operator_decision(run_id, decision)
+        self.assertEqual(recorded.state, "ORCHA_DECISION")
+        resumed = controller.execute(run_id, resume=True)
+        self.assertEqual(resumed.state, "COMPLETED")
+        orcha_prompt = adapters["orcha"].requests[0].prompt
+        marker = (
+            "Generate the bounded operator-authorized recovery prompt from this evidence.\n\n"
+        )
+        self.assertIn(marker, orcha_prompt)
+        context = json.loads(orcha_prompt.split(marker, 1)[1])
+        task = context["task"]
+        self.assertIn("M9X", task)
+        self.assertIn("make verify", task)
+        self.assertIn("git diff --check", task)
+        self.assertNotIn("candidate_memory", task)
+        self.assertNotIn("job_applications", task)
+        self.assertNotIn("commits M3A", task)
+        self.assertNotIn("M3A work", task)
+        self.assertEqual(context["original_approved_contract"]["milestone"], "M9X")
+        self.assertNotIn("M3A", context["original_approved_contract"]["milestone"])
+        self.assertIn("fixture_app/tests/test_extra.py", generated_prompt)
+        self.assertIn("other_app", generated_prompt)
 
     def test_supplemental_audits_are_outside_handoffs_and_ignored_by_pipeline_loading(self):
         controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])

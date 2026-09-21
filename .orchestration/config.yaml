@@ -6,6 +6,8 @@ repository:
   bootstrap_base_sha: 437b179490b01697366ba70d75b6c72a6c83a7a4  # pragma: allowlist secret -- public Git commit
   require_clean_base: true
   automatic_merge: false
+  enabled_phases:
+    - M3A
 
 agents:
   orcha:
