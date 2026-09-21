@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from .schemas import SchemaError, validate_phase_contract
 
 
 class ConfigError(ValueError):
@@ -56,6 +59,7 @@ class RepositoryConfig:
     bootstrap_base_sha: str
     require_clean_base: bool
     automatic_merge: bool
+    enabled_phases: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,6 +140,47 @@ def _agent_from_dict(role: str, raw: Any) -> AgentConfig:
     )
 
 
+def _parse_enabled_phases(value: Any, *, contracts_dir: Path) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ConfigError("repository.enabled_phases must be a non-empty list")
+    phases: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip() or item != item.strip():
+            raise ConfigError(
+                f"repository.enabled_phases[{index}] must be a non-empty string"
+            )
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", item):
+            raise ConfigError(
+                f"repository.enabled_phases[{index}] has an invalid phase id: {item!r}"
+            )
+        phases.append(item)
+    if len(phases) != len(set(phases)):
+        raise ConfigError("repository.enabled_phases must not contain duplicates")
+    for phase in phases:
+        contract_path = contracts_dir / f"{phase}.json"
+        if not contract_path.is_file():
+            raise ConfigError(
+                f"enabled phase {phase!r} requires contract file {contract_path}"
+            )
+        try:
+            raw_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConfigError(
+                f"enabled phase {phase!r} contract is unreadable: {exc}"
+            ) from exc
+        if not isinstance(raw_contract, dict):
+            raise ConfigError(
+                f"enabled phase {phase!r} contract must be a JSON object"
+            )
+        try:
+            validate_phase_contract(raw_contract)
+        except SchemaError as exc:
+            raise ConfigError(
+                f"enabled phase {phase!r} contract failed schema validation: {exc}"
+            ) from exc
+    return tuple(phases)
+
+
 def load_config(path: str | Path) -> OrchestratorConfig:
     config_path = Path(path)
     try:
@@ -159,6 +204,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             "bootstrap_base_sha",
             "require_clean_base",
             "automatic_merge",
+            "enabled_phases",
         },
         "repository",
     )
@@ -174,6 +220,10 @@ def load_config(path: str | Path) -> OrchestratorConfig:
     for key in ("default_branch", "bootstrap_branch"):
         if not isinstance(repository[key], str) or not repository[key].strip():
             raise ConfigError(f"repository.{key} must be a non-empty string")
+    enabled_phases = _parse_enabled_phases(
+        repository["enabled_phases"],
+        contracts_dir=config_path.parent / "contracts",
+    )
 
     agents = raw["agents"]
     if not isinstance(agents, dict):
@@ -214,9 +264,17 @@ def load_config(path: str | Path) -> OrchestratorConfig:
     if any(gates[key] is not True for key in gate_keys):
         raise ConfigError("all operator gates must remain enabled")
 
+    repository_config = RepositoryConfig(
+        default_branch=repository["default_branch"],
+        bootstrap_branch=repository["bootstrap_branch"],
+        bootstrap_base_sha=repository["bootstrap_base_sha"],
+        require_clean_base=repository["require_clean_base"],
+        automatic_merge=repository["automatic_merge"],
+        enabled_phases=enabled_phases,
+    )
     return OrchestratorConfig(
         version=1,
-        repository=RepositoryConfig(**repository),
+        repository=repository_config,
         agents=parsed_agents,
         limits=LimitsConfig(
             max_correction_cycles=_positive_int(
