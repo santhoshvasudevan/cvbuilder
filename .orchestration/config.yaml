@@ -9,6 +9,7 @@ repository:
   enabled_phases:
     - M3A
     - M3A-C1
+    - M3B-S1
 
 agents:
   orcha:
