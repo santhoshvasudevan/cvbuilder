@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "run_id": "TEMPLATE",
+  "milestone": "M3A-C1",
+  "slice": "Deferred AUDIT-002 provenance immutability and CLAUDE-M3A-002 engagement date contradictions",
+  "base_sha": "5c883ddb9e4320a2844c77766ce4d2a5aeb8e0e7",
+  "product_baseline_sha": "437b179490b01697366ba70d75b6c72a6c83a7a4",
+  "orchestration_tooling_sha": "5c883ddb9e4320a2844c77766ce4d2a5aeb8e0e7",
+  "future_implementation_base_sha": "5c883ddb9e4320a2844c77766ce4d2a5aeb8e0e7",
+  "objective": "Correct deferred findings AUDIT-002 and CLAUDE-M3A-002 on the integrated M3A baseline without expanding scope. AC-1/AUDIT-002: enforce immutable source provenance after creation by extending the IntegrityFinding/HardIntegrityError mechanism in candidate_memory/integrity.py so both MemorySourceDocument and MemoryClaimSupport reject instance-level and QuerySet-level bulk update/delete paths after creation, including Model.save()-based mutation, Model.delete(), QuerySet.update(), and QuerySet.delete(); registered source-document admin cannot delete; CASCADE deletion of claim-support evidence is replaced with a protective deletion policy so source deletion cannot cascade-destroy evidence; and a migration captures the policy. AC-2/CLAUDE-M3A-002: resolve the generic start/end date contradiction defect for the same engagement across sources, including a known Maruti start-date contradiction regression; this slice covers that date-contradiction defect only \u2014 non-date contradiction categories remain out of scope and deferred. Governed by FACT-002, FACT-003, requirements.md section 6.1, V2-D003, V2-D026, V2-D030, docs/ARCHITECTURE.md section 4 (Durable State), the M3A acceptance statement in docs/IMPLEMENTATION_PLAN.md that unresolved source contradictions are preserved for operator review, docs/REQUIREMENT_TRACEABILITY.md line/entry 48 (Hard integrity vs soft review warnings | FACT-003, V2-D026), and the AUDIT-002 plus CLAUDE-M3A-002 entries in docs/DEFERRED_FINDINGS.md. On PASS, append RESOLVED disposition records for both findings in docs/DEFERRED_FINDINGS.md citing this run ID and candidate SHA; never rewrite or remove the original deferred entries.",
+  "requirement_ids": [
+    "FACT-002",
+    "FACT-003",
+    "requirements.md \u00a76.1",
+    "AUDIT-002",
+    "CLAUDE-M3A-002"
+  ],
+  "governing_decision_ids": [
+    "V2-D003",
+    "V2-D026",
+    "V2-D030"
+  ],
+  "dependencies": [
+    "Integrated M3A candidate_memory baseline present on this branch (HEAD 5c883ddb9e4320a2844c77766ce4d2a5aeb8e0e7)",
+    "docs/DEFERRED_FINDINGS.md entries AUDIT-002 and CLAUDE-M3A-002 remain OPEN/DEFERRED and must not be rewritten",
+    "docs/ARCHITECTURE.md section 4 Durable State remains authoritative for durable provenance expectations",
+    "docs/IMPLEMENTATION_PLAN.md M3A acceptance: unresolved source contradictions are preserved for operator review",
+    "docs/REQUIREMENT_TRACEABILITY.md line/entry 48: Hard integrity vs soft review warnings | FACT-003, V2-D026",
+    "candidate_memory/integrity.py IntegrityFinding and HardIntegrityError mechanism already exists for HARD_INTEGRITY checks"
+  ],
+  "in_scope": [
+    "AC-1/AUDIT-002: MemorySourceDocument and MemoryClaimSupport reject instance-level and QuerySet-level bulk update/delete paths after creation, including Model.save() mutation, Model.delete(), QuerySet.update(), and QuerySet.delete()",
+    "AC-1/AUDIT-002: extend IntegrityFinding/HardIntegrityError in candidate_memory/integrity.py for provenance-immutability violations on those paths",
+    "AC-1/AUDIT-002: registered source-document admin cannot delete source documents",
+    "AC-1/AUDIT-002: replace CASCADE destruction of claim-support rows with a protective deletion policy so source deletion cannot cascade-destroy evidence; ship the Django migration",
+    "AC-1/AUDIT-002: regression tests must explicitly exercise instance-level and QuerySet .update()/.delete() bypass attempts, protective source deletion with no cascade evidence loss, and admin no-delete, proving content, hash, source path, and support links cannot be modified or removed individually",
+    "AC-2/CLAUDE-M3A-002: resolve the generic same-engagement start/end date contradiction defect across sources (date contradictions only)",
+    "AC-2/CLAUDE-M3A-002: known Maruti start-date contradiction retained as an unresolved MemoryConflict with a dedicated regression test",
+    "Append-only RESOLVED records in docs/DEFERRED_FINDINGS.md for AUDIT-002 and CLAUDE-M3A-002 after PASS, including run ID and candidate SHA",
+    "Bounded updates to docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md reflecting AC-1/AC-2 closure"
+  ],
+  "out_of_scope": [
+    "Non-date contradiction categories (remain deferred; CLAUDE-M3A-002 resolution in this slice covers only the generic date-contradiction defect)",
+    "General contradiction-detection expansion beyond start/end date contradictions for the same engagement",
+    "Rewriting, deleting, or editing original AUDIT-002 or CLAUDE-M3A-002 deferred entries",
+    "M3B CandidateContextSnapshot or any later product milestone",
+    "Changes outside candidate_memory/** and the three allowed documentation paths",
+    "Any model/provider call or llm_provider change",
+    "Merge, push, rebase, reset, force-update, branch deletion, worktree deletion, or stash"
+  ],
+  "allowed_paths": [
+    "candidate_memory/**",
+    "docs/DEFERRED_FINDINGS.md",
+    "docs/CURRENT_STATE.md",
+    "docs/REQUIREMENT_TRACEABILITY.md"
+  ],
+  "prohibited_paths": [
+    "requirements.md",
+    "docs/DECISIONS.md",
+    "docs/ARCHITECTURE.md",
+    "docs/IMPLEMENTATION_PLAN.md",
+    "docs/TEST_STRATEGY.md",
+    "llm_provider/**",
+    "job_applications/**",
+    "candidate_context/**",
+    "candidate_matching/**",
+    "positioning_strategy/**",
+    "resume_builder/**",
+    "reviews/**",
+    "config/**",
+    "templates/**",
+    "Makefile",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pyproject.toml",
+    ".env",
+    ".orchestration/runs/**"
+  ],
+  "acceptance_criteria": [
+    "AC-1/AUDIT-002: both MemorySourceDocument and MemoryClaimSupport reject instance-level and QuerySet-level bulk update/delete paths after creation, including Model.save() mutation, Model.delete(), QuerySet.update(), and QuerySet.delete(), failing closed via IntegrityFinding/HardIntegrityError (or equivalent fail-closed path extending that mechanism in candidate_memory/integrity.py)",
+    "AC-1/AUDIT-002: registered source-document admin cannot delete; protective deletion policy replaces CASCADE evidence destruction so source deletion cannot cascade-destroy claim-support evidence; migration is present and applies cleanly",
+    "AC-1/AUDIT-002: required regression test_ac1_source_provenance_immutability explicitly exercises instance-level and QuerySet .update()/.delete() bypass attempts, protective source deletion with no cascade evidence loss, and admin no-delete; content, content hash, source path, and claim-support links cannot be modified or removed individually after creation",
+    "AC-2/CLAUDE-M3A-002: the generic start/end date contradiction defect for the same engagement across sources is resolved; date contradictions only \u2014 non-date contradiction categories remain out of scope/deferred",
+    "AC-2/CLAUDE-M3A-002: known Maruti start-date contradiction is retained as an unresolved MemoryConflict and covered by an explicit regression test",
+    "FACT-002, FACT-003, requirements.md section 6.1, V2-D003, V2-D026, and V2-D030 remain satisfied; unresolved contradictions stay available for operator review per docs/IMPLEMENTATION_PLAN.md M3A acceptance and docs/ARCHITECTURE.md section 4",
+    "docs/REQUIREMENT_TRACEABILITY.md line/entry 48 remains consistent with HARD_INTEGRITY vs SOFT_REVIEW_WARNING (FACT-003, V2-D026)",
+    "On PASS, docs/DEFERRED_FINDINGS.md gains append-only RESOLVED entries for AUDIT-002 and CLAUDE-M3A-002 that cite the run ID and candidate SHA; original deferred entries are unchanged",
+    "No live provider call occurs; candidate_memory tests and make verify pass"
+  ],
+  "required_tests": [
+    ".venv/bin/python manage.py test candidate_memory",
+    ".venv/bin/python manage.py test candidate_memory.tests.test_ac1_source_provenance_immutability",
+    "AC-1 regression must cover MemorySourceDocument and MemoryClaimSupport instance-level and QuerySet .update()/.delete() bypass attempts, protective source deletion with no cascade evidence loss, and admin no-delete",
+    ".venv/bin/python manage.py test candidate_memory.tests.test_ac2_engagement_date_contradictions",
+    "make verify"
+  ],
+  "required_documentation_updates": [
+    "docs/DEFERRED_FINDINGS.md",
+    "docs/CURRENT_STATE.md",
+    "docs/REQUIREMENT_TRACEABILITY.md"
+  ],
+  "operator_gates": [
+    "Operator approves this M3A-C1 phase contract before the implementer is launched",
+    "Operator approves the first live implementation launch for M3A-C1",
+    "Operator approves transfer of any adversarial audit-test commit",
+    "Operator alone decides whether to fast-forward the accepted M3A-C1 result; implementer must not merge or push",
+    "On PASS, implementer appends RESOLVED entries for AUDIT-002 and CLAUDE-M3A-002 in docs/DEFERRED_FINDINGS.md with run ID and candidate SHA and must never rewrite the original deferred entries"
+  ]
+}

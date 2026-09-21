@@ -8,6 +8,7 @@ repository:
   automatic_merge: false
   enabled_phases:
     - M3A
+    - M3A-C1
 
 agents:
   orcha:
