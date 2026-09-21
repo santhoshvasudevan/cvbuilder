@@ -37,17 +37,17 @@ agents:
     model: gpt-5.6-terra
     reasoning_effort: high
     permission_profile: audit_worktree
-    enabled: false
+    enabled: true
 
   claude_reviewer: &claude_reviewer
     adapter: claude
     binary: claude
-    enabled: true
+    enabled: false
     model: sonnet
     permission_profile: audit_worktree
 
   reviewer:
-    <<: *claude_reviewer
+    <<: *codex_reviewer
     enabled: true
 
   escalation_reviewer:
