@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1994,16 +1995,26 @@ class ControllerTests(unittest.TestCase):
 
 
 class ValidationAndSafetyTests(unittest.TestCase):
-    def test_reviewer_routes_to_enabled_claude_and_keeps_codex_rollback_disabled(self):
+    def test_live_config_enables_exactly_one_reviewer_profile_matching_role(self):
         config = load_config(REPOSITORY_ROOT / ".orchestration/config.yaml")
+        claude = config.agents["claude_reviewer"]
+        codex = config.agents["codex_reviewer"]
+        reviewer = config.agents["reviewer"]
+        enabled = [
+            name
+            for name, profile in (("claude_reviewer", claude), ("codex_reviewer", codex))
+            if profile.enabled
+        ]
 
-        self.assertEqual(config.agents["reviewer"].adapter, "claude")
-        self.assertTrue(config.agents["reviewer"].enabled)
-        self.assertEqual(config.agents["reviewer"].permission_profile, "audit_worktree")
-        self.assertEqual(config.agents["claude_reviewer"].adapter, "claude")
-        self.assertTrue(config.agents["claude_reviewer"].enabled)
-        self.assertEqual(config.agents["codex_reviewer"].adapter, "codex")
-        self.assertFalse(config.agents["codex_reviewer"].enabled)
+        self.assertEqual(len(enabled), 1, f"expected exactly one enabled reviewer profile, got {enabled}")
+        self.assertTrue(reviewer.enabled)
+        self.assertEqual(reviewer.permission_profile, "audit_worktree")
+        active = claude if claude.enabled else codex
+        self.assertEqual(reviewer.adapter, active.adapter)
+        self.assertEqual(reviewer.binary, active.binary)
+        self.assertEqual(reviewer.model, active.model)
+        self.assertEqual(claude.adapter, "claude")
+        self.assertEqual(codex.adapter, "codex")
 
     def test_claude_adapter_builds_structured_stdin_command_and_respects_write_gate(self):
         schema_path = REPOSITORY_ROOT / "tools/dev_orchestrator/schemas/audit-response.schema.json"
@@ -2898,3 +2909,138 @@ class EvidenceCollectorTests(unittest.TestCase):
             authorized_test_changes=["candidate_memory/tests/test_models.py"],
         )
         self.assertEqual(report.suspicious_test_changes, ())
+
+
+class DoctorReviewerQualificationTests(unittest.TestCase):
+    """Doctor qualifies whichever reviewer adapter is routed; both directions stay tested."""
+
+    def setUp(self):
+        self.base = load_config(REPOSITORY_ROOT / ".orchestration/config.yaml")
+        self.runtime = Path(tempfile.mkdtemp(prefix="doctor-runtime-"))
+        self.addCleanup(lambda: shutil.rmtree(self.runtime, ignore_errors=True))
+
+    def _with_profiles(self, *, claude_enabled: bool, codex_enabled: bool, route: str | None):
+        claude = dataclasses.replace(
+            self.base.agents["claude_reviewer"],
+            enabled=claude_enabled,
+            adapter="claude",
+            binary="claude",
+            model="sonnet",
+            reasoning_effort=None,
+            permission_profile="audit_worktree",
+        )
+        codex = dataclasses.replace(
+            self.base.agents["codex_reviewer"],
+            enabled=codex_enabled,
+            adapter="codex",
+            binary="codex",
+            model="gpt-5.6-terra",
+            reasoning_effort="high",
+            permission_profile="audit_worktree",
+        )
+        if route == "claude":
+            reviewer = dataclasses.replace(claude, enabled=True)
+        elif route == "codex":
+            reviewer = dataclasses.replace(codex, enabled=True)
+        elif route == "mismatch":
+            # Enabled Claude profile, but role still carries Codex fields.
+            reviewer = dataclasses.replace(codex, enabled=True)
+        else:
+            reviewer = dataclasses.replace(self.base.agents["reviewer"], enabled=True)
+        agents = dict(self.base.agents)
+        agents["claude_reviewer"] = claude
+        agents["codex_reviewer"] = codex
+        agents["reviewer"] = reviewer
+        return dataclasses.replace(self.base, agents=agents)
+
+    def _check_map(self, checks):
+        return {check.name: check for check in checks}
+
+    def _run_doctor(self, config, *, claude_dry=(0, "ok"), codex_dry=(0, "ok")):
+        def fake_which(name):
+            known = {
+                "git": "/usr/bin/git",
+                "tmux": "/usr/bin/tmux",
+                "jq": "/usr/bin/jq",
+                "claude": "/usr/bin/claude",
+                "codex": "/usr/bin/codex",
+            }
+            return known.get(name)
+
+        def fake_command(argv, cwd):
+            del cwd
+            joined = " ".join(argv)
+            if argv[:2] == ["codex", "exec"] and "--help" in argv:
+                return 0, "--model --sandbox --json --output-schema --output-last-message"
+            if argv[:2] == ["codex", "login"]:
+                return 0, "logged in"
+            if argv == ["claude", "--version"]:
+                return 0, "claude 1.0"
+            if argv == ["claude", "--help"]:
+                return 0, "--print --output-format --json-schema --permission-mode"
+            if "cursor" in argv[0] or argv[0].endswith("cursor-agent"):
+                if "--help" in argv:
+                    return 0, "--print stream-json --model --resume --workspace"
+                if "status" in argv:
+                    return 0, "Logged in"
+            return 0, f"unused:{joined}"
+
+        with (
+            mock.patch("tools.dev_orchestrator.doctor.shutil.which", side_effect=fake_which),
+            mock.patch("tools.dev_orchestrator.doctor._command", side_effect=fake_command),
+            mock.patch(
+                "tools.dev_orchestrator.doctor._claude_dry_audit",
+                return_value=claude_dry,
+            ),
+            mock.patch(
+                "tools.dev_orchestrator.doctor._codex_dry_audit",
+                return_value=codex_dry,
+            ),
+            mock.patch("tools.dev_orchestrator.doctor.Path.is_file", return_value=True),
+            mock.patch("tools.dev_orchestrator.doctor.os.access", return_value=True),
+        ):
+            from tools.dev_orchestrator.doctor import run_doctor
+
+            return run_doctor(REPOSITORY_ROOT, self.runtime, config)
+
+    def test_doctor_qualifies_claude_routed_reviewer(self):
+        config = self._with_profiles(claude_enabled=True, codex_enabled=False, route="claude")
+        checks = self._check_map(self._run_doctor(config))
+        self.assertEqual(checks["reviewer routing"].status, "PASS")
+        self.assertIn("claude_reviewer", checks["reviewer routing"].detail)
+        self.assertEqual(checks["Claude dry audit"].status, "PASS")
+        self.assertNotIn("Codex dry audit", checks)
+        self.assertEqual(checks["live model calls"].status, "PASS")
+        self.assertIn("Claude", checks["live model calls"].detail)
+
+    def test_doctor_qualifies_codex_routed_reviewer(self):
+        config = self._with_profiles(claude_enabled=False, codex_enabled=True, route="codex")
+        checks = self._check_map(self._run_doctor(config))
+        self.assertEqual(checks["reviewer routing"].status, "PASS")
+        self.assertIn("codex_reviewer", checks["reviewer routing"].detail)
+        self.assertEqual(checks["Codex dry audit"].status, "PASS")
+        self.assertNotIn("Claude dry audit", checks)
+        self.assertEqual(checks["live model calls"].status, "PASS")
+        self.assertIn("Codex", checks["live model calls"].detail)
+
+    def test_doctor_fails_when_both_reviewer_profiles_enabled(self):
+        config = self._with_profiles(claude_enabled=True, codex_enabled=True, route="claude")
+        checks = self._check_map(self._run_doctor(config))
+        self.assertEqual(checks["reviewer profile selection"].status, "FAIL")
+        self.assertIn("exactly one", checks["reviewer profile selection"].detail)
+        self.assertNotIn("Claude dry audit", checks)
+        self.assertNotIn("Codex dry audit", checks)
+
+    def test_doctor_fails_when_neither_reviewer_profile_enabled(self):
+        config = self._with_profiles(claude_enabled=False, codex_enabled=False, route="codex")
+        checks = self._check_map(self._run_doctor(config))
+        self.assertEqual(checks["reviewer profile selection"].status, "FAIL")
+        self.assertIn("(none)", checks["reviewer profile selection"].detail)
+
+    def test_doctor_fails_when_reviewer_does_not_match_enabled_profile(self):
+        config = self._with_profiles(claude_enabled=True, codex_enabled=False, route="mismatch")
+        checks = self._check_map(self._run_doctor(config))
+        self.assertEqual(checks["reviewer routing"].status, "FAIL")
+        self.assertIn("does not route", checks["reviewer routing"].detail)
+        self.assertNotIn("Claude dry audit", checks)
+        self.assertNotIn("Codex dry audit", checks)

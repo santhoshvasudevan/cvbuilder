@@ -7,11 +7,12 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .adapters.base import ProcessAdapter
 from .adapters.claude_schema import schema_argument_for_claude_cli
-from .config import OrchestratorConfig
+from .config import AgentConfig, OrchestratorConfig
 from .git_safety import GitRepository, GitSafetyError
 from .redaction import REDACTED, redact_text
 from .schemas import SchemaError, validate_audit_response
@@ -103,6 +104,180 @@ def _claude_dry_audit(binary: str, model: str, root: Path, schema_path: Path) ->
     except SchemaError as exc:
         return 1, f"Claude dry audit failed controller validation: {exc}"
     return 0, "audit-response schema and controller validation passed"
+
+
+def _codex_dry_audit(binary: str, model: str, root: Path, schema_path: Path) -> tuple[int, str]:
+    """Make the minimal explicit live call required to qualify Codex structured output."""
+    prompt = (
+        "Return only a schema-valid audit response for this CLI qualification. Use schema_version "
+        "1, verdict PASS, base_sha "
+        + "a" * 40
+        + ", candidate_sha "
+        + "b" * 40
+        + ", no findings, test_commands containing git status --short with exit_code 0, "
+        "summary 'Codex structured-output qualification passed', audit_test_requested false, "
+        "and an empty audit_test_commit_sha."
+    )
+    with tempfile.TemporaryDirectory(prefix="doctor-codex-dry-audit-") as tmp:
+        final_path = Path(tmp) / "final.json"
+        try:
+            result = subprocess.run(
+                [
+                    binary,
+                    "exec",
+                    "-C",
+                    str(root),
+                    "--sandbox",
+                    "read-only",
+                    "-m",
+                    model,
+                    "--json",
+                    "--output-last-message",
+                    str(final_path),
+                    "--output-schema",
+                    str(schema_path),
+                    "-",
+                ],
+                cwd=root,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=120,
+                env=ProcessAdapter.safe_environment(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 127, redact_text(str(exc))
+        if result.returncode != 0:
+            return result.returncode, redact_text(result.stderr.strip() or result.stdout.strip())
+
+        payload = None
+        if final_path.is_file():
+            payload = ProcessAdapter._parse_handoff(final_path.read_text(encoding="utf-8"))
+        if payload is None:
+            # Prefer the output-last-message file; fall back to scanning stdout for a JSON object.
+            for line in reversed(result.stdout.splitlines()):
+                try:
+                    candidate = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(candidate, dict):
+                    continue
+                text = candidate.get("text") or candidate.get("message") or candidate.get("result")
+                if isinstance(text, str):
+                    payload = ProcessAdapter._parse_handoff(text)
+                item = candidate.get("item")
+                if payload is None and isinstance(item, dict):
+                    item_text = item.get("text") or item.get("content")
+                    if isinstance(item_text, str):
+                        payload = ProcessAdapter._parse_handoff(item_text)
+                if payload is None and "schema_version" in candidate:
+                    payload = candidate
+                if payload is not None:
+                    break
+        if not isinstance(payload, dict):
+            return 1, "Codex result did not contain a structured JSON object"
+        try:
+            validate_audit_response(payload)
+        except SchemaError as exc:
+            return 1, f"Codex dry audit failed controller validation: {exc}"
+        return 0, "audit-response schema and controller validation passed"
+
+
+def _profiles_match(reviewer: AgentConfig, profile: AgentConfig) -> bool:
+    return (
+        reviewer.adapter == profile.adapter
+        and reviewer.binary == profile.binary
+        and reviewer.model == profile.model
+        and reviewer.reasoning_effort == profile.reasoning_effort
+        and reviewer.permission_profile == profile.permission_profile
+    )
+
+
+def _qualify_claude_reviewer(checks: list[Check], reviewer: AgentConfig, root: Path) -> bool:
+    live_call = False
+    resolved = shutil.which(reviewer.binary)
+    checks.append(Check("Claude binary", "PASS" if resolved else "FAIL", resolved or "not found"))
+    if not resolved:
+        return live_call
+    version_code, version_text = _command([reviewer.binary, "--version"], root)
+    checks.append(
+        Check(
+            "Claude version",
+            "PASS" if version_code == 0 and version_text else "FAIL",
+            redact_text(version_text) or "version unavailable",
+        )
+    )
+    help_code, help_text = _command([reviewer.binary, "--help"], root)
+    required = ("--print", "--output-format", "--json-schema", "--permission-mode")
+    schema_capable = help_code == 0 and all(flag in help_text for flag in required)
+    checks.append(
+        Check(
+            "Claude structured-output flags",
+            "PASS" if schema_capable else "FAIL",
+            "required print/JSON/schema/permission flags present"
+            if schema_capable
+            else "required flags missing",
+        )
+    )
+    if schema_capable:
+        dry_code, dry_detail = _claude_dry_audit(
+            reviewer.binary,
+            reviewer.model,
+            root,
+            root / "tools/dev_orchestrator/schemas/audit-response.schema.json",
+        )
+        live_call = True
+        checks.append(
+            Check(
+                "Claude dry audit",
+                "PASS" if dry_code == 0 else "FAIL",
+                dry_detail,
+            )
+        )
+    return live_call
+
+
+def _qualify_codex_reviewer(checks: list[Check], reviewer: AgentConfig, root: Path) -> bool:
+    live_call = False
+    resolved = shutil.which(reviewer.binary)
+    checks.append(Check("Codex reviewer binary", "PASS" if resolved else "FAIL", resolved or "not found"))
+    if not resolved:
+        return live_call
+    help_code, help_text = _command([reviewer.binary, "exec", "--help"], root)
+    required_flags = ("--model", "--sandbox", "--json", "--output-schema", "--output-last-message")
+    capability_ok = help_code == 0 and all(flag in help_text for flag in required_flags)
+    checks.append(
+        Check(
+            "Codex reviewer machine-readable execution",
+            "PASS" if capability_ok else "FAIL",
+            "required exec flags present" if capability_ok else "required flags missing",
+        )
+    )
+    login_code, login_text = _command([reviewer.binary, "login", "status"], root)
+    checks.append(
+        Check(
+            "Codex reviewer authentication",
+            "PASS" if login_code == 0 and "logged in" in login_text.lower() else "WARN",
+            redact_text(login_text),
+        )
+    )
+    if capability_ok:
+        dry_code, dry_detail = _codex_dry_audit(
+            reviewer.binary,
+            reviewer.model,
+            root,
+            root / "tools/dev_orchestrator/schemas/audit-response.schema.json",
+        )
+        live_call = True
+        checks.append(
+            Check(
+                "Codex dry audit",
+                "PASS" if dry_code == 0 else "FAIL",
+                dry_detail,
+            )
+        )
+    return live_call
 
 
 def run_doctor(root: Path, runtime_root: Path, config: OrchestratorConfig) -> list[Check]:
@@ -214,64 +389,74 @@ def run_doctor(root: Path, runtime_root: Path, config: OrchestratorConfig) -> li
             ),
         )
     )
-    codex_reviewer = config.agents["codex_reviewer"]
-    checks.append(
-        Check(
-            "codex_reviewer profile",
-            "SKIP" if not codex_reviewer.enabled else "WARN",
-            "disabled rollback profile" if not codex_reviewer.enabled else "unexpectedly enabled",
-        )
-    )
 
     reviewer = config.agents["reviewer"]
-    claude_live_call = False
-    if reviewer.adapter != "claude" or not reviewer.enabled:
+    claude_profile = config.agents["claude_reviewer"]
+    codex_profile = config.agents["codex_reviewer"]
+    enabled_profiles = [
+        (name, profile)
+        for name, profile in (
+            ("claude_reviewer", claude_profile),
+            ("codex_reviewer", codex_profile),
+        )
+        if profile.enabled
+    ]
+    live_call = False
+    live_detail = "not invoked"
+    if len(enabled_profiles) != 1:
+        enabled_names = [name for name, _ in enabled_profiles] or ["(none)"]
         checks.append(
             Check(
-                "Claude reviewer routing",
+                "reviewer profile selection",
                 "FAIL",
-                "reviewer role is not routed to an enabled Claude profile",
+                "exactly one of claude_reviewer/codex_reviewer must be enabled; "
+                f"enabled={','.join(enabled_names)}",
+            )
+        )
+    elif not reviewer.enabled:
+        checks.append(
+            Check(
+                "reviewer routing",
+                "FAIL",
+                "reviewer role must be enabled when a reviewer profile is selected",
             )
         )
     else:
-        resolved = shutil.which(reviewer.binary)
-        checks.append(Check("Claude binary", "PASS" if resolved else "FAIL", resolved or "not found"))
-        if resolved:
-            version_code, version_text = _command([reviewer.binary, "--version"], root)
+        profile_name, profile = enabled_profiles[0]
+        if not _profiles_match(reviewer, profile):
             checks.append(
                 Check(
-                    "Claude version",
-                    "PASS" if version_code == 0 and version_text else "FAIL",
-                    redact_text(version_text) or "version unavailable",
+                    "reviewer routing",
+                    "FAIL",
+                    f"agents.reviewer does not route to the enabled profile {profile_name} "
+                    f"(adapter/binary/model mismatch)",
                 )
             )
-            help_code, help_text = _command([reviewer.binary, "--help"], root)
-            required = ("--print", "--output-format", "--json-schema", "--permission-mode")
-            schema_capable = help_code == 0 and all(flag in help_text for flag in required)
+        else:
             checks.append(
                 Check(
-                    "Claude structured-output flags",
-                    "PASS" if schema_capable else "FAIL",
-                    "required print/JSON/schema/permission flags present"
-                    if schema_capable
-                    else "required flags missing",
+                    "reviewer routing",
+                    "PASS",
+                    f"routed to enabled {profile_name} (adapter={profile.adapter})",
                 )
             )
-            if schema_capable:
-                dry_code, dry_detail = _claude_dry_audit(
-                    reviewer.binary,
-                    reviewer.model,
-                    root,
-                    root / "tools/dev_orchestrator/schemas/audit-response.schema.json",
-                )
-                claude_live_call = True
+            if profile.adapter == "claude":
+                live_call = _qualify_claude_reviewer(checks, reviewer, root)
+                if live_call:
+                    live_detail = "Claude reviewer dry audit invoked"
+            elif profile.adapter == "codex":
+                live_call = _qualify_codex_reviewer(checks, reviewer, root)
+                if live_call:
+                    live_detail = "Codex reviewer dry audit invoked"
+            else:
                 checks.append(
                     Check(
-                        "Claude dry audit",
-                        "PASS" if dry_code == 0 else "FAIL",
-                        dry_detail,
+                        "reviewer adapter qualification",
+                        "FAIL",
+                        f"unsupported reviewer adapter: {profile.adapter!r}",
                     )
                 )
+
     writable = (
         os.access(runtime_root, os.W_OK) if runtime_root.exists() else os.access(runtime_root.parent, os.W_OK)
     )
@@ -285,8 +470,8 @@ def run_doctor(root: Path, runtime_root: Path, config: OrchestratorConfig) -> li
     checks.append(
         Check(
             "live model calls",
-            "PASS" if claude_live_call else "SKIP",
-            "Claude reviewer dry audit invoked" if claude_live_call else "not invoked",
+            "PASS" if live_call else "SKIP",
+            live_detail,
         )
     )
     return checks

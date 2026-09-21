@@ -60,18 +60,22 @@ violation, disables Claude tools, and requires the reviewer to preserve its audi
 and test results while correcting only the verdict and summary. A missing session, any structural
 schema error, or a second invalid response fails closed as before.
 
-`doctor` performs the normal non-mutating environment checks and explicitly qualifies the configured
-Claude reviewer with four checks: binary resolution, version, presence of the structured-output CLI
-flags, and one minimal live dry audit that must pass both the JSON schema and
-`validate_audit_response()`. Automated tests continue to use scripted adapters and never make this
-live call.
+`doctor` performs the normal non-mutating environment checks and qualifies the configured reviewer
+role against whichever adapter it is actually routed to. For Claude that is binary resolution,
+version, structured-output CLI flags, and one minimal live dry audit. For Codex that is binary
+resolution, machine-readable exec flags, login status, and one minimal live dry audit. Either dry
+audit must pass both the JSON schema and `validate_audit_response()`. Automated tests continue to
+use scripted adapters and never make this live call.
 
 ### Reviewer rollback
 
-The Codex reviewer profile remains defined as `codex_reviewer` with `enabled: false`. To revert the
-active reviewer, change only the YAML merge line under `agents.reviewer` from
-`<<: *claude_reviewer` to `<<: *codex_reviewer`; the role-local `enabled: true` override activates the
-selected profile. No controller code change is required.
+Both `claude_reviewer` and `codex_reviewer` profiles are defined; exactly one must have `enabled: true`
+at a time. To switch the active reviewer, change the YAML merge line under `agents.reviewer` between
+`<<: *claude_reviewer` and `<<: *codex_reviewer`, keep that selected profile enabled and the other
+disabled, then re-run `doctor`. Doctor qualifies whichever adapter the role is routed to (including a
+live dry audit through `validate_audit_response()`), and both directions are covered by automated
+tests. Switching is a one-line merge change plus doctor re-qualification — not an untested claim that
+"no controller code change is required."
 
 For Cursor, the controller treats a complete schema-shaped `assistant` event as the authoritative
 handoff candidate and immediately serializes it into the invocation's durable `.final.json` file.
