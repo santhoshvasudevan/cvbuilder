@@ -93,6 +93,7 @@ class CandidateMemoryMigrationReproducibilityTests(SimpleTestCase):
 
             first = run([python, "manage.py", "migrate", "--noinput"], env=env)
             self.assertIn("Applying candidate_memory.0001_", first.stdout + first.stderr)
+            self.assertIn("Applying candidate_memory.0002_", first.stdout + first.stderr)
 
             second = run([python, "manage.py", "migrate", "--noinput"], env=env)
             combined = second.stdout + second.stderr
@@ -107,6 +108,7 @@ class CandidateMemoryMigrationReproducibilityTests(SimpleTestCase):
 
             reapply = run([python, "manage.py", "migrate", "candidate_memory", "--noinput"], env=env)
             self.assertIn("Applying candidate_memory.0001_", reapply.stdout + reapply.stderr)
+            self.assertIn("Applying candidate_memory.0002_", reapply.stdout + reapply.stderr)
 
             drift = run(
                 [python, "manage.py", "makemigrations", "--check", "--dry-run"],

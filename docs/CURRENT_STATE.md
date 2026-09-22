@@ -14,17 +14,19 @@ root file for an implementation/audit worktree copy.
   `1f9fe6ef45a2f06ba88d6481bfce1b7d29328a48` and merges the preserved M3A candidate for correction.
 - Preserved M3A implementation branch: `agent/m3a-d2c0cc48b6aa/implementation` at
   `969283968a6772cc1b9f7930241a8a0a33c7e857` (run `m3a-d2c0cc48b6aa`).
+- Corrective run in progress: `m3a-c1-6df5432d618c` (M3A-C1) closing deferred `AUDIT-002` and
+  `CLAUDE-M3A-002` on the integrated M3A baseline.
 - The abandoned M3A line ending at `02bbc5c` and listed predecessor commits remains excluded.
 - `main` remains the incompatible V1 legacy line (V2-D038).
-- Last updated: 2026-09-21.
+- Last updated: 2026-09-22.
 
 ## Current Task / Live Run
 
-- The durable run `m3a-d2c0cc48b6aa` remains in terminal `OPERATOR_ESCALATION`; it must not be
+- Durable run `m3a-c1-6df5432d618c` is the active corrective slice (`IMPLEMENTING`).
+- The prior durable run `m3a-d2c0cc48b6aa` remains in terminal `OPERATOR_ESCALATION`; it must not be
   resumed, advanced, or modified. Its candidate branch and three worktrees remain preserved.
-- The candidate is integrated only on `m3a-integration` so a new bounded corrective slice can close
-  deferred findings `AUDIT-002` and `CLAUDE-M3A-002`. M3A is not yet accepted or merged into
-  `buildwithAgent`.
+- M3A is not yet accepted or merged into `buildwithAgent`; operator alone decides fast-forward after
+  this corrective candidate passes.
 - M3B `CandidateContextSnapshot` has not started; the `candidate_context` app is intentionally absent.
 
 ## Verified Working
@@ -48,16 +50,21 @@ root file for an implementation/audit worktree copy.
   three-engagement selection action — no automatic primary-slot selection path.
 - Deterministic HARD_INTEGRITY validator requiring exactly three unique active primary slots
   with sequences 1, 2, and 3; static metadata replacement attempts are rejected.
+- **AC-1 / AUDIT-002 (this worktree):** `MemorySourceDocument` and `MemoryClaimSupport` reject
+  post-creation instance and QuerySet update/delete via `HardIntegrityError` /
+  `IntegrityFinding(code=PROVENANCE_IMMUTABLE)`; source-document admin has no delete permission;
+  claim-support `source_document` FK uses `PROTECT` (migration `0002_protect_claim_support_source`)
+  so source deletion cannot cascade-destroy evidence.
+- **AC-2 / CLAUDE-M3A-002 (this worktree):** generic same-engagement start/end date contradiction
+  detection retains unresolved `MemoryConflict` rows (including known Maruti start-date
+  `engagement_start_date:maruti_suzuki`); non-date contradiction categories remain deferred.
 - `docs/CANDIDATE_MEMORY_SNAPSHOT.md` is excluded from ingestion (path + generated markers).
 - Fresh disposable PostgreSQL migration apply/no-op/unapply-reapply covered by
   `candidate_memory.tests.test_migrations`.
 
 ## Known Limits / Operator Actions
 
-- `AUDIT-002` remains open/deferred: source-document and claim-support provenance described as
-  immutable is still ordinarily mutable/deletable and source deletion cascades support evidence.
-- `CLAUDE-M3A-002` remains open/deferred: conflict detection is candidate-specific and misses the
-  known Maruti start-date contradiction.
+- Non-date contradiction categories beyond the resolved date-contradiction defect remain deferred.
 - Certifications/languages are stored only on StaticResumeProfile as static JSON; no LLM path
   generates them in M3A.
 - ExperienceSlot copy-versus-reference chose the smallest copy-on-create approach with retained
@@ -69,6 +76,6 @@ root file for an implementation/audit worktree copy.
 
 ## Next Recommended Action
 
-Plan and approve a new bounded controller run from this integration branch to correct `AUDIT-002`
-and `CLAUDE-M3A-002`; do not resume the terminal M3A run. Merge into `buildwithAgent` only after the
-corrective candidate passes the controller and the operator authorizes integration.
+Complete controller audit/closure for run `m3a-c1-6df5432d618c`; merge into `buildwithAgent` only
+after the corrective candidate passes and the operator authorizes integration. Do not resume the
+terminal M3A run `m3a-d2c0cc48b6aa`.

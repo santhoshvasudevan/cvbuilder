@@ -73,6 +73,10 @@ class MemorySourceDocumentAdmin(admin.ModelAdmin):
         "ingested_at",
     )
 
+    def has_delete_permission(self, request, obj=None):
+        # AUDIT-002: source-document admin cannot delete provenance rows.
+        return False
+
 
 @admin.register(MemoryClaim)
 class MemoryClaimAdmin(admin.ModelAdmin):

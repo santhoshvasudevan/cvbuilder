@@ -1,10 +1,12 @@
-"""Deterministic HARD_INTEGRITY checks for StaticResumeProfile / ExperienceSlot (V2-D026)."""
+"""Deterministic HARD_INTEGRITY checks (V2-D026) including provenance immutability (FACT-002)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from candidate_memory.models import ExperienceSlot, StaticResumeProfile
+if TYPE_CHECKING:
+    from candidate_memory.models import ExperienceSlot, StaticResumeProfile
 
 REQUIRED_ACTIVE_PRIMARY_SEQUENCES = (1, 2, 3)
 STATIC_METADATA_FIELDS = (
@@ -30,7 +32,33 @@ class HardIntegrityError(Exception):
         super().__init__("; ".join(f.message for f in findings))
 
 
+def provenance_immutability_findings(
+    *,
+    model_label: str,
+    operation: str,
+) -> list[IntegrityFinding]:
+    """Fail-closed findings for post-creation provenance mutation or deletion (AUDIT-002)."""
+    return [
+        IntegrityFinding(
+            code="PROVENANCE_IMMUTABLE",
+            message=(
+                f"{model_label} provenance is append-only after creation; "
+                f"rejected {operation}."
+            ),
+        )
+    ]
+
+
+def reject_provenance_mutation(*, model_label: str, operation: str) -> None:
+    """Raise HardIntegrityError for forbidden provenance write/delete paths."""
+    raise HardIntegrityError(
+        provenance_immutability_findings(model_label=model_label, operation=operation)
+    )
+
+
 def active_primary_slots(profile: StaticResumeProfile):
+    from candidate_memory.models import ExperienceSlot
+
     return ExperienceSlot.objects.filter(
         static_resume_profile=profile,
         is_primary=True,
