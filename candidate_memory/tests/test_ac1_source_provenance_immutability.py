@@ -108,3 +108,54 @@ class SourceProvenanceImmutabilityTests(TestCase):
         admin = MemorySourceDocumentAdmin(MemorySourceDocument, AdminSite())
         self.assertFalse(admin.has_delete_permission(request))
         self.assertFalse(admin.has_delete_permission(request, obj=self.document))
+
+    def test_source_document_base_manager_rejects_update_and_delete(self):
+        """AUDIT-001: _base_manager must use ImmutableProvenanceQuerySet (no bypass)."""
+        from candidate_memory.models import ImmutableProvenanceQuerySet
+
+        self.assertIsInstance(
+            MemorySourceDocument._base_manager.get_queryset(),
+            ImmutableProvenanceQuerySet,
+        )
+        with self.assertRaises(HardIntegrityError) as ctx_update:
+            MemorySourceDocument._base_manager.filter(pk=self.document.pk).update(
+                content_text="base-manager bypass"
+            )
+        self.assertTrue(
+            any(f.code == "PROVENANCE_IMMUTABLE" for f in ctx_update.exception.findings)
+        )
+        with self.assertRaises(HardIntegrityError) as ctx_delete:
+            MemorySourceDocument._base_manager.filter(pk=self.document.pk).delete()
+        self.assertTrue(
+            any(f.code == "PROVENANCE_IMMUTABLE" for f in ctx_delete.exception.findings)
+        )
+        self.document.refresh_from_db()
+        self.assertTrue(MemorySourceDocument.objects.filter(pk=self.document.pk).exists())
+        self.assertEqual(self.document.content_text, "Original immutable source content.")
+        self.assertEqual(self.document.content_sha256, "a" * 64)
+        self.assertEqual(self.document.source_path, "fixtures/ac1_source.md")
+
+    def test_claim_support_base_manager_rejects_update_and_delete(self):
+        """AUDIT-001: _base_manager must use ImmutableProvenanceQuerySet (no bypass)."""
+        from candidate_memory.models import ImmutableProvenanceQuerySet
+
+        self.assertIsInstance(
+            MemoryClaimSupport._base_manager.get_queryset(),
+            ImmutableProvenanceQuerySet,
+        )
+        with self.assertRaises(HardIntegrityError) as ctx_update:
+            MemoryClaimSupport._base_manager.filter(pk=self.support.pk).update(
+                excerpt="base-manager bypass"
+            )
+        self.assertTrue(
+            any(f.code == "PROVENANCE_IMMUTABLE" for f in ctx_update.exception.findings)
+        )
+        with self.assertRaises(HardIntegrityError) as ctx_delete:
+            MemoryClaimSupport._base_manager.filter(pk=self.support.pk).delete()
+        self.assertTrue(
+            any(f.code == "PROVENANCE_IMMUTABLE" for f in ctx_delete.exception.findings)
+        )
+        self.support.refresh_from_db()
+        self.assertTrue(MemoryClaimSupport.objects.filter(pk=self.support.pk).exists())
+        self.assertEqual(self.support.excerpt, "Example engagement claim")
+        self.assertEqual(self.support.source_document_id, self.document.pk)

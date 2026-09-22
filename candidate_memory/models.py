@@ -87,6 +87,8 @@ class MemorySourceDocument(ImmutableProvenanceMixin, models.Model):
     objects = ImmutableProvenanceManager()
 
     class Meta:
+        # AUDIT-001: use the immutable manager for related/_base_manager paths too.
+        base_manager_name = "objects"
         ordering = ["precedence_rank", "id"]
         constraints = [
             models.UniqueConstraint(
@@ -168,6 +170,8 @@ class MemoryClaimSupport(ImmutableProvenanceMixin, models.Model):
     objects = ImmutableProvenanceManager()
 
     class Meta:
+        # AUDIT-001: use the immutable manager for related/_base_manager paths too.
+        base_manager_name = "objects"
         ordering = ["id"]
 
     def __str__(self) -> str:

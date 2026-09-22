@@ -22,7 +22,8 @@ root file for an implementation/audit worktree copy.
 
 ## Current Task / Live Run
 
-- Durable run `m3a-c1-6df5432d618c` is the active corrective slice (`IMPLEMENTING`).
+- Durable run `m3a-c1-6df5432d618c` is the active corrective slice (`CORRECTING`; AUDIT-001
+  base-manager hardening).
 - The prior durable run `m3a-d2c0cc48b6aa` remains in terminal `OPERATOR_ESCALATION`; it must not be
   resumed, advanced, or modified. Its candidate branch and three worktrees remain preserved.
 - M3A is not yet accepted or merged into `buildwithAgent`; operator alone decides fast-forward after
@@ -54,7 +55,9 @@ root file for an implementation/audit worktree copy.
   post-creation instance and QuerySet update/delete via `HardIntegrityError` /
   `IntegrityFinding(code=PROVENANCE_IMMUTABLE)`; source-document admin has no delete permission;
   claim-support `source_document` FK uses `PROTECT` (migration `0002_protect_claim_support_source`)
-  so source deletion cannot cascade-destroy evidence.
+  so source deletion cannot cascade-destroy evidence. **AUDIT-001 correction:** both models set
+  `Meta.base_manager_name = "objects"` so `_base_manager` returns `ImmutableProvenanceQuerySet`
+  and cannot bypass immutability (migration `0003_alter_provenance_base_manager_name`).
 - **AC-2 / CLAUDE-M3A-002 (this worktree):** generic same-engagement start/end date contradiction
   detection retains unresolved `MemoryConflict` rows (including known Maruti start-date
   `engagement_start_date:maruti_suzuki`); non-date contradiction categories remain deferred.
