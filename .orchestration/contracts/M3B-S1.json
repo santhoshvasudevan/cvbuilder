@@ -7,7 +7,7 @@
   "product_baseline_sha": "TEMPLATETEMPLATETEMPLATETEMPLATETEMPLATE",
   "orchestration_tooling_sha": "TEMPLATE",
   "future_implementation_base_sha": "TEMPLATE",
-  "objective": "Create the candidate_context Django app (V2-D030) as a distinct app from candidate_memory. Add CandidateContextSnapshot: an immutable-per-run snapshot model referencing the StageRun that produced it (StageIdentifier.CANDIDATE_CONTEXT_BUILD from job_applications.models — a deterministic stage that never receives a StageModelAssignment and has no provider/model FK). Resolve the interim target-job input using ONLY JobApplication.employer and JobApplication.job_title (no job_intake / AJ dependency — that app does not exist yet and is M4 scope; this is a deliberate interim choice recorded as V2-D046, not a workaround). Implement the first of the five context buckets, direct_match: deterministic (non-LLM) retrieval of MemoryClaim rows whose category is in {CAREER_HISTORY, SKILL, ACHIEVEMENT} and whose text/tags show keyword/lexical overlap with the target job's employer/job_title signal, with a bounded fail-closed selection budget (simple deterministic scoring only — no BM25 or ranking library; matches CTX-001 minimum-sufficient context, not exhaustive retrieval). CandidateContextSnapshot schema must include fields/placeholders for all five buckets (direct_match, differentiators, career_narrative, foundations, gaps_constraints per docs/ARCHITECTURE.md §7 / V2-D003); only direct_match is populated by this slice — empty/placeholder values for the other four are expected. Governed by CTX-001, CTX-002, CTX-006, V2-D003, V2-D025, V2-D030, V2-D046, docs/ARCHITECTURE.md §§3–5/7, docs/IMPLEMENTATION_PLAN.md M3B, and docs/TEST_STRATEGY.md Candidate context.",
+  "objective": "Create the candidate_context Django app (V2-D030) as a distinct app from candidate_memory. Add CandidateContextSnapshot: an immutable-per-run snapshot model referencing the StageRun that produced it (StageIdentifier.CANDIDATE_CONTEXT_BUILD from job_applications.models — a deterministic stage that never receives a StageModelAssignment and has no provider/model FK). Resolve the interim target-job input using ONLY JobApplication.employer and JobApplication.job_title (no job_intake / AJ dependency — that app does not exist yet and is M4 scope; this is a deliberate interim choice recorded as V2-D047, not a workaround). Implement the first of the five context buckets, direct_match: deterministic (non-LLM) retrieval of MemoryClaim rows whose category is in {CAREER_HISTORY, SKILL, ACHIEVEMENT} and whose text/tags show keyword/lexical overlap with the target job's employer/job_title signal, with a bounded fail-closed selection budget (simple deterministic scoring only — no BM25 or ranking library; matches CTX-001 minimum-sufficient context, not exhaustive retrieval). CandidateContextSnapshot schema must include fields/placeholders for all five buckets (direct_match, differentiators, career_narrative, foundations, gaps_constraints per docs/ARCHITECTURE.md §7 / V2-D003); only direct_match is populated by this slice — empty/placeholder values for the other four are expected. Governed by CTX-001, CTX-002, CTX-006, V2-D003, V2-D025, V2-D030, V2-D047, docs/ARCHITECTURE.md §§3–5/7, docs/IMPLEMENTATION_PLAN.md M3B, and docs/TEST_STRATEGY.md Candidate context.",
   "requirement_ids": [
     "CTX-001",
     "CTX-002",
@@ -16,7 +16,7 @@
   "governing_decision_ids": [
     "V2-D030",
     "V2-D025",
-    "V2-D046"
+    "V2-D047"
   ],
   "dependencies": [
     "Integrated M3A candidate_memory baseline present: MemoryClaim (categories including CAREER_HISTORY/SKILL/ACHIEVEMENT, text + tags), CareerEngagement, CandidateProfile, StaticResumeProfile/ExperienceSlot in candidate_memory/models.py",
@@ -34,10 +34,10 @@
     "Scaffold candidate_context Django app; register only in config/settings.py INSTALLED_APPS",
     "CandidateContextSnapshot model: FK to the producing StageRun (stage=CANDIDATE_CONTEXT_BUILD); schema fields/placeholders for all five buckets; only direct_match populated in this slice",
     "Immutable-after-creation snapshot semantics (CTX-006): no update path; a re-run creates a new snapshot row, never mutates an existing one",
-    "Interim target-job signal resolution from JobApplication.employer + JobApplication.job_title only (V2-D046)",
+    "Interim target-job signal resolution from JobApplication.employer + JobApplication.job_title only (V2-D047)",
     "Deterministic direct_match retrieval over MemoryClaim rows in categories CAREER_HISTORY, SKILL, ACHIEVEMENT via keyword/lexical overlap with employer/job_title; bounded fail-closed selection budget; simple deterministic scoring only",
     "Read-only consumption of candidate_memory (never write MemoryClaim/CareerEngagement/CandidateProfile/StaticResumeProfile/ExperienceSlot or any candidate_memory table)",
-    "Author new docs/DECISIONS.md entry V2-D046 for the interim employer/job_title target-job signal; update docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md to reflect implemented slice state"
+    "Author new docs/DECISIONS.md entry V2-D047 for the interim employer/job_title target-job signal; update docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md to reflect implemented slice state"
   ],
   "out_of_scope": [
     "Buckets differentiators, career_narrative, foundations, gaps_constraints population logic (M3B-S2 through M3B-S4)",
@@ -86,7 +86,7 @@
     "AC-4/CTX-001 sensitivity + filtering: changing which synthetic JobApplication fixture is used changes the direct_match bucket's selected claims (job-signal sensitivity without AJ). In addition, required negative/bound cases must pass: (a) a claim that does NOT lexically match the job signal is excluded even when its category is in {CAREER_HISTORY, SKILL, ACHIEVEMENT}; (b) a claim that is NOT in an allowed category is excluded even when its text/tags would otherwise match the job signal; (c) a synthetic profile with more matching claims than the selection budget still respects the cap and does not return everything unfiltered; (d) repeated builds with identical inputs yield identical ordered selections",
     "AC-5/CTX-002 schema: CandidateContextSnapshot exposes fields/placeholders for all five buckets; only direct_match is populated; the other four remain empty/placeholder values as expected for this slice",
     "AC-6/deterministic stage: producing StageRun uses StageIdentifier.CANDIDATE_CONTEXT_BUILD with null provider/model FKs; no StageModelAssignment and no live provider call",
-    "AC-7/V2-D046: docs/DECISIONS.md gains new entry V2-D046 recording interim JobApplication.employer/job_title target-job signal (consistent with docs/ARCHITECTURE.md §7 separable candidate_memory vs current-job/AJ input classes; richer AJ input lands in M4 without redesign); docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md reflect implemented slice state for CTX-001/CTX-002/CTX-006",
+    "AC-7/V2-D047: docs/DECISIONS.md gains new entry V2-D047 recording interim JobApplication.employer/job_title target-job signal (consistent with docs/ARCHITECTURE.md §7 separable candidate_memory vs current-job/AJ input classes; richer AJ input lands in M4 without redesign); docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md reflect implemented slice state for CTX-001/CTX-002/CTX-006",
     "candidate_context tests and make verify pass; config/settings.py change is INSTALLED_APPS registration only"
   ],
   "required_tests": [
@@ -100,7 +100,7 @@
     "make verify"
   ],
   "required_documentation_updates": [
-    "docs/DECISIONS.md — author NEW entry V2-D046 (next available after current highest V2-D045) recording that M3B candidate_context consumes JobApplication.employer/job_title directly as the interim target-job retrieval signal rather than waiting on M4 JobRequirement/RecruiterDecisionModel; cite consistency with docs/ARCHITECTURE.md §7 wording that CandidateContextSnapshot consumes candidate_memory and the current job/AJ artifacts as two separable input classes; when M4 lands, candidate_context gains richer AJ-artifact input without redesign",
+    "docs/DECISIONS.md — author NEW entry V2-D047 (next available after current highest V2-D045) recording that M3B candidate_context consumes JobApplication.employer/job_title directly as the interim target-job retrieval signal rather than waiting on M4 JobRequirement/RecruiterDecisionModel; cite consistency with docs/ARCHITECTURE.md §7 wording that CandidateContextSnapshot consumes candidate_memory and the current job/AJ artifacts as two separable input classes; when M4 lands, candidate_context gains richer AJ-artifact input without redesign",
     "docs/CURRENT_STATE.md — update only once this slice is implemented to reflect real candidate_context / CandidateContextSnapshot / direct_match state (not before)",
     "docs/REQUIREMENT_TRACEABILITY.md — update CTX-001, CTX-002, and CTX-006 rows to reflect this slice's implemented evidence once code lands"
   ],
