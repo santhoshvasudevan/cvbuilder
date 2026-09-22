@@ -29,6 +29,7 @@ from .invocation_metrics import InvocationMetrics
 from .schemas import (
     SchemaError,
     validate_audit_response,
+    validate_closure_narrative,
     validate_closure_response,
     validate_implementer_narrative,
     validate_implementer_response,
@@ -1441,6 +1442,352 @@ class OrchestrationController:
         }
         return validate_implementer_response(assembled)
 
+    @staticmethod
+    def _raw_closure_payload(result: AdapterResult) -> dict | None:
+        """Prefer tolerant extraction from raw final_message; fall back to adapter handoff dict."""
+        extracted = ProcessAdapter._extract_last_json_object(result.final_message)
+        if extracted is not None:
+            return extracted
+        if isinstance(result.handoff, dict):
+            return result.handoff
+        return None
+
+    @staticmethod
+    def _derive_closed_findings(paths: RunPaths, latest_audit: dict) -> list[str]:
+        """Union of explicitly CLOSED findings and OPEN findings absent from the latest audit."""
+        closed: set[str] = set()
+        previously_open: set[str] = set()
+        for path in OrchestrationController.list_pipeline_audit_handoffs(paths):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            findings = payload.get("findings")
+            if not isinstance(findings, list):
+                continue
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                finding_id = finding.get("finding_id")
+                status = finding.get("status")
+                if not isinstance(finding_id, str) or not finding_id:
+                    continue
+                if status == "CLOSED":
+                    closed.add(finding_id)
+                elif status == "OPEN":
+                    previously_open.add(finding_id)
+        latest_ids = {
+            finding["finding_id"]
+            for finding in latest_audit.get("findings", [])
+            if isinstance(finding, dict) and isinstance(finding.get("finding_id"), str)
+        }
+        closed.update(finding_id for finding_id in previously_open if finding_id not in latest_ids)
+        return sorted(closed)
+
+    def _closure_changed_files(
+        self,
+        *,
+        paths: RunPaths,
+        worktree: Path,
+        base_sha: str,
+        result_sha: str,
+    ) -> list[str]:
+        if paths.evidence.exists():
+            try:
+                evidence = json.loads(paths.evidence.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                evidence = None
+            if isinstance(evidence, dict):
+                changed = evidence.get("changed_files")
+                if isinstance(changed, (list, tuple)) and all(isinstance(item, str) for item in changed):
+                    return list(changed)
+        try:
+            output = self.repository.run(
+                "diff", "--name-only", f"{base_sha}..{result_sha}", cwd=worktree
+            )
+        except GitSafetyError:
+            return []
+        return [line for line in str(output).splitlines() if line]
+
+    def _closure_deterministic_verification_results(
+        self,
+        *,
+        paths: RunPaths,
+        state: RunState,
+        unresolved_findings: list[str],
+    ) -> list[str]:
+        lines = [
+            (
+                f"Candidate {state.result_sha} verified as descendant of base "
+                f"{state.base_sha}"
+            ),
+            (
+                f"Latest audit verdict: PASS with {len(unresolved_findings)} "
+                "unresolved findings"
+            ),
+        ]
+        observed: list[tuple[str, int]] = []
+        if paths.evidence.exists():
+            try:
+                evidence = json.loads(paths.evidence.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                evidence = None
+            if isinstance(evidence, dict):
+                for item in evidence.get("test_commands") or []:
+                    if (
+                        isinstance(item, (list, tuple))
+                        and len(item) == 2
+                        and isinstance(item[0], str)
+                        and isinstance(item[1], int)
+                    ):
+                        observed.append((item[0], item[1]))
+                    elif (
+                        isinstance(item, dict)
+                        and isinstance(item.get("command"), str)
+                        and isinstance(item.get("exit_code"), int)
+                    ):
+                        observed.append((item["command"], item["exit_code"]))
+        if not observed:
+            try:
+                handoff = json.loads(
+                    self._implementer_handoff_path(state, paths).read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError, ControllerError):
+                handoff = None
+            if isinstance(handoff, dict):
+                for item in handoff.get("test_commands") or []:
+                    if (
+                        isinstance(item, dict)
+                        and isinstance(item.get("command"), str)
+                        and isinstance(item.get("exit_code"), int)
+                    ):
+                        observed.append((item["command"], item["exit_code"]))
+        for command, exit_code in observed:
+            lines.append(f"Required test `{command}` exit_code={exit_code}")
+        return lines
+
+    def _closure_prompt(
+        self,
+        *,
+        contract: dict,
+        latest_audit: dict,
+        closed_findings: list[str],
+        unresolved_findings: list[str],
+        changed_files: list[str],
+    ) -> str:
+        objective = str(contract.get("objective") or "")
+        if len(objective) > 800:
+            objective = objective[:800] + "…"
+        compact_findings = [
+            {
+                "finding_id": finding["finding_id"],
+                "severity": finding["severity"],
+                "status": finding["status"],
+            }
+            for finding in latest_audit.get("findings", [])
+            if isinstance(finding, dict)
+        ]
+        context = {
+            "milestone": contract.get("milestone"),
+            "slice": contract.get("slice"),
+            "objective": objective,
+            "acceptance_criteria": list(contract.get("acceptance_criteria") or []),
+            "required_documentation_updates": list(
+                contract.get("required_documentation_updates") or []
+            ),
+            "latest_audit_verdict": latest_audit.get("verdict"),
+            "latest_audit_summary": latest_audit.get("summary") or "",
+            "latest_audit_findings_compact": compact_findings,
+            "closed_findings": closed_findings,
+            "unresolved_findings": unresolved_findings,
+            "changed_files": changed_files,
+        }
+        return (
+            "Evaluate whether this PASS-audited candidate is ready for operator merge. "
+            "Do not merge or push. Return ONLY the narrative JSON object with these fields: "
+            "schema_version (1), merge_recommendation (MERGE, DO_NOT_MERGE, or OPERATOR_REVIEW), "
+            "documentation_status, residual_risks, and summary. The controller independently "
+            "derives base_sha, final_sha, accepted_requirement_ids, closed_findings, "
+            "unresolved_findings, deterministic_verification_results, and "
+            "no_merge_or_push_confirmed — do not attempt to restate those derived fields. "
+            "The latest audit verdict is already known PASS with zero OPEN findings; report "
+            "your actual merge judgment without re-auditing the diff.\n\n"
+            + json.dumps(context, indent=2)
+        )
+
+    def _validate_or_repair_closure_narrative(
+        self,
+        *,
+        adapter: AgentAdapter,
+        request: AdapterRequest,
+        result: AdapterResult,
+        state: RunState,
+        events: EventLog,
+        event_callback=None,
+    ) -> tuple[dict, dict, AdapterResult, dict | None]:
+        """Validate closure narrative JSON; allow one same-session repair of format only.
+
+        Returns (narrative, assembled_raw, result, original_raw_if_repaired).
+        """
+        raw = self._raw_closure_payload(result)
+        try:
+            if raw is None:
+                raise SchemaError("closure returned no JSON object")
+            return validate_closure_narrative(raw), raw, result, None
+        except SchemaError as exc:
+            violation = str(exc)
+            if not result.session_id:
+                raise SchemaError(
+                    f"closure narrative invalid and no session available for repair: {violation}"
+                ) from exc
+
+        original_recommendation = None
+        if isinstance(raw, dict):
+            candidate = raw.get("merge_recommendation")
+            if candidate in {"MERGE", "DO_NOT_MERGE", "OPERATOR_REVIEW"}:
+                original_recommendation = candidate
+
+        repair_prompt = (
+            "Your previous closure turn returned a narrative JSON handoff the controller could "
+            f"not validate: {violation}\n\n"
+            "Return ONLY the narrative JSON object with these fields: schema_version (1), "
+            "merge_recommendation (MERGE, DO_NOT_MERGE, or OPERATOR_REVIEW), "
+            "documentation_status, residual_risks, and summary. Report your actual merge "
+            "judgment from the previous turn — do not change that judgment, only fix the JSON "
+            "formatting/shape so it validates. Do not re-analyze the candidate, do not re-read "
+            "the diff, and do not re-run tests. The latest audit verdict is already known PASS. "
+            "The controller derives SHAs, accepted_requirement_ids, closed_findings, "
+            "unresolved_findings, and verification lines itself. A single json code fence is "
+            "accepted even with short prose around it. Return only the corrected narrative JSON."
+        )
+        repair_request = dataclasses.replace(
+            request,
+            prompt=repair_prompt,
+            output_schema=self.repository_root
+            / "tools"
+            / "dev_orchestrator"
+            / "schemas"
+            / "closure-narrative.schema.json",
+            session_id=result.session_id,
+            allow_write=False,
+            safety_verified=False,
+            packet_bytes=len(repair_prompt.encode("utf-8")),
+            retry_reason="closure_narrative_repair",
+        )
+        events.emit(
+            run_id=state.run_id,
+            role="ORCHA",
+            state=state.state,
+            event="closure_narrative_repair",
+            message="Requesting one same-session repair of closure narrative JSON",
+            violation=violation,
+        )
+        repaired = self._invoke(
+            adapter,
+            repair_request,
+            state=state,
+            events=events,
+            resume=True,
+            event_callback=event_callback,
+        )
+        if repaired.exit_code not in (0, None) or repaired.status != "COMPLETED":
+            raise SchemaError(
+                "closure narrative repair invocation failed: "
+                + (repaired.error or repaired.status)
+            )
+        raw_repaired = self._raw_closure_payload(repaired)
+        try:
+            if raw_repaired is None:
+                raise SchemaError("closure repair returned no JSON object")
+            narrative = validate_closure_narrative(raw_repaired)
+        except SchemaError as exc:
+            raise SchemaError(
+                "closure narrative remained invalid after one repair attempt: " + str(exc)
+            ) from exc
+        if (
+            original_recommendation is not None
+            and narrative["merge_recommendation"] != original_recommendation
+        ):
+            events.emit(
+                run_id=state.run_id,
+                role="ORCHA",
+                state=state.state,
+                event="closure_narrative_repair_recommendation_drift",
+                message=(
+                    "Repaired closure narrative merge_recommendation differs from the "
+                    "original raw payload"
+                ),
+                original_recommendation=original_recommendation,
+                repaired_recommendation=narrative["merge_recommendation"],
+            )
+        original_raw = raw if isinstance(raw, dict) else None
+        return narrative, raw_repaired, repaired, original_raw
+
+    def _assemble_closure_handoff(
+        self,
+        *,
+        narrative: dict,
+        raw_payload: dict,
+        state: RunState,
+        contract: dict,
+        paths: RunPaths,
+        latest_audit: dict,
+        events: EventLog,
+        original_raw_payload: dict | None = None,
+    ) -> dict:
+        """Build full closure-response from narrative + controller-derived fields."""
+        closed_findings = self._derive_closed_findings(paths, latest_audit)
+        unresolved_findings = [
+            finding["finding_id"]
+            for finding in latest_audit.get("findings", [])
+            if finding.get("status") != "CLOSED"
+        ]
+        deterministic_verification_results = self._closure_deterministic_verification_results(
+            paths=paths,
+            state=state,
+            unresolved_findings=unresolved_findings,
+        )
+        derived = {
+            "schema_version": 1,
+            "base_sha": state.base_sha,
+            "final_sha": state.result_sha,
+            "accepted_requirement_ids": list(contract["requirement_ids"]),
+            "closed_findings": closed_findings,
+            "unresolved_findings": unresolved_findings,
+            "no_merge_or_push_confirmed": True,
+            "deterministic_verification_results": deterministic_verification_results,
+        }
+        payloads_to_check: list[dict] = [raw_payload]
+        if original_raw_payload is not None and original_raw_payload is not raw_payload:
+            payloads_to_check.append(original_raw_payload)
+        for source in payloads_to_check:
+            for field, expected in derived.items():
+                if field not in source:
+                    continue
+                claimed = source[field]
+                if claimed != expected:
+                    events.emit(
+                        run_id=state.run_id,
+                        role="ORCHA",
+                        state=state.state,
+                        event="closure_derived_field_mismatch",
+                        message=(
+                            "Closure-supplied derived-looking field disagreed with "
+                            "controller derivation"
+                        ),
+                        field=field,
+                        claimed_value=claimed,
+                        derived_value=expected,
+                    )
+        assembled = {
+            **derived,
+            "residual_risks": list(narrative["residual_risks"]),
+            "documentation_status": narrative["documentation_status"],
+            "merge_recommendation": narrative["merge_recommendation"],
+            "summary": narrative["summary"],
+        }
+        return validate_closure_response(assembled)
+
     def _save_handoff(self, paths: RunPaths, name: str, handoff: dict) -> None:
         _atomic_json(paths.handoffs / name, handoff)
 
@@ -2405,14 +2752,53 @@ class OrchestrationController:
                 resume = True
 
             elif current == RunStateName.CLOSURE_REVIEW:
+                if latest_audit is None:
+                    return self._fail_agent(
+                        state, store, events, "ORCHA", "saved audit handoff is unavailable"
+                    )
+                findings = latest_audit.get("findings") or []
+                if (
+                    latest_audit.get("base_sha") != state.base_sha
+                    or latest_audit.get("candidate_sha") != state.result_sha
+                    or latest_audit.get("verdict") != "PASS"
+                    or any(
+                        not isinstance(finding, dict) or finding.get("status") != "CLOSED"
+                        for finding in findings
+                    )
+                ):
+                    return self._fail_agent(
+                        state,
+                        store,
+                        events,
+                        "ORCHA",
+                        "saved audit no longer matches current run state",
+                    )
+                closed_findings = self._derive_closed_findings(paths, latest_audit)
+                unresolved_findings = [
+                    finding["finding_id"]
+                    for finding in findings
+                    if finding.get("status") != "CLOSED"
+                ]
+                worktree = audit_worktree or implementation_worktree
+                changed_files = self._closure_changed_files(
+                    paths=paths,
+                    worktree=worktree,
+                    base_sha=state.base_sha,
+                    result_sha=state.result_sha,
+                )
                 try:
                     closure_request = self._request(
                         "orcha_closure",
-                        "Evaluate deterministic evidence and audit; do not merge or push.\n\n"
-                        + json.dumps(latest_audit or {}, indent=2),
-                        audit_worktree or implementation_worktree,
+                        self._closure_prompt(
+                            contract=contract,
+                            latest_audit=latest_audit,
+                            closed_findings=closed_findings,
+                            unresolved_findings=unresolved_findings,
+                            changed_files=changed_files,
+                        ),
+                        worktree,
                         paths,
-                        "closure-response.schema.json",
+                        "closure-narrative.schema.json",
                     )
                 except ControllerError as exc:
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
@@ -2423,20 +2809,47 @@ class OrchestrationController:
                     events=events,
                     event_callback=callback("orcha_closure"),
                 )
-                if not closure.succeeded:
+                if closure.timed_out or closure.status == "TIMEOUT":
                     return self._fail_agent(state, store, events, "ORCHA", closure.error)
+                if closure.exit_code not in (0, None):
+                    return self._fail_agent(state, store, events, "ORCHA", closure.error)
+                if closure.status != "COMPLETED":
+                    return self._fail_agent(
+                        state,
+                        store,
+                        events,
+                        "ORCHA",
+                        closure.error or f"closure status {closure.status}",
+                    )
                 try:
-                    payload = validate_closure_response(closure.handoff or {})
+                    (
+                        narrative,
+                        raw_payload,
+                        closure,
+                        original_raw_payload,
+                    ) = self._validate_or_repair_closure_narrative(
+                        adapter=closure_agent,
+                        request=closure_request,
+                        result=closure,
+                        state=state,
+                        events=events,
+                        event_callback=callback("orcha_closure"),
+                    )
+                    payload = self._assemble_closure_handoff(
+                        narrative=narrative,
+                        raw_payload=raw_payload,
+                        state=state,
+                        contract=contract,
+                        paths=paths,
+                        latest_audit=latest_audit,
+                        events=events,
+                        original_raw_payload=original_raw_payload,
+                    )
                 except SchemaError as exc:
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
                 self._save_handoff(paths, "closure.json", payload)
-                if (
-                    payload["base_sha"] != state.base_sha
-                    or payload["final_sha"] != state.result_sha
-                    or not set(contract["requirement_ids"]).issubset(payload["accepted_requirement_ids"])
-                    or payload["unresolved_findings"]
-                    or payload["merge_recommendation"] != "MERGE"
-                ):
+                # Derived fields are controller-authored; only merge judgment can block completion.
+                if payload["merge_recommendation"] != "MERGE":
                     return self._fail_agent(
                         state, store, events, "ORCHA", "closure response does not support completion"
                     )

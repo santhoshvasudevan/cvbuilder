@@ -29,6 +29,8 @@ from tools.dev_orchestrator.redaction import REDACTED, redact, redact_text
 from tools.dev_orchestrator.schemas import (
     SchemaError,
     validate_audit_response,
+    validate_closure_narrative,
+    validate_closure_response,
     validate_implementer_narrative,
     validate_implementer_response,
     validate_operator_decision,
@@ -149,6 +151,18 @@ def closure() -> dict:
         "no_merge_or_push_confirmed": True,
         "summary": "ready for operator",
     }
+
+
+def closure_narrative(merge_recommendation: str = "MERGE", **overrides) -> dict:
+    payload = {
+        "schema_version": 1,
+        "merge_recommendation": merge_recommendation,
+        "documentation_status": "updated",
+        "residual_risks": [],
+        "summary": "ready for operator",
+    }
+    payload.update(overrides)
+    return payload
 
 
 class FakeRepository:
@@ -917,7 +931,247 @@ class ControllerTests(unittest.TestCase):
         resumed = controller.execute(run_id, resume=True)
 
         self.assertEqual(resumed.state, "COMPLETED")
-        self.assertIn('"verdict": "PASS"', adapters["orcha_closure"].requests[0].prompt)
+        self.assertIn('"latest_audit_verdict": "PASS"', adapters["orcha_closure"].requests[0].prompt)
+        self.assertIn(
+            "closure-narrative.schema.json",
+            str(adapters["orcha_closure"].requests[0].output_schema),
+        )
+
+    def test_closure_narrative_omitting_requirement_ids_still_completes(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[closure_narrative()],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.handoffs / "audit-00.json", audit())
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        validate_closure_response(saved)
+        self.assertEqual(saved["accepted_requirement_ids"], M3A_REQUIREMENTS)
+        self.assertEqual(saved["base_sha"], BASE)
+        self.assertEqual(saved["final_sha"], RESULT)
+        self.assertIn(
+            "closure-narrative.schema.json",
+            str(adapters["orcha_closure"].requests[0].output_schema),
+        )
+        self.assertIn(
+            "do not attempt to restate those derived fields",
+            adapters["orcha_closure"].requests[0].prompt,
+        )
+        self.assertNotIn(
+            '"accepted_requirement_ids"',
+            adapters["orcha_closure"].requests[0].prompt.split("\n\n{", 1)[-1],
+        )
+
+    def test_closure_non_merge_recommendation_blocks_completion(self):
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[closure_narrative(merge_recommendation="DO_NOT_MERGE")],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.handoffs / "audit-00.json", audit())
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+        self.assertIn("closure response does not support completion", resumed.last_error)
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["merge_recommendation"], "DO_NOT_MERGE")
+        self.assertEqual(saved["final_sha"], RESULT)
+
+    def test_closure_derived_field_mismatch_is_recorded_without_failing(self):
+        raw = closure_narrative(final_sha="0" * 40, accepted_requirement_ids=["PARAPHRASED-001"])
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[raw],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.handoffs / "audit-00.json", audit())
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["final_sha"], RESULT)
+        self.assertEqual(saved["accepted_requirement_ids"], M3A_REQUIREMENTS)
+        events = [json.loads(line) for line in paths.events.read_text().splitlines()]
+        mismatches = [item for item in events if item["event"] == "closure_derived_field_mismatch"]
+        self.assertTrue(mismatches)
+        fields = {item["data"]["field"] for item in mismatches}
+        self.assertIn("final_sha", fields)
+        self.assertIn("accepted_requirement_ids", fields)
+
+    def test_closure_json_on_disk_shape_unchanged(self):
+        old_style = closure()
+        validate_closure_response(old_style)
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[closure_narrative()],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.handoffs / "audit-00.json", audit())
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        validate_closure_response(saved)
+        self.assertEqual(set(saved), set(old_style))
+        for key, value in saved.items():
+            self.assertEqual(type(value), type(old_style[key]), key)
+
+    def test_closure_closed_findings_reconstructs_from_audit_history(self):
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[closure_narrative()],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        state.correction_cycles = 1
+        StateStore(paths.state).save(state)
+        open_audit = audit(
+            verdict="CORRECTION_REQUIRED",
+            findings=[finding("AUDIT-001", status="OPEN")],
+        )
+        pass_audit = audit(verdict="PASS", findings=[])
+        _atomic_json(paths.handoffs / "audit-00.json", open_audit)
+        _atomic_json(paths.handoffs / "audit-01.json", pass_audit)
+        (paths.worktrees / "audit-01").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-01")
+
+        derived = controller._derive_closed_findings(paths, pass_audit)
+        self.assertEqual(derived, ["AUDIT-001"])
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["closed_findings"], ["AUDIT-001"])
+        self.assertEqual(saved["unresolved_findings"], [])
+
+    def test_closure_review_rejects_audit_that_no_longer_matches_run_state(self):
+        controller, adapters = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[closure_narrative()],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        mismatched = audit()
+        mismatched["candidate_sha"] = "c" * 40
+        _atomic_json(paths.handoffs / "audit-00.json", mismatched)
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+        self.assertIn("saved audit no longer matches current run state", resumed.last_error)
+        self.assertEqual(len(adapters["orcha_closure"].requests), 0)
+        self.assertFalse((paths.handoffs / "closure.json").exists())
+
+    def test_closure_narrative_repair_recommendation_drift_and_original_mismatch(self):
+        invalid_original = {
+            "schema_version": 1,
+            "merge_recommendation": "DO_NOT_MERGE",
+            "final_sha": "0" * 40,
+            # missing documentation_status/residual_risks/summary → forces repair
+        }
+        repaired = closure_narrative(
+            merge_recommendation="MERGE",
+            documentation_status="updated",
+            residual_risks=[],
+            summary="ready after repair",
+        )
+        controller, adapters = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            closure_responses=[
+                AdapterResult(
+                    status="COMPLETED",
+                    exit_code=0,
+                    session_id="closure-session",
+                    final_message=f"```json\n{json.dumps(invalid_original)}\n```",
+                    handoff=None,
+                ),
+                AdapterResult(
+                    status="COMPLETED",
+                    exit_code=0,
+                    session_id="closure-session",
+                    final_message=f"```json\n{json.dumps(repaired)}\n```",
+                    handoff=None,
+                ),
+            ],
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.CLOSURE_REVIEW)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        _atomic_json(paths.handoffs / "audit-00.json", audit())
+        (paths.worktrees / "audit-00").mkdir(parents=True)
+        self.seed_worktree_current_state(paths.worktrees / "audit-00")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertEqual(len(adapters["orcha_closure"].requests), 2)
+        events = [json.loads(line) for line in paths.events.read_text().splitlines()]
+        drifts = [
+            item
+            for item in events
+            if item["event"] == "closure_narrative_repair_recommendation_drift"
+        ]
+        self.assertEqual(len(drifts), 1)
+        self.assertEqual(drifts[0]["data"]["original_recommendation"], "DO_NOT_MERGE")
+        self.assertEqual(drifts[0]["data"]["repaired_recommendation"], "MERGE")
+        mismatches = [
+            item for item in events if item["event"] == "closure_derived_field_mismatch"
+        ]
+        self.assertTrue(
+            any(item["data"]["field"] == "final_sha" for item in mismatches),
+            "original raw final_sha mismatch must be recorded even after repair",
+        )
+        saved = json.loads((paths.handoffs / "closure.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["final_sha"], RESULT)
+        self.assertEqual(saved["merge_recommendation"], "MERGE")
 
     def test_operator_decision_recovers_same_run_and_resumes_saved_cursor_session(self):
         generated_prompt = (
@@ -2320,11 +2574,38 @@ class ValidationAndSafetyTests(unittest.TestCase):
         )
         self.assertEqual(ProcessAdapter._extract_last_json_object(message), second)
 
+    def test_extract_last_json_object_later_unfenced_beats_earlier_fenced(self):
+        earlier = {
+            "schema_version": 1,
+            "merge_recommendation": "DO_NOT_MERGE",
+            "documentation_status": "stale",
+            "residual_risks": [],
+            "summary": "earlier fenced",
+        }
+        later = {
+            "schema_version": 1,
+            "merge_recommendation": "MERGE",
+            "documentation_status": "updated",
+            "residual_risks": [],
+            "summary": "later unfenced",
+        }
+        message = (
+            f"first draft:\n```json\n{json.dumps(earlier)}\n```\n"
+            f"final judgment follows:\n{json.dumps(later)}\n"
+        )
+        self.assertEqual(ProcessAdapter._extract_last_json_object(message), later)
+
     def test_validate_implementer_narrative_allows_extra_fields(self):
         payload = implementer_narrative(files_changed=["x.py"])
         validated = validate_implementer_narrative(payload)
         self.assertEqual(validated["status"], "IMPLEMENTED")
         self.assertEqual(validated["files_changed"], ["x.py"])
+
+    def test_validate_closure_narrative_allows_extra_fields(self):
+        payload = closure_narrative(final_sha="wrong")
+        validated = validate_closure_narrative(payload)
+        self.assertEqual(validated["merge_recommendation"], "MERGE")
+        self.assertEqual(validated["final_sha"], "wrong")
 
     def test_live_config_enables_exactly_one_reviewer_profile_matching_role(self):
         config = load_config(REPOSITORY_ROOT / ".orchestration/config.yaml")

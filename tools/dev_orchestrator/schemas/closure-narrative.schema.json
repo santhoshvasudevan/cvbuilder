@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "merge_recommendation",
+    "documentation_status",
+    "residual_risks",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "merge_recommendation": {
+      "type": "string",
+      "enum": ["MERGE", "DO_NOT_MERGE", "OPERATOR_REVIEW"]
+    },
+    "documentation_status": {"type": "string"},
+    "residual_risks": {"type": "array", "items": {"type": "string"}},
+    "summary": {"type": "string"}
+  }
+}

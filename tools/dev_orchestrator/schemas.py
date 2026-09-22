@@ -79,6 +79,15 @@ IMPLEMENTER_NARRATIVE_FIELDS = frozenset(
         "decisions_required",
     }
 )
+CLOSURE_NARRATIVE_FIELDS = frozenset(
+    {
+        "schema_version",
+        "merge_recommendation",
+        "documentation_status",
+        "residual_risks",
+        "summary",
+    }
+)
 AUDIT_FIELDS = frozenset(
     {
         "schema_version",
@@ -258,6 +267,23 @@ def validate_implementer_narrative(value: dict[str, Any]) -> dict[str, Any]:
         _string_list(value, key)
     if value["status"] == "QUESTION" and not value["questions"]:
         raise SchemaError("QUESTION requires at least one question")
+    return value
+
+
+def validate_closure_narrative(value: dict[str, Any]) -> dict[str, Any]:
+    """Validate Orcha closure judgment subset; additional properties are allowed and ignored by callers."""
+    if not isinstance(value, dict):
+        raise SchemaError("closure_narrative must be an object")
+    missing = CLOSURE_NARRATIVE_FIELDS - set(value)
+    if missing:
+        raise SchemaError(f"closure_narrative fields invalid: missing={sorted(missing)}")
+    if value.get("schema_version") != 1:
+        raise SchemaError("closure_narrative.schema_version must be 1")
+    if value["merge_recommendation"] not in MERGE_RECOMMENDATIONS:
+        raise SchemaError("invalid closure merge_recommendation")
+    _string(value, "documentation_status")
+    _string(value, "summary")
+    _string_list(value, "residual_risks")
     return value
 
 

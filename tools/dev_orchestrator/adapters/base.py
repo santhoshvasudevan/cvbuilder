@@ -164,10 +164,11 @@ class ProcessAdapter(AgentAdapter):
 
     @staticmethod
     def _extract_last_json_object(final_message: str) -> dict | None:
-        """Tolerant extract: last JSON object in fenced blocks or balanced braces amid prose."""
+        """Tolerant extract: last JSON object by text position among fenced and raw spans."""
         if not final_message:
             return None
-        parsed: list[dict] = []
+        positioned: list[tuple[int, dict]] = []
+
         fence_pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL)
         for match in fence_pattern.finditer(final_message):
             block = match.group(1).strip()
@@ -176,11 +177,8 @@ class ProcessAdapter(AgentAdapter):
             except json.JSONDecodeError:
                 continue
             if isinstance(value, dict):
-                parsed.append(value)
-        if parsed:
-            return parsed[-1]
+                positioned.append((match.start(), value))
 
-        candidates: list[str] = []
         depth = 0
         start: int | None = None
         for index, char in enumerate(final_message):
@@ -191,16 +189,20 @@ class ProcessAdapter(AgentAdapter):
             elif char == "}" and depth > 0:
                 depth -= 1
                 if depth == 0 and start is not None:
-                    candidates.append(final_message[start : index + 1])
+                    candidate = final_message[start : index + 1]
+                    try:
+                        value = json.loads(candidate)
+                    except json.JSONDecodeError:
+                        start = None
+                        continue
+                    if isinstance(value, dict):
+                        positioned.append((start, value))
                     start = None
-        for candidate in reversed(candidates):
-            try:
-                value = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                return value
-        return None
+
+        if not positioned:
+            return None
+        positioned.sort(key=lambda item: item[0])
+        return positioned[-1][1]
 
     def start(
         self, request: AdapterRequest, event_callback: Callable[[str, dict], None] | None = None
@@ -338,7 +340,8 @@ class ProcessAdapter(AgentAdapter):
                 final_message = redact_text(raw_final)
             final_path.write_text(final_message, encoding="utf-8")
         handoff = self._parse_handoff(final_message)
-        if handoff is None and request.role == "implementer":
+        # Narrative roles may wrap JSON in prose/fences; tolerate last JSON object.
+        if handoff is None and request.role in {"implementer", "orcha_closure"}:
             handoff = self._extract_last_json_object(final_message)
         if exit_code != 0:
             status = "FAILED"
