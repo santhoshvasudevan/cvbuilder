@@ -72,3 +72,23 @@ Verbatim source finding:
   "severity": "MEDIUM"
 }
 ```
+
+## AUDIT-002 — RESOLVED
+
+- Disposition record run ID: `m3a-c1-6df5432d618c`
+- Candidate SHA: `50847ab53fb859d2a690d307706350477be0a996`
+- Finding status: `RESOLVED`
+- Disposition: `RESOLVED`
+- Resolved by: M3A-C1 corrective implementation on the integrated M3A baseline
+
+Append-only disposition: original `AUDIT-002` OPEN/DEFERRED entry above is unchanged. Closure evidence: `MemorySourceDocument` and `MemoryClaimSupport` reject post-creation instance and QuerySet update/delete via `HardIntegrityError`/`IntegrityFinding(code=PROVENANCE_IMMUTABLE)`; source-document admin `has_delete_permission` is false; claim-support `source_document` FK uses `PROTECT` (`candidate_memory.0002_protect_claim_support_source`); regression `candidate_memory.tests.test_ac1_source_provenance_immutability`.
+
+## CLAUDE-M3A-002 — RESOLVED
+
+- Disposition record run ID: `m3a-c1-6df5432d618c`
+- Candidate SHA: `50847ab53fb859d2a690d307706350477be0a996`
+- Finding status: `RESOLVED`
+- Disposition: `RESOLVED`
+- Resolved by: M3A-C1 corrective implementation on the integrated M3A baseline
+
+Append-only disposition: original `CLAUDE-M3A-002` OPEN/DEFERRED entry above is unchanged. Closure evidence: generic same-engagement start/end date contradiction detection retains unresolved `MemoryConflict` rows; known Maruti start-date contradiction retained as `engagement_start_date:maruti_suzuki`; regression `candidate_memory.tests.test_ac2_engagement_date_contradictions`. Non-date contradiction categories remain out of scope/deferred.
