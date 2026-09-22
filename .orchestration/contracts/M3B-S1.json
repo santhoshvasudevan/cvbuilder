@@ -37,7 +37,8 @@
     "Interim target-job signal resolution from JobApplication.employer + JobApplication.job_title only (V2-D047)",
     "Deterministic direct_match retrieval over MemoryClaim rows in categories CAREER_HISTORY, SKILL, ACHIEVEMENT via keyword/lexical overlap with employer/job_title; bounded fail-closed selection budget; simple deterministic scoring only",
     "Read-only consumption of candidate_memory (never write MemoryClaim/CareerEngagement/CandidateProfile/StaticResumeProfile/ExperienceSlot or any candidate_memory table)",
-    "Author new docs/DECISIONS.md entry V2-D047 for the interim employer/job_title target-job signal; update docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md to reflect implemented slice state"
+    "Author new docs/DECISIONS.md entry V2-D047 for the interim employer/job_title target-job signal; update docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md to reflect implemented slice state",
+    "Carve-out only: may modify candidate_memory/tests/test_architecture.py solely to remove the single string \"candidate_context\" from its FORBIDDEN_APPS tuple; candidate_matching, positioning_strategy, resume_builder, reviews, and job_intake must remain listed and remain forbidden; no other line in that file, and no other file under candidate_memory/, may change"
   ],
   "out_of_scope": [
     "Buckets differentiators, career_narrative, foundations, gaps_constraints population logic (M3B-S2 through M3B-S4)",
@@ -46,7 +47,7 @@
     "Editable context UI (CTX-007), token-aware compaction/reporting (CTX-005), context quality validation beyond this slice's direct_match budget",
     "LLM calls, StageModelAssignment for CANDIDATE_CONTEXT_BUILD, or any llm_provider change",
     "BM25, embedding retrieval, or any external ranking/search library",
-    "Any write or schema change under candidate_memory/**",
+    "Any write or schema change under candidate_memory/** except the single FORBIDDEN_APPS carve-out for candidate_memory/tests/test_architecture.py listed in in_scope",
     "Changes to job_applications/** (consume existing JobApplication/StageRun/StageIdentifier only)",
     "Modifying requirements.md, docs/ARCHITECTURE.md, docs/IMPLEMENTATION_PLAN.md, or docs/TEST_STRATEGY.md",
     "Creating or scaffolding job_intake, candidate_matching, positioning_strategy, resume_builder, or reviews apps",
@@ -57,10 +58,10 @@
     "config/settings.py",
     "docs/DECISIONS.md",
     "docs/CURRENT_STATE.md",
-    "docs/REQUIREMENT_TRACEABILITY.md"
+    "docs/REQUIREMENT_TRACEABILITY.md",
+    "candidate_memory/tests/test_architecture.py"
   ],
   "prohibited_paths": [
-    "candidate_memory/**",
     "job_applications/**",
     "llm_provider/**",
     "requirements.md",
@@ -89,6 +90,7 @@
     "AC-6/deterministic stage: producing StageRun uses StageIdentifier.CANDIDATE_CONTEXT_BUILD with null provider/model FKs; no StageModelAssignment and no live provider call",
     "AC-7/V2-D047: docs/DECISIONS.md gains new entry V2-D047 recording interim JobApplication.employer/job_title target-job signal (consistent with docs/ARCHITECTURE.md §7 separable candidate_memory vs current-job/AJ input classes; richer AJ input lands in M4 without redesign); docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md reflect implemented slice state for CTX-001/CTX-002/CTX-006",
     "AC-8/samplejd exclusion: no file under candidate_context/** may contain the literal string \"samplejd\" — closes the samplejd/ dependency gap with an executable static check (not prose alone), so committed tests cannot silently depend on the worktree-symlinked local postings directory",
+    "AC-9/FORBIDDEN_APPS carve-out: candidate_memory/tests/test_architecture.py may change only by removing \"candidate_context\" from FORBIDDEN_APPS; the other five apps (candidate_matching, positioning_strategy, resume_builder, reviews, job_intake) remain listed and forbidden; no other candidate_memory/ path may change",
     "candidate_context tests and make verify pass; config/settings.py change is INSTALLED_APPS registration only"
   ],
   "required_tests": [
@@ -100,6 +102,7 @@
     "test_snapshot_immutability must exercise CandidateContextSnapshot model-layer rejection after creation: instance-level Model.save() mutation and Model.delete(), plus QuerySet.update() and QuerySet.delete() bypass attempts — not merely a happy-path create; pattern aligned with candidate_memory/integrity.py HardIntegrityError/IntegrityFinding (AUDIT-002)",
     "test_read_only_candidate_memory_boundary must be a runtime side-effect test: ingest fixtures, build a CandidateContextSnapshot via the real candidate_context code path, then assert zero MemoryClaim/CareerEngagement/CandidateProfile/StaticResumeProfile/ExperienceSlot rows were created, modified, or deleted; a static import-boundary check alone is insufficient",
     ".venv/bin/python -c \"from pathlib import Path; import sys; root=Path('candidate_context'); hits=[p for p in root.rglob('*.py') if p.is_file() and 'samplejd' in p.read_text(encoding='utf-8', errors='ignore')]; sys.exit(1 if hits else 0)\"",
+    ".venv/bin/python manage.py test candidate_memory.tests.test_architecture",
     "make verify"
   ],
   "required_documentation_updates": [
