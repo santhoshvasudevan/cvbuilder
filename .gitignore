@@ -1,6 +1,9 @@
 # Environment / secrets
 .env
 
+# Local operator job postings (personal/identifying content; never commit)
+samplejd
+
 # Python
 __pycache__/
 *.py[cod]

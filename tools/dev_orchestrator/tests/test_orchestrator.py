@@ -3226,6 +3226,96 @@ class ValidationAndSafetyTests(unittest.TestCase):
                 self.assertEqual((worktree / ".env").resolve(), (root / ".env").resolve())
                 self.assertEqual(repository.status(worktree), [])
 
+    def test_worktree_creation_symlinks_samplejd_when_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            container = Path(directory)
+            root = container / "repository"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"], check=True
+            )
+            (root / ".gitignore").write_text(".env\n.venv\nsamplejd\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+            (root / ".venv").mkdir()
+            (root / ".env").write_text("DATABASE_URL=postgresql://example.invalid/db\n")
+            (root / "samplejd").mkdir()
+            (root / "samplejd" / "job_description1.md").write_text(
+                "synthetic local posting\n", encoding="utf-8"
+            )
+
+            repository = GitRepository(root)
+            candidate_sha = repository.head()
+            audit = container / "audit"
+            implementation = container / "implementation"
+            repository.create_audit_worktree(audit, candidate_sha)
+            repository.create_implementation_worktree(
+                implementation, "agent/test/implementation", candidate_sha
+            )
+
+            for worktree in (audit, implementation):
+                self.assertTrue((worktree / "samplejd").is_symlink())
+                self.assertEqual(
+                    (worktree / "samplejd").resolve(), (root / "samplejd").resolve()
+                )
+                self.assertTrue((worktree / "samplejd" / "job_description1.md").is_file())
+                self.assertEqual(repository.status(worktree), [])
+
+            sources = repository._worktree_environment_sources()
+            probe = container / "probe"
+            probe.mkdir()
+            self.assertTrue(repository._bootstrap_worktree_environment(probe, sources))
+            self.assertTrue((probe / "samplejd").is_symlink())
+            self.assertEqual((probe / "samplejd").resolve(), (root / "samplejd").resolve())
+
+    def test_worktree_creation_skips_samplejd_when_absent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            container = Path(directory)
+            root = container / "repository"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "test@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "Test"], check=True
+            )
+            (root / ".gitignore").write_text(".env\n.venv\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+            (root / ".venv").mkdir()
+            (root / ".env").write_text("DATABASE_URL=postgresql://example.invalid/db\n")
+            self.assertFalse((root / "samplejd").exists())
+
+            repository = GitRepository(root)
+            candidate_sha = repository.head()
+            audit = container / "audit"
+            implementation = container / "implementation"
+            repository.create_audit_worktree(audit, candidate_sha)
+            repository.create_implementation_worktree(
+                implementation, "agent/test/implementation-no-jd", candidate_sha
+            )
+
+            for worktree in (audit, implementation):
+                self.assertFalse((worktree / "samplejd").exists())
+                self.assertTrue((worktree / ".venv").is_symlink())
+                self.assertTrue((worktree / ".env").is_symlink())
+                self.assertEqual(repository.status(worktree), [])
+
+            sources = repository._worktree_environment_sources()
+            probe = container / "probe"
+            probe.mkdir()
+            self.assertFalse(repository._bootstrap_worktree_environment(probe, sources))
+            self.assertFalse((probe / "samplejd").exists())
+
     def test_worktree_creation_fails_before_add_when_root_environment_is_missing(self):
         for missing in (".venv", ".env"):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:

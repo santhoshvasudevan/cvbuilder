@@ -144,10 +144,20 @@ class GitRepository:
             raise GitSafetyError(f"root environment file is missing: {environment}")
         return virtualenv.resolve(), environment.resolve()
 
-    def _bootstrap_worktree_environment(self, path: Path, sources: tuple[Path, Path]) -> None:
+    def _bootstrap_worktree_environment(self, path: Path, sources: tuple[Path, Path]) -> bool:
+        """Symlink required .venv/.env; optionally symlink samplejd/ when present in root.
+
+        Returns True when samplejd was linked, False when it was absent (skip silently —
+        optional local development data, unlike required .venv/.env infrastructure).
+        """
         virtualenv, environment = sources
         (path / ".venv").symlink_to(virtualenv, target_is_directory=True)
         (path / ".env").symlink_to(environment)
+        samplejd = self.root / "samplejd"
+        if not samplejd.is_dir():
+            return False
+        (path / "samplejd").symlink_to(samplejd.resolve(), target_is_directory=True)
+        return True
 
     def create_implementation_worktree(self, path: Path, branch: str, base_sha: str) -> None:
         registered = (Path(item["worktree"]).resolve() for item in self.worktrees())
