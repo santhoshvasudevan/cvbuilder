@@ -48,6 +48,56 @@ SOURCE_KIND_BY_NAME = {
 HEADING_RE = re.compile(r"^(#{1,3})\s+(.*\S)\s*$", re.MULTILINE)
 BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)\s*$", re.MULTILINE)
 
+# Month/year tokens used for same-engagement start/end date contradiction detection.
+_MONTH_NAME_TO_NUM = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_DATE_TOKEN = (
+    r"(?:"
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\.?\s+\d{4}"
+    r"|"
+    r"\d{1,2}/\d{4}"
+    r")"
+)
+DATE_RANGE_RE = re.compile(
+    rf"(?P<start>{_DATE_TOKEN})\s*[\u2013\u2014~–—-]+\s*"
+    rf"(?P<end>Present|present|{_DATE_TOKEN})",
+    re.IGNORECASE,
+)
+
+# Stable engagement keys for cross-source date comparison (generic, not Maruti-only).
+ENGAGEMENT_ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bmaruti\b", re.IGNORECASE), "maruti_suzuki"),
+    (re.compile(r"\bcontinental\b", re.IGNORECASE), "continental"),
+    (re.compile(r"\bford\b", re.IGNORECASE), "ford"),
+    (re.compile(r"\bambigai\b", re.IGNORECASE), "ambigai"),
+)
+
 
 @dataclass(frozen=True)
 class IngestResult:
@@ -134,6 +184,191 @@ def _category_for_bullet(bullet: str) -> str:
     return MemoryClaim.Category.OTHER
 
 
+def _normalize_date_token(token: str) -> str | None:
+    """Normalize a month/year token to YYYY-MM (or 'present')."""
+    cleaned = token.strip()
+    if cleaned.lower() == "present":
+        return "present"
+    numeric = re.fullmatch(r"(\d{1,2})/(\d{4})", cleaned)
+    if numeric:
+        month = int(numeric.group(1))
+        year = int(numeric.group(2))
+        if 1 <= month <= 12:
+            return f"{year:04d}-{month:02d}"
+        return None
+    named = re.fullmatch(
+        r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+        r"Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\.?\s+(\d{4})",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if named:
+        key = named.group(1).lower().rstrip(".")
+        if key.startswith("sept"):
+            month = 9
+        else:
+            month = _MONTH_NAME_TO_NUM.get(key) or _MONTH_NAME_TO_NUM.get(key[:3])
+        year = int(named.group(2))
+        if month is None:
+            return None
+        return f"{year:04d}-{month:02d}"
+    return None
+
+
+def _engagement_key_in_text(text: str) -> str | None:
+    for pattern, key in ENGAGEMENT_ALIAS_PATTERNS:
+        if pattern.search(text):
+            return key
+    return None
+
+
+def _slug_company_phrase(text: str) -> str | None:
+    """Derive a stable engagement slug from a company-like phrase preceding a date range."""
+    without_dates = DATE_RANGE_RE.sub(" ", text)
+    without_dates = re.sub(r"[*_`#]", "", without_dates)
+    parts = re.split(r"\s*[\u2013\u2014|,—-]\s*", without_dates)
+    if not parts:
+        return None
+    company = parts[0].strip()
+    # Drop leading labels such as "Unternehmen:" / "Zeitraum:".
+    company = re.sub(r"^(?:unternehmen|company|zeitraum|role|rolle)\s*:\s*", "", company, flags=re.I)
+    if len(company) < 3:
+        return None
+    slug = re.sub(r"[^a-z0-9]+", "_", company.lower()).strip("_")
+    if len(slug) < 3:
+        return None
+    return slug[:80]
+
+
+def _nearest_heading_engagement_key(content: str, offset: int) -> str | None:
+    """Resolve engagement from the nearest preceding markdown heading (section context)."""
+    before = content[: max(0, offset)]
+    headings = list(HEADING_RE.finditer(before))
+    if not headings:
+        return None
+    heading_text = headings[-1].group(2)
+    known = _engagement_key_in_text(heading_text)
+    if known:
+        return known
+    return _slug_company_phrase(heading_text)
+
+
+def _extract_date_range(text: str) -> tuple[str | None, str | None]:
+    match = DATE_RANGE_RE.search(text)
+    if not match:
+        return None, None
+    return _normalize_date_token(match.group("start")), _normalize_date_token(match.group("end"))
+
+
+def _company_context_for_support(support: MemoryClaimSupport) -> str | None:
+    """Resolve engagement key from claim text, then nearest source heading (not a wide window)."""
+    for text in (support.claim.text, support.excerpt or ""):
+        known = _engagement_key_in_text(text)
+        if known:
+            return known
+        slug = _slug_company_phrase(text)
+        # Only accept in-claim slugs when the claim also carries a date range (same-line company+dates).
+        if slug is not None and _extract_date_range(text)[0] is not None:
+            return slug
+
+    document = support.source_document
+    content = document.content_text or ""
+    offset = support.char_start
+    if offset is None:
+        needle = (support.excerpt or support.claim.text or "")[:80]
+        offset = content.find(needle) if needle else 0
+    if offset < 0:
+        offset = 0
+    heading_key = _nearest_heading_engagement_key(content, offset)
+    if heading_key:
+        return heading_key
+    # Last resort: known aliases in a tight backward window only.
+    window = content[max(0, offset - 240) : offset]
+    return _engagement_key_in_text(window)
+
+
+def _detect_engagement_date_conflicts(memory: CandidateMemory) -> int:
+    """Preserve unresolved same-engagement start/end date contradictions across sources.
+
+    Date contradictions only — other contradiction categories remain out of scope here.
+    """
+    # engagement_key -> {"start": {norm: set[claim_id]}, "end": {...}, "claims": set}
+    by_engagement: dict[str, dict[str, object]] = {}
+
+    supports = (
+        MemoryClaimSupport.objects.filter(claim__memory=memory)
+        .select_related("claim", "source_document")
+        .order_by("id")
+    )
+    for support in supports:
+        start, end = _extract_date_range(support.claim.text)
+        if start is None and end is None:
+            start, end = _extract_date_range(support.excerpt or "")
+        if start is None and end is None:
+            continue
+        engagement_key = _company_context_for_support(support)
+        if engagement_key is None:
+            continue
+        bucket = by_engagement.setdefault(
+            engagement_key,
+            {"start": {}, "end": {}, "claims": set()},
+        )
+        claim = support.claim
+        claims: set = bucket["claims"]  # type: ignore[assignment]
+        claims.add(claim)
+        if start is not None:
+            starts: dict = bucket["start"]  # type: ignore[assignment]
+            starts.setdefault(start, set()).add(claim)
+        if end is not None and end != "present":
+            ends: dict = bucket["end"]  # type: ignore[assignment]
+            ends.setdefault(end, set()).add(claim)
+        elif end == "present":
+            ends = bucket["end"]  # type: ignore[assignment]
+            ends.setdefault("present", set()).add(claim)
+
+    created = 0
+    for engagement_key, bucket in by_engagement.items():
+        starts = bucket["start"]  # type: ignore[assignment]
+        ends = bucket["end"]  # type: ignore[assignment]
+        related = list(bucket["claims"])  # type: ignore[arg-type]
+        if len(starts) >= 2:
+            variants = ", ".join(sorted(starts.keys()))
+            topic = f"engagement_start_date:{engagement_key}"
+            conflict, was_created = MemoryConflict.objects.get_or_create(
+                memory=memory,
+                topic=topic,
+                defaults={
+                    "description": (
+                        f"Sources disagree on start date for engagement '{engagement_key}' "
+                        f"({variants}). Preserved unresolved for operator review."
+                    ),
+                    "status": MemoryConflict.Status.UNRESOLVED,
+                },
+            )
+            if was_created:
+                created += 1
+            conflict.related_claims.add(*related)
+        if len(ends) >= 2:
+            variants = ", ".join(sorted(ends.keys()))
+            topic = f"engagement_end_date:{engagement_key}"
+            conflict, was_created = MemoryConflict.objects.get_or_create(
+                memory=memory,
+                topic=topic,
+                defaults={
+                    "description": (
+                        f"Sources disagree on end date for engagement '{engagement_key}' "
+                        f"({variants}). Preserved unresolved for operator review."
+                    ),
+                    "status": MemoryConflict.Status.UNRESOLVED,
+                },
+            )
+            if was_created:
+                created += 1
+            conflict.related_claims.add(*related)
+    return created
+
+
 def _detect_conflicts(memory: CandidateMemory) -> int:
     """Preserve unresolved contradictions across ingested sources for operator review."""
     created = 0
@@ -184,6 +419,8 @@ def _detect_conflicts(memory: CandidateMemory) -> int:
         if was_created:
             created += 1
         conflict.related_claims.add(*(employment_markers + direct_markers))
+
+    created += _detect_engagement_date_conflicts(memory)
     return created
 
 

@@ -2,6 +2,47 @@
 
 from django.db import models
 
+from candidate_memory.integrity import reject_provenance_mutation
+
+
+class ImmutableProvenanceQuerySet(models.QuerySet):
+    """Reject QuerySet-level update/delete for append-only provenance rows (AUDIT-002)."""
+
+    def update(self, **kwargs):
+        reject_provenance_mutation(
+            model_label=self.model.__name__,
+            operation="QuerySet.update()",
+        )
+
+    def delete(self):
+        reject_provenance_mutation(
+            model_label=self.model.__name__,
+            operation="QuerySet.delete()",
+        )
+
+
+class ImmutableProvenanceManager(models.Manager):
+    def get_queryset(self):
+        return ImmutableProvenanceQuerySet(self.model, using=self._db)
+
+
+class ImmutableProvenanceMixin:
+    """Instance-level save/delete guards for provenance models after creation."""
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            reject_provenance_mutation(
+                model_label=self.__class__.__name__,
+                operation="Model.save() mutation",
+            )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        reject_provenance_mutation(
+            model_label=self.__class__.__name__,
+            operation="Model.delete()",
+        )
+
 
 class CandidateMemory(models.Model):
     """Root revision of candidate knowledge. PostgreSQL is the operational source of truth."""
@@ -21,7 +62,7 @@ class CandidateMemory(models.Model):
         return f"CandidateMemory #{self.pk} ({self.label}, {state})"
 
 
-class MemorySourceDocument(models.Model):
+class MemorySourceDocument(ImmutableProvenanceMixin, models.Model):
     """Ingested candidate source document with immutable provenance metadata."""
 
     class SourceKind(models.TextChoices):
@@ -43,7 +84,11 @@ class MemorySourceDocument(models.Model):
     byte_size = models.PositiveIntegerField()
     ingested_at = models.DateTimeField(auto_now_add=True)
 
+    objects = ImmutableProvenanceManager()
+
     class Meta:
+        # AUDIT-001: use the immutable manager for related/_base_manager paths too.
+        base_manager_name = "objects"
         ordering = ["precedence_rank", "id"]
         constraints = [
             models.UniqueConstraint(
@@ -106,12 +151,15 @@ class MemoryClaim(models.Model):
         return f"{self.claim_key}: {self.text[:60]}"
 
 
-class MemoryClaimSupport(models.Model):
+class MemoryClaimSupport(ImmutableProvenanceMixin, models.Model):
     """Immutable support/provenance link from a claim to a source excerpt."""
 
     claim = models.ForeignKey(MemoryClaim, on_delete=models.CASCADE, related_name="supports")
     source_document = models.ForeignKey(
-        MemorySourceDocument, on_delete=models.CASCADE, related_name="claim_supports"
+        MemorySourceDocument,
+        # PROTECT: source deletion must not cascade-destroy claim-support evidence (AUDIT-002).
+        on_delete=models.PROTECT,
+        related_name="claim_supports",
     )
     excerpt = models.TextField()
     location_hint = models.CharField(max_length=255, blank=True, default="")
@@ -119,7 +167,11 @@ class MemoryClaimSupport(models.Model):
     char_end = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    objects = ImmutableProvenanceManager()
+
     class Meta:
+        # AUDIT-001: use the immutable manager for related/_base_manager paths too.
+        base_manager_name = "objects"
         ordering = ["id"]
 
     def __str__(self) -> str:

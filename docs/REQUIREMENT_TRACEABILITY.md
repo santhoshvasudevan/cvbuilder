@@ -16,9 +16,10 @@
 | Orthogonal requirement taxonomy (priority/domain/origin) | AJ-002, V2-D033 | job_intake | M4 | schema/enum test |
 | Recruiter Decision Model | AJ-003..005 | job_intake | M4 | schema + manual quality review |
 | Language/source retention | AJ-006..007 | job_intake | M4 | unit/manual tests |
-| Candidate profile | §6.1 | candidate_memory | M3A | model/UI tests — M3A IMPLEMENTED (`CandidateProfile`, preferences, positioning history persistence tests) |
+| Candidate profile | §6.1 | candidate_memory | M3A | model/UI tests — M3A IMPLEMENTED (`CandidateProfile`, preferences, positioning history persistence tests); M3A-C1 date-contradiction detection retains unresolved engagement start/end `MemoryConflict` rows (CLAUDE-M3A-002) |
 | candidate_context is a distinct app; candidate_memory is source of truth | V2-D030 | candidate_memory/candidate_context | M1/M3A/M3B | app-boundary/import review — M3A IMPLEMENTED (`candidate_memory` present; `candidate_context` absent; architecture import tests) |
 | Candidate preferences | CTX-004 | candidate_memory | M3A | UI/model test — M3A IMPLEMENTED (`OperatorCorrection`, profile preference fields) |
+| Immutable source provenance (append-only source docs + claim supports) | FACT-002, V2-D003, V2-D030 | candidate_memory | M3A | M3A-C1 IMPLEMENTED (AUDIT-002): instance/QuerySet update/delete rejected via HARD_INTEGRITY; admin no-delete; PROTECT on claim-support→source FK (`0002_protect_claim_support_source`); `Meta.base_manager_name="objects"` so `_base_manager` cannot bypass (AUDIT-001, `0003_alter_provenance_base_manager_name`); `test_ac1_source_provenance_immutability` |
 | Three static experience slots (sequenced collection) | STATIC-001, V2-D024 | static profile | M3A | model + HARD_INTEGRITY test — M3A IMPLEMENTED (`validate_experience_slot_cardinality`, UI/service tests) |
 | Operator-controlled ExperienceSlot selection UI | V2-D031 | static profile / candidate_memory | M3A | UI walkthrough + HARD_INTEGRITY test — M3A IMPLEMENTED (server-rendered workspace + admin explicit-selection action; no auto-select path) |
 | Static company/date/title/location | STATIC-002 | static profile / renderer | M3A/M6 | renderer test — M3A partial VERIFIED (`reject_model_static_metadata_write`); renderer remains M6 |
@@ -45,7 +46,7 @@
 | AB plan | AB-001 | resume_builder | M6 | schema test |
 | AB structured draft | AB-002 | resume_builder | M6 | schema test |
 | Deterministic warnings | AB-003 | resume_builder | M6 | fixture tests |
-| Hard integrity vs soft review warnings | FACT-003, V2-D026 | resume_builder | M6 | fixture tests (both classes) |
+| Hard integrity vs soft review warnings | FACT-003, V2-D026 | resume_builder / candidate_memory | M3A/M6 | Distinct classes retained: HARD_INTEGRITY fails closed via `IntegrityFinding`/`HardIntegrityError` (M3A provenance immutability AUDIT-002 + ExperienceSlot cardinality; M6 resume_builder fixture tests for both classes). Soft review warnings remain advisory and separate — never escalated into hard integrity. |
 | Recruiter critique | AB-004 | resume_builder | M6 | schema/manual review |
 | Controlled refinement | AB-005 | resume_builder | M6 | diff/regression test |
 | Bounded loop | AB-006 | resume_builder | M6 | workflow test |
