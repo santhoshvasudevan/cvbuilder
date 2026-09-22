@@ -128,6 +128,34 @@ verification failure, and remaining acceptance criteria; its exact correction pr
 under the run's `prompts/` directory with a SHA-256 identity before the saved implementer session is
 resumed in the existing worktree.
 
+### Post-result test-change authorization
+
+When evidence validation escalates because a test file was deleted or had lines removed
+(`suspicious_test_changes`), and `state.result_sha` is already set, the pre-result
+`record-decision` verb cannot authorize that change (it requires the implementation worktree still
+be at `base_sha` with no `result_sha`). Use the separate post-result verb instead:
+
+- Operator supplies one JSON object: `run_id`, `decision` (`APPROVED`), non-empty `reason`, the
+  exact `result_sha` this authorization is scoped to, exactly one repository-relative `file_path`,
+  and `authorized_diff` — the exact unified diff for that file between `base_sha` and `result_sha`
+  as the operator inspected it.
+- At record time the controller independently recomputes `git diff base_sha..result_sha -- file_path`
+  in the registered, clean implementation worktree (HEAD must equal `result_sha`) and accepts the
+  decision only when that live diff matches `authorized_diff` exactly (line-ending normalized). The
+  stored `authorized_diff` is never treated as ground truth on its own.
+- Paths matching the phase contract's `prohibited_paths` are rejected. Pre-result escalations
+  (no `result_sha`) are rejected with a message directing the operator to `record-decision`.
+- On success an append-only `handoffs/post-result-decision-NN.json` is written and the run
+  transitions to `VALIDATING_IMPLEMENTATION` (no orchestration-tooling repair / controller-HEAD
+  gate).
+- On every subsequent evidence-collection pass the controller re-globs those artifacts and, for each
+  one, re-checks `decision.result_sha == state.result_sha` and re-computes the live file diff against
+  `authorized_diff`. Only decisions that still pass both checks contribute their `file_path` to
+  `authorized_test_changes`. Stale or mismatched decisions are omitted (not hard-errored) and the
+  recomputed live diffs are recorded under `post_result_decision_rechecks` on the evidence artifact.
+  All other evidence gates (ancestry, prohibited paths, governance docs, test command exit codes)
+  remain fail-closed.
+
 If an independent reviewer invocation fails before producing an audit handoff, `resume` may retry the
 same audit only after a committed, bounded orchestration-tooling repair. The controller requires the
 validated implementation and audit worktrees to remain registered, clean, and pinned to the recorded

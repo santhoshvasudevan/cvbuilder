@@ -35,6 +35,7 @@ from tools.dev_orchestrator.schemas import (
     validate_implementer_response,
     validate_operator_decision,
     validate_phase_contract,
+    validate_post_result_decision,
 )
 from tools.dev_orchestrator.state import RunState, RunStateName, StateStore
 from tools.dev_orchestrator.tmux_ui import render_event
@@ -172,6 +173,8 @@ class FakeRepository:
         self.registered_worktrees = []
         # Default to RESULT so controller-derived result_sha matches audit fixtures.
         self.implementation_head = RESULT
+        self.dirty_status: list[str] = []
+        self.file_diffs: dict[str, str] = {}
         self.changed_files = (
             "candidate_memory/models.py\n"
             "candidate_memory/migrations/0001_initial.py\n"
@@ -182,6 +185,8 @@ class FakeRepository:
             "docs/REQUIREMENT_TRACEABILITY.md"
         )
         self.added_files = "candidate_memory/tests/test_models.py\n"
+        self.deleted_files = ""
+        self.numstat = ""
 
     def verify_bootstrap_boundary(self, **kwargs) -> GitBoundary:
         del kwargs
@@ -234,21 +239,44 @@ class FakeRepository:
 
     def status(self, cwd=None):
         del cwd
-        return []
+        return list(self.dirty_status)
 
     def run(self, *args, cwd=None):
         if args[:2] == ("diff", "--stat"):
             return "candidate_memory/models.py | 1 +"
-        if len(args) >= 3 and args[0] == "diff" and args[1] == "--name-only":
+        if args and args[0] == "diff" and "--name-only" in args:
+            pathspec = None
+            if "--" in args:
+                pathspec = args[args.index("--") + 1]
             if "--diff-filter=A" in args:
-                return self.added_files if cwd is not None else ""
-            if "--diff-filter=D" in args:
-                return ""
-            if cwd is not None:
-                return self.changed_files
-            return "tools/dev_orchestrator/controller.py"
+                names = self.added_files if cwd is not None else ""
+            elif "--diff-filter=D" in args:
+                names = self.deleted_files if cwd is not None else ""
+            elif cwd is not None:
+                names = self.changed_files
+            else:
+                names = "tools/dev_orchestrator/controller.py"
+            if pathspec is None:
+                return names
+            matched = []
+            for line in names.splitlines():
+                if not line:
+                    continue
+                if line == pathspec or line.startswith(pathspec.rstrip("/") + "/"):
+                    matched.append(line)
+            return ("\n".join(matched) + "\n") if matched else ""
         if args[:2] == ("diff", "--numstat"):
-            return ""
+            return self.numstat if cwd is not None else ""
+        # Unified per-file diff: git diff base..result -- path
+        if (
+            args
+            and args[0] == "diff"
+            and len(args) >= 4
+            and args[-2] == "--"
+            and ".." in str(args[1])
+            and args[1] != "--name-only"
+        ):
+            return self.file_diffs.get(args[-1], "")
         return ""
 
 
@@ -290,6 +318,22 @@ class AcceptEvidence:
                 {"command": command, "exit_code": 0} for command in executable
             ],
         }
+
+
+class SuspiciousUnlessAuthorizedEvidence(AcceptEvidence):
+    """Evidence collector that fails closed on one suspicious test path unless authorized."""
+
+    SUSPICIOUS = "candidate_memory/tests/test_models.py"
+
+    def __init__(self):
+        self.last_authorized: list[str] | None = None
+
+    def collect_and_validate(self, **kwargs):
+        authorized = list(kwargs.get("authorized_test_changes") or [])
+        self.last_authorized = authorized
+        if not EvidenceCollector._matches(self.SUSPICIOUS, authorized):
+            raise EvidenceError(f"test files deleted or weakened: {[self.SUSPICIOUS]}")
+        return {"accepted": True, "result_sha": kwargs["result_sha"]}
 
 
 class RejectEvidence:
@@ -2529,6 +2573,300 @@ class ControllerTests(unittest.TestCase):
 
         for schema_path in (REPOSITORY_ROOT / "tools/dev_orchestrator/schemas").glob("*.json"):
             walk(json.loads(schema_path.read_text(encoding="utf-8")))
+
+    def _prepare_post_result_escalation(
+        self,
+        controller,
+        *,
+        run_id="m3a-post-result",
+        file_path="candidate_memory/tests/test_models.py",
+        authorized_diff=None,
+    ):
+        AUTH_DIFF = authorized_diff or (
+            f"diff --git a/{file_path} b/{file_path}\n"
+            f"--- a/{file_path}\n"
+            f"+++ b/{file_path}\n"
+            "@@ -1,3 +1,2 @@\n"
+            " def test_one():\n"
+            "-    assert False\n"
+            "     assert True\n"
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION, run_id=run_id)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        self.seed_worktree_current_state(implementation)
+        controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
+        controller.repository.file_diffs[file_path] = AUTH_DIFF  # type: ignore[attr-defined]
+        # Ensure name-only pathspec resolves to exactly this literal file.
+        existing = controller.repository.changed_files  # type: ignore[attr-defined]
+        if file_path not in existing.splitlines():
+            controller.repository.changed_files = (  # type: ignore[attr-defined]
+                existing.rstrip("\n") + "\n" + file_path + "\n"
+            )
+        _atomic_json(paths.handoffs / "implementer-00.json", implementer(result_sha=RESULT))
+        return run_id, paths, AUTH_DIFF, file_path
+
+    def test_post_result_decision_authorizes_suspicious_test_and_revalidates(self):
+        evidence = SuspiciousUnlessAuthorizedEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[audit()],
+            evidence=evidence,
+        )
+        run_id, paths, auth_diff, file_path = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "intentional obsolete assertion removal",
+            "result_sha": RESULT,
+            "file_path": file_path,
+            "authorized_diff": auth_diff,
+        }
+
+        recorded, decision_path = controller.record_post_result_decision(run_id, decision)
+
+        self.assertEqual(recorded.state, "VALIDATING_IMPLEMENTATION")
+        self.assertTrue(decision_path.exists())
+        self.assertEqual(decision_path.name, "post-result-decision-01.json")
+
+        resumed = controller.execute(run_id, resume=True)
+
+        self.assertEqual(resumed.state, "COMPLETED")
+        self.assertIsNotNone(evidence.last_authorized)
+        self.assertIn(file_path, evidence.last_authorized or [])
+        evidence_payload = json.loads(paths.evidence.read_text(encoding="utf-8"))
+        self.assertTrue(evidence_payload["post_result_decision_rechecks"])
+        self.assertTrue(evidence_payload["post_result_decision_rechecks"][0]["authorized"])
+
+    def test_post_result_decision_rejects_drifted_worktree(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id, _, auth_diff, file_path = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+            "file_path": file_path,
+            "authorized_diff": auth_diff,
+        }
+        controller.repository.implementation_head = CORRECTED  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(ControllerError, "HEAD does not match state.result_sha"):
+            controller.record_post_result_decision(run_id, decision)
+
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
+        controller.repository.dirty_status = [" M candidate_memory/tests/test_models.py"]  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(ControllerError, "worktree is dirty"):
+            controller.record_post_result_decision(run_id, decision)
+
+    def test_post_result_decision_rejects_mismatched_authorized_diff(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id, _, auth_diff, file_path = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+            "file_path": file_path,
+            "authorized_diff": auth_diff + "+    assert 'extra'\n",
+        }
+        with self.assertRaisesRegex(ControllerError, "authorized_diff does not match"):
+            controller.record_post_result_decision(run_id, decision)
+
+    def test_post_result_decision_rejects_when_result_sha_unset(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION)
+        paths = controller.paths(run_id)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = BASE  # type: ignore[attr-defined]
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+            "file_path": "candidate_memory/tests/test_models.py",
+            "authorized_diff": "diff --git a/x b/x\n",
+        }
+        with self.assertRaisesRegex(ControllerError, "use record-decision for pre-result"):
+            controller.record_post_result_decision(run_id, decision)
+
+    def test_post_result_decision_does_not_authorize_unrelated_file(self):
+        evidence = SuspiciousUnlessAuthorizedEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            evidence=evidence,
+        )
+        other = "candidate_memory/tests/test_other.py"
+        other_diff = (
+            f"diff --git a/{other} b/{other}\n"
+            f"--- a/{other}\n"
+            f"+++ b/{other}\n"
+            "@@ -1 +0,0 @@\n"
+            "-def test_other():\n"
+        )
+        run_id, paths, _, _ = self._prepare_post_result_escalation(
+            controller, file_path=other, authorized_diff=other_diff
+        )
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "authorize other file only",
+            "result_sha": RESULT,
+            "file_path": other,
+            "authorized_diff": other_diff,
+        }
+        recorded, _ = controller.record_post_result_decision(run_id, decision)
+        self.assertEqual(recorded.state, "VALIDATING_IMPLEMENTATION")
+        resumed = controller.execute(run_id, resume=True)
+        self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+        self.assertIn("test files deleted or weakened", resumed.last_error)
+        self.assertIsNotNone(evidence.last_authorized)
+        self.assertIn(other, evidence.last_authorized or [])
+        self.assertNotIn(SuspiciousUnlessAuthorizedEvidence.SUSPICIOUS, evidence.last_authorized or [])
+
+    def test_post_result_decision_stale_result_sha_ignored_on_revalidation(self):
+        evidence = SuspiciousUnlessAuthorizedEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            evidence=evidence,
+        )
+        run_id, paths, auth_diff, file_path = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "authorize at old result",
+            "result_sha": RESULT,
+            "file_path": file_path,
+            "authorized_diff": auth_diff,
+        }
+        controller.record_post_result_decision(run_id, decision)
+        # Simulate a later correction producing a new result_sha before re-validation.
+        state = StateStore(paths.state).load()
+        state.result_sha = CORRECTED
+        state.state = RunStateName.VALIDATING_IMPLEMENTATION.value
+        StateStore(paths.state).save(state)
+        controller.repository.implementation_head = CORRECTED  # type: ignore[attr-defined]
+        controller.repository.file_diffs[file_path] = auth_diff  # type: ignore[attr-defined]
+        authorized, rechecks = controller._authorized_test_changes_for_evidence(
+            paths=paths,
+            state=StateStore(paths.state).load(),
+            implementation_worktree=paths.worktrees / "implementation",
+        )
+        self.assertNotIn(file_path, authorized)
+        self.assertTrue(rechecks)
+        self.assertFalse(rechecks[0]["authorized"])
+        self.assertFalse(rechecks[0]["result_sha_match"])
+
+        resumed = controller.execute(run_id, resume=True)
+        self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+        self.assertIn("test files deleted or weakened", resumed.last_error)
+        evidence_payload = json.loads(paths.evidence.read_text(encoding="utf-8"))
+        self.assertFalse(evidence_payload["post_result_decision_rechecks"][0]["authorized"])
+
+    def test_validate_post_result_decision_schema_is_strict(self):
+        decision = {
+            "run_id": "r1",
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+            "file_path": "candidate_memory/tests/test_models.py",
+            "authorized_diff": "diff --git a/x b/x\n",
+        }
+        self.assertEqual(validate_post_result_decision(decision), decision)
+        with self.assertRaises(SchemaError):
+            validate_post_result_decision({**decision, "extra": True})
+        with self.assertRaises(SchemaError):
+            validate_post_result_decision({**decision, "file_path": "../outside"})
+
+    def test_post_result_decision_rejects_directory_file_path(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id, _, auth_diff, _ = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "directory pathspec",
+            "result_sha": RESULT,
+            "file_path": "candidate_memory/tests",
+            "authorized_diff": auth_diff,
+        }
+        with self.assertRaisesRegex(
+            ControllerError, "file_path must name exactly one literal file"
+        ):
+            controller.record_post_result_decision(run_id, decision)
+
+    def test_post_result_decision_rejects_glob_file_path(self):
+        controller, _ = self.make_controller(implementer_responses=[], reviewer_responses=[])
+        run_id, _, auth_diff, _ = self._prepare_post_result_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "glob pathspec",
+            "result_sha": RESULT,
+            "file_path": "candidate_memory/tests/*.py",
+            "authorized_diff": auth_diff,
+        }
+        with self.assertRaisesRegex(
+            ControllerError, "file_path must name exactly one literal file"
+        ):
+            controller.record_post_result_decision(run_id, decision)
+
+    def test_post_result_reverify_rejects_directory_or_glob_file_path(self):
+        evidence = SuspiciousUnlessAuthorizedEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[],
+            reviewer_responses=[],
+            evidence=evidence,
+        )
+        run_id, paths, auth_diff, file_path = self._prepare_post_result_escalation(controller)
+        # Bypass record-time validation: write a fixture decision naming a directory.
+        fixture = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "pre-existing fixture bypassing record-time checks",
+            "result_sha": RESULT,
+            "file_path": "candidate_memory/tests",
+            "authorized_diff": auth_diff,
+        }
+        _atomic_json(paths.handoffs / "post-result-decision-01.json", fixture)
+        state = StateStore(paths.state).load()
+        state.state = RunStateName.VALIDATING_IMPLEMENTATION.value
+        StateStore(paths.state).save(state)
+
+        authorized, rechecks = controller._authorized_test_changes_for_evidence(
+            paths=paths,
+            state=StateStore(paths.state).load(),
+            implementation_worktree=paths.worktrees / "implementation",
+        )
+        self.assertEqual(authorized, [])
+        self.assertTrue(rechecks)
+        self.assertFalse(rechecks[0]["authorized"])
+        self.assertFalse(rechecks[0]["literal_file_ok"])
+
+        glob_fixture = {
+            **fixture,
+            "file_path": "candidate_memory/tests/*.py",
+        }
+        _atomic_json(paths.handoffs / "post-result-decision-02.json", glob_fixture)
+        authorized2, rechecks2 = controller._authorized_test_changes_for_evidence(
+            paths=paths,
+            state=StateStore(paths.state).load(),
+            implementation_worktree=paths.worktrees / "implementation",
+        )
+        self.assertEqual(authorized2, [])
+        self.assertTrue(any(not item["literal_file_ok"] for item in rechecks2))
+        self.assertNotIn(file_path, authorized2)
+
+        resumed = controller.execute(run_id, resume=True)
+        self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
+        self.assertIn("test files deleted or weakened", resumed.last_error)
 
 
 class ValidationAndSafetyTests(unittest.TestCase):

@@ -93,6 +93,19 @@ command refuses missing/unregistered worktrees, mismatched run IDs, prohibited p
 paths, and any main-checkout change beyond a clean descendant commit limited to the orchestration
 repair implementation and these two orchestration documents.
 
+When evidence escalation is specifically a post-result suspicious test-file change (implementation
+already at `result_sha`), authorize that one inspected file diff, then resume:
+
+```text
+.venv/bin/python -m tools.dev_orchestrator record-post-result-decision --run-id <run-id> --file /tmp/post-result-decision.json
+.venv/bin/python -m tools.dev_orchestrator resume --run-id <run-id>
+```
+
+The JSON must include `run_id`, `decision` (`APPROVED`), `reason`, `result_sha` (must match the
+escalated run), `file_path` (one repo-relative path), and `authorized_diff` (exact unified diff for
+that file). The controller recomputes the live diff at record time and again on every evidence pass;
+do not use `record-decision` for this case (it rejects once `result_sha` is set).
+
 When the implementer evidence has already passed but the reviewer process itself fails before writing
 an audit handoff, repair and commit only the orchestration tooling, then run the same `resume` command.
 The controller will retry the audit only when both existing worktrees are registered, clean, and at the

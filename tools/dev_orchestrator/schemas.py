@@ -25,6 +25,16 @@ OPERATOR_DECISION_FIELDS = frozenset(
         "constraints",
     }
 )
+POST_RESULT_DECISION_FIELDS = frozenset(
+    {
+        "run_id",
+        "decision",
+        "reason",
+        "result_sha",
+        "file_path",
+        "authorized_diff",
+    }
+)
 
 PHASE_FIELDS = frozenset(
     {
@@ -221,6 +231,26 @@ def validate_operator_decision(value: dict[str, Any]) -> dict[str, Any]:
         candidate = Path(path)
         if candidate.is_absolute() or ".." in candidate.parts or path.startswith("."):
             raise SchemaError("operator decision paths must be safe repository-relative paths")
+    return value
+
+
+def validate_post_result_decision(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SchemaError("post_result_decision must be an object")
+    unknown = set(value) - POST_RESULT_DECISION_FIELDS
+    missing = POST_RESULT_DECISION_FIELDS - set(value)
+    if unknown or missing:
+        raise SchemaError(
+            "post_result_decision fields invalid: "
+            f"unknown={sorted(unknown)}, missing={sorted(missing)}"
+        )
+    for key in ("run_id", "reason", "result_sha", "file_path", "authorized_diff"):
+        _string(value, key)
+    if value["decision"] != "APPROVED":
+        raise SchemaError("post_result_decision.decision must be APPROVED")
+    candidate = Path(value["file_path"])
+    if candidate.is_absolute() or ".." in candidate.parts or value["file_path"].startswith("."):
+        raise SchemaError("post_result_decision.file_path must be a safe repository-relative path")
     return value
 
 

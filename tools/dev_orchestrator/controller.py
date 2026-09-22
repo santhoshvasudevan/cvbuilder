@@ -35,6 +35,7 @@ from .schemas import (
     validate_implementer_response,
     validate_operator_decision,
     validate_phase_contract,
+    validate_post_result_decision,
 )
 from .state import TERMINAL_STATES, RunState, RunStateName, StateError, StateStore, utc_now
 
@@ -811,6 +812,183 @@ class OrchestrationController:
             message="Append-only operator scope amendment recorded",
             decision_path=state.pending_operator_decision_path,
             contract_sha256=contract_hash,
+        )
+        return state, decision_path
+
+    @staticmethod
+    def _normalize_unified_diff(text: str) -> str:
+        """Normalize only line endings so platform CRLF cannot falsely reject a matching diff."""
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _file_unified_diff(
+        self, *, worktree: Path, base_sha: str, result_sha: str, file_path: str
+    ) -> str:
+        return self.repository.run(
+            "diff", f"{base_sha}..{result_sha}", "--", file_path, cwd=worktree
+        )
+
+    def _require_single_literal_file_path(
+        self, *, worktree: Path, base_sha: str, result_sha: str, file_path: str
+    ) -> None:
+        """Reject globs/directories/pathspecs; file_path must name exactly one literal file."""
+        if any(char in file_path for char in "*?[]"):
+            raise ControllerError(
+                "post-result decision file_path must name exactly one literal file"
+            )
+        named = self.repository.run(
+            "diff",
+            "--name-only",
+            f"{base_sha}..{result_sha}",
+            "--",
+            file_path,
+            cwd=worktree,
+        )
+        lines = [line for line in named.splitlines() if line]
+        if lines != [file_path]:
+            raise ControllerError(
+                "post-result decision file_path must name exactly one literal file"
+            )
+
+    def _authorized_test_changes_for_evidence(
+        self, *, paths: RunPaths, state: RunState, implementation_worktree: Path
+    ) -> tuple[list[str], list[dict]]:
+        """Build authorized_test_changes from pre-result and live-reverified post-result decisions."""
+        authorized: list[str] = []
+        for decision_path in sorted(paths.handoffs.glob("operator-decision-*.json")):
+            payload = validate_operator_decision(
+                json.loads(decision_path.read_text(encoding="utf-8"))
+            )
+            authorized.extend(payload["additional_allowed_paths"])
+
+        rechecks: list[dict] = []
+        for decision_path in sorted(paths.handoffs.glob("post-result-decision-*.json")):
+            try:
+                payload = validate_post_result_decision(
+                    json.loads(decision_path.read_text(encoding="utf-8"))
+                )
+            except (SchemaError, json.JSONDecodeError, OSError):
+                rechecks.append(
+                    {
+                        "decision_path": self._relative_artifact(paths, decision_path),
+                        "authorized": False,
+                        "reason": "unreadable_or_invalid_payload",
+                    }
+                )
+                continue
+            try:
+                self._require_single_literal_file_path(
+                    worktree=implementation_worktree,
+                    base_sha=state.base_sha,
+                    result_sha=state.result_sha,
+                    file_path=payload["file_path"],
+                )
+                literal_ok = True
+                literal_reason = ""
+            except ControllerError as exc:
+                literal_ok = False
+                literal_reason = str(exc)
+            live_diff = ""
+            if literal_ok:
+                live_diff = self._file_unified_diff(
+                    worktree=implementation_worktree,
+                    base_sha=state.base_sha,
+                    result_sha=state.result_sha,
+                    file_path=payload["file_path"],
+                )
+            sha_ok = payload["result_sha"] == state.result_sha
+            diff_ok = literal_ok and self._normalize_unified_diff(
+                live_diff
+            ) == self._normalize_unified_diff(payload["authorized_diff"])
+            authorized_here = literal_ok and sha_ok and diff_ok
+            rechecks.append(
+                {
+                    "decision_path": self._relative_artifact(paths, decision_path),
+                    "file_path": payload["file_path"],
+                    "decision_result_sha": payload["result_sha"],
+                    "current_result_sha": state.result_sha,
+                    "authorized": authorized_here,
+                    "literal_file_ok": literal_ok,
+                    "literal_file_reason": literal_reason,
+                    "result_sha_match": sha_ok,
+                    "diff_match": diff_ok,
+                    "live_diff": live_diff,
+                    "live_diff_length": len(live_diff),
+                    "authorized_diff_length": len(payload["authorized_diff"]),
+                }
+            )
+            if authorized_here:
+                authorized.append(payload["file_path"])
+        return authorized, rechecks
+
+    def record_post_result_decision(self, run_id: str, value: dict) -> tuple[RunState, Path]:
+        """Authorize one inspected test-file diff after result_sha exists (post-result only)."""
+        paths = self.paths(run_id)
+        store = StateStore(paths.state)
+        state = store.load()
+        if state.state != RunStateName.OPERATOR_ESCALATION.value:
+            raise ControllerError(
+                "post-result decisions may only amend an OPERATOR_ESCALATION run"
+            )
+        if not state.result_sha:
+            raise ControllerError(
+                "post-result decision requires state.result_sha; use record-decision for "
+                "pre-result escalations instead"
+            )
+        decision = validate_post_result_decision(value)
+        if decision["run_id"] != run_id:
+            raise ControllerError("post-result decision run_id does not match the target run")
+        if decision["result_sha"] != state.result_sha:
+            raise ControllerError(
+                "post-result decision result_sha does not match the current run result_sha"
+            )
+        contract = validate_phase_contract(json.loads(paths.contract_json.read_text(encoding="utf-8")))
+        if EvidenceCollector._matches(decision["file_path"], contract["prohibited_paths"]):
+            raise ControllerError(
+                "post-result decision cannot authorize a path prohibited by the phase contract"
+            )
+        implementation = paths.worktrees / "implementation"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if not implementation.exists() or implementation.resolve() not in registered:
+            raise ControllerError("existing implementation worktree is missing or unregistered")
+        if self.repository.status(implementation):
+            raise ControllerError("implementation worktree is dirty; cannot record post-result decision")
+        if self.repository.head(implementation) != state.result_sha:
+            raise ControllerError(
+                "implementation worktree HEAD does not match state.result_sha for post-result decision"
+            )
+        self._require_single_literal_file_path(
+            worktree=implementation,
+            base_sha=state.base_sha,
+            result_sha=state.result_sha,
+            file_path=decision["file_path"],
+        )
+        live_diff = self._file_unified_diff(
+            worktree=implementation,
+            base_sha=state.base_sha,
+            result_sha=state.result_sha,
+            file_path=decision["file_path"],
+        )
+        if self._normalize_unified_diff(live_diff) != self._normalize_unified_diff(
+            decision["authorized_diff"]
+        ):
+            raise ControllerError(
+                "post-result decision authorized_diff does not match the live recomputed diff for "
+                f"{decision['file_path']}: live_len={len(live_diff)} "
+                f"authorized_len={len(decision['authorized_diff'])}"
+            )
+        decision_path = self._next_artifact_path(paths.handoffs, "post-result-decision")
+        self._append_only_json(decision_path, decision)
+        state.transition(RunStateName.VALIDATING_IMPLEMENTATION)
+        store.save(state)
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=state.state,
+            event="post_result_decision_recorded",
+            message="Append-only post-result test-change authorization recorded",
+            file_path=decision["file_path"],
+            result_sha=state.result_sha,
+            decision_path=self._relative_artifact(paths, decision_path),
         )
         return state, decision_path
 
@@ -2365,6 +2543,7 @@ class OrchestrationController:
                 resume = True
 
             elif current == RunStateName.VALIDATING_IMPLEMENTATION:
+                post_result_rechecks: list[dict] = []
                 try:
                     implementer_handoff = json.loads(
                         self._implementer_handoff_path(state, paths).read_text(encoding="utf-8")
@@ -2394,6 +2573,14 @@ class OrchestrationController:
                         raise EvidenceError(
                             f"required documentation updates missing: {sorted(missing_documentation)}"
                         )
+                    (
+                        authorized_test_changes,
+                        post_result_rechecks,
+                    ) = self._authorized_test_changes_for_evidence(
+                        paths=paths,
+                        state=state,
+                        implementation_worktree=implementation_worktree,
+                    )
                     evidence = self.evidence_collector.collect_and_validate(
                         worktree=implementation_worktree,
                         base_sha=state.base_sha,
@@ -2401,20 +2588,15 @@ class OrchestrationController:
                         allowed_paths=contract["allowed_paths"],
                         prohibited_paths=contract["prohibited_paths"],
                         test_commands=implementer_handoff["test_commands"],
-                        authorized_test_changes=[
-                            path
-                            for decision_path in sorted(
-                                paths.handoffs.glob("operator-decision-*.json")
-                            )
-                            for path in validate_operator_decision(
-                                json.loads(decision_path.read_text(encoding="utf-8"))
-                            )["additional_allowed_paths"]
-                        ],
+                        authorized_test_changes=authorized_test_changes,
                     )
-                    _atomic_json(
-                        paths.evidence,
-                        dataclasses.asdict(evidence) if dataclasses.is_dataclass(evidence) else evidence,
+                    evidence_payload = (
+                        dataclasses.asdict(evidence)
+                        if dataclasses.is_dataclass(evidence)
+                        else dict(evidence)
                     )
+                    evidence_payload["post_result_decision_rechecks"] = post_result_rechecks
+                    _atomic_json(paths.evidence, evidence_payload)
                     if dataclasses.is_dataclass(evidence) and sorted(
                         implementer_handoff["files_changed"]
                     ) != sorted(evidence.changed_files):
@@ -2431,6 +2613,16 @@ class OrchestrationController:
                                 f"{sorted(unchanged_documentation)}"
                             )
                 except (EvidenceError, GitSafetyError, OSError, json.JSONDecodeError) as exc:
+                    if post_result_rechecks:
+                        _atomic_json(
+                            paths.evidence,
+                            {
+                                "accepted": False,
+                                "result_sha": state.result_sha,
+                                "error": str(exc),
+                                "post_result_decision_rechecks": post_result_rechecks,
+                            },
+                        )
                     return self._fail_agent(state, store, events, "ORCHA", str(exc))
                 events.emit(
                     run_id=run_id,
