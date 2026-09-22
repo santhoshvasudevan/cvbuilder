@@ -410,3 +410,48 @@ as the product baseline and resolves the future implementation base to the orche
 when a run is planned.
 
 - 2026-09-20: Decision: abort M3A run `m3a-d2c0cc48b6aa`, with findings `AUDIT-002` and `CLAUDE-M3A-002` remaining open and deferred to a future bounded slice; see `docs/DEFERRED_FINDINGS.md`.
+
+## V2-D046 — M3A-C1 run m3a-c1-6df5432d618c operator-landed by direct verification after a closure-format escalation
+**Status:** APPROVED (Product Owner decision)
+
+Controller run `m3a-c1-6df5432d618c` (M3A-C1, corrective slice closing `AUDIT-002` and `CLAUDE-M3A-002`)
+completed a full implementation → audit → correction → re-audit cycle exactly as designed: `audit-00.json`
+returned `CORRECTION_REQUIRED` with one HIGH finding (`AUDIT-001` — `MemorySourceDocument`/`MemoryClaimSupport`
+configured only their default `objects` manager, so Django's unguarded `_base_manager` could bypass the
+`ImmutableProvenanceQuerySet` update/delete guard); the implementer corrected it (commit `9dad00f`, binding
+`Meta.base_manager_name = "objects"` on both models); the re-audit (`audit-01.json`) returned verdict `PASS`
+with zero findings against that corrected candidate. The run could not reach `COMPLETED` through the controller's
+own state machine afterward: `controller.py`'s closure-completion check (`elif current == RunStateName.CLOSURE_REVIEW`)
+requires `set(contract["requirement_ids"]).issubset(payload["accepted_requirement_ids"])`, and the `orcha_closure`
+agent's closure response paraphrased the contract's five `requirement_ids` (`FACT-002`, `FACT-003`,
+`"requirements.md §6.1"`, `AUDIT-002`, `CLAUDE-M3A-002`) into different, non-literal labels (`"M3A immutable
+provenance acceptance"`, `"M3A contradiction-preservation acceptance"`, `"AC-1"`, `"AC-2"`) instead of returning
+the contract's exact strings — a closure-formatting gap in the tooling, not a content or scope problem. Every other
+closure field (`base_sha`/`final_sha` matching durable state exactly, `unresolved_findings: []`,
+`merge_recommendation: "MERGE"`) was correct.
+
+The Product Owner directed that this run be landed by direct operator verification rather than either (a)
+fabricating a corrected closure artifact to satisfy the schema check — rejected as constructing a fake agent
+artifact regardless of whether its content would have been accurate — or (b) re-running the controller to
+reproduce a result that had already passed a full, real Codex audit at meaningful token cost. Before merging,
+the operator independently verified, outside the controller: `audit-01.json`'s `PASS`/zero-findings verdict
+against the exact candidate SHA `9dad00fe4ce26fdcfd7ae7cba2e7c05edb9d6f26`; concrete code/test coverage for
+every one of the contract's five `requirement_ids` (`candidate_memory/integrity.py`'s
+`HardIntegrityError`/`IntegrityFinding(code=PROVENANCE_IMMUTABLE)` mechanism, `models.py`'s
+`ImmutableProvenanceMixin`/`ImmutableProvenanceQuerySet`/`base_manager_name` guards, the `PROTECT` FK on
+`MemoryClaimSupport.source_document`, `admin.py`'s `has_delete_permission` override, and
+`services/ingestion.py`'s `_detect_engagement_date_conflicts`/`ENGAGEMENT_ALIAS_PATTERNS`), all 11 relevant
+tests (`candidate_memory.tests.test_ac1_source_provenance_immutability`,
+`test_ac2_engagement_date_contradictions`) re-run independently and passing; `git diff --numstat` against the
+contract's base showing zero deletions in every pre-existing test file; and a throwaway, uncommitted, rolled-back
+reproduction script independently exercising instance/`QuerySet`/`_base_manager` mutation-and-delete rejection on
+both provenance models with no cascade evidence loss, admin non-deletability, and Maruti start-date contradiction
+detection via the real ingestion pipeline — all 8 checks passing.
+
+This decision does not change any architectural invariant, requirement, or acceptance criterion — it records a
+one-time operator landing of an already-audited candidate around a specific, narrow controller tooling gap. The
+gap itself (the closure agent's free-text paraphrasing of `requirement_ids`, and the fact that no post-result
+recovery path exists once a candidate/`result_sha` is already recorded — see `controller.py:771-772`) remains
+open and is left for a future corrective slice; run `m3a-c1-6df5432d618c` itself is deliberately left in
+`OPERATOR_ESCALATION` in `.orchestration/runs/` as the historical record of this incident and must not be
+resumed, advanced, or have its `state.json` hand-edited.
