@@ -92,3 +92,7 @@ Append-only disposition: original `AUDIT-002` OPEN/DEFERRED entry above is uncha
 - Resolved by: M3A-C1 corrective implementation on the integrated M3A baseline
 
 Append-only disposition: original `CLAUDE-M3A-002` OPEN/DEFERRED entry above is unchanged. Closure evidence: generic same-engagement start/end date contradiction detection retains unresolved `MemoryConflict` rows; known Maruti start-date contradiction retained as `engagement_start_date:maruti_suzuki`; regression `candidate_memory.tests.test_ac2_engagement_date_contradictions`. Non-date contradiction categories remain out of scope/deferred.
+
+## Correction — authoritative closing candidate for AUDIT-002 / CLAUDE-M3A-002
+
+The RESOLVED entries for AUDIT-002 and CLAUDE-M3A-002 above cite candidate `50847ab53fb859d2a690d307706350477be0a996`. The actual final merged/landed candidate for run `m3a-c1-6df5432d618c` is `9dad00fe4ce26fdcfd7ae7cba2e7c05edb9d6f26` (merge commit `43fcee3` on `buildwithAgent`), which is a descendant of `50847ab` within the same run and additionally includes the AUDIT-001 `Meta.base_manager_name` correction (binding `MemorySourceDocument`/`MemoryClaimSupport` base manager to the immutable manager, closing a `_base_manager` bypass of the provenance guard that `50847ab` did not yet have). This note does not change either finding's RESOLVED disposition, only which exact commit is the authoritative closing candidate.
