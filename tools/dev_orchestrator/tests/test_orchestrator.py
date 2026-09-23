@@ -3087,6 +3087,37 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(ControllerError, "only applies to a verification-result-mismatch"):
             controller.record_reverification_decision(run_id, decision)
 
+    def test_reverification_decision_rejects_matching_nonzero_as_still_failing(self):
+        """An honestly-reported non-zero claim that still reproduces on re-run is a genuine
+        failure, not an environmental mismatch -- even though nothing 'mismatched' the claim."""
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, handoff, _ = self._prepare_reverification_escalation(controller)
+        # A second, unrelated command in the SAME handoff was already honestly reported as
+        # failing, and still fails identically on re-run (claimed == observed == 1).
+        handoff["test_commands"].append({"command": "make lint", "exit_code": 1})
+        _atomic_json(paths.handoffs / "implementer-00.json", handoff)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "believed the DB outage was the only cause",
+            "result_sha": RESULT,
+        }
+
+        with self.assertRaisesRegex(ControllerError, "did not resolve the mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+
+        state = StateStore(paths.state).load()
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        saved_decision = json.loads(
+            (paths.handoffs / "reverification-decision-01.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved_decision["outcome"], "STILL_FAILING")
+        self.assertIn("genuinely failing", saved_decision["reverification_error"])
+        self.assertIn("make lint", saved_decision["reverification_error"])
+
     def test_reverification_decision_single_use_per_result_sha(self):
         evidence = ScriptedVerificationEvidence()
         controller, _ = self.make_controller(

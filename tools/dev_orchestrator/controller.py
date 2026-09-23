@@ -1093,6 +1093,19 @@ class OrchestrationController:
             observed_commands = self.evidence_collector.validate_test_commands(
                 implementation, original_test_commands
             )
+            failing = [
+                f"{command!r} observed exit {exit_code}"
+                for command, exit_code in observed_commands
+                if exit_code != 0
+            ]
+            if failing:
+                # validate_test_commands only proves observed == claimed for every item; an
+                # honestly-reported non-zero claim that still reproduces is a genuine failure,
+                # not an environmental fluke, even though nothing "mismatched" a claim.
+                raise EvidenceError(
+                    "reverification observed a genuinely failing (non-zero) command, not merely "
+                    f"an environmental mismatch: {'; '.join(failing)}"
+                )
         except EvidenceError as exc:
             self._append_only_json(
                 decision_path,
