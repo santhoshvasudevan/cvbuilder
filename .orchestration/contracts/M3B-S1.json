@@ -38,7 +38,9 @@
     "Deterministic direct_match retrieval over MemoryClaim rows in categories CAREER_HISTORY, SKILL, ACHIEVEMENT via keyword/lexical overlap with employer/job_title; bounded fail-closed selection budget; simple deterministic scoring only",
     "Read-only consumption of candidate_memory (never write MemoryClaim/CareerEngagement/CandidateProfile/StaticResumeProfile/ExperienceSlot or any candidate_memory table)",
     "Author new docs/DECISIONS.md entry V2-D047 for the interim employer/job_title target-job signal; update docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md to reflect implemented slice state",
-    "Carve-out only: may modify candidate_memory/tests/test_architecture.py solely to remove the single string \"candidate_context\" from its FORBIDDEN_APPS tuple; candidate_matching, positioning_strategy, resume_builder, reviews, and job_intake must remain listed and remain forbidden; no other line in that file, and no other file under candidate_memory/, may change"
+    "Carve-out only: may modify candidate_memory/tests/test_architecture.py solely to remove the single string \"candidate_context\" from its FORBIDDEN_APPS tuple; candidate_matching, positioning_strategy, resume_builder, reviews, and job_intake must remain listed and remain forbidden; no other line in that file, and no other file under candidate_memory/, may change",
+    "Carve-out only: may modify job_applications/tests/test_settings.py solely to remove the single string \"candidate_context\" from its NOT_YET_BUILT_APPS set; job_intake, candidate_matching, positioning_strategy, resume_builder, and reviews must remain listed and remain forbidden; no other line in that file, and no other file under job_applications/, may change",
+    "STARTING POINT ONLY (not pre-approved / not evidence / not audited): the implementer MAY cherry-pick commit 9128c893353f9419210cfa391c1eb3a722557c15 from branch agent/m3b-s1-a8da7a92afed/implementation (controller worktree .orchestration/worktrees/m3b-s1-a8da7a92afed/implementation) to avoid re-deriving the candidate_context implementation. The implementer OWNS the result, MUST independently verify it satisfies every acceptance criterion in THIS contract (including the newly added job_applications/tests/test_settings.py NOT_YET_BUILT_APPS carve-out, which that preserved commit does NOT include), and MUST complete whatever that commit is missing. That preserved commit was never validated by the evidence collector or audited; it carries no special standing. The reviewer audits the final candidate exactly as it would audit any other implementation, with zero exemption for content that happens to originate from that commit — the preserved commit is a starting point only, not an authority and not pre-approval."
   ],
   "out_of_scope": [
     "Buckets differentiators, career_narrative, foundations, gaps_constraints population logic (M3B-S2 through M3B-S4)",
@@ -48,7 +50,7 @@
     "LLM calls, StageModelAssignment for CANDIDATE_CONTEXT_BUILD, or any llm_provider change",
     "BM25, embedding retrieval, or any external ranking/search library",
     "Any write or schema change under candidate_memory/** except the single FORBIDDEN_APPS carve-out for candidate_memory/tests/test_architecture.py listed in in_scope",
-    "Changes to job_applications/** (consume existing JobApplication/StageRun/StageIdentifier only)",
+    "Any write or schema change under job_applications/** except the single NOT_YET_BUILT_APPS carve-out for job_applications/tests/test_settings.py listed in in_scope (consume existing JobApplication/StageRun/StageIdentifier only otherwise)",
     "Modifying requirements.md, docs/ARCHITECTURE.md, docs/IMPLEMENTATION_PLAN.md, or docs/TEST_STRATEGY.md",
     "Creating or scaffolding job_intake, candidate_matching, positioning_strategy, resume_builder, or reviews apps",
     "M5+ AC/APS/AB work; merge, push, rebase, reset, force-update, branch deletion, worktree deletion, or stash"
@@ -59,10 +61,10 @@
     "docs/DECISIONS.md",
     "docs/CURRENT_STATE.md",
     "docs/REQUIREMENT_TRACEABILITY.md",
-    "candidate_memory/tests/test_architecture.py"
+    "candidate_memory/tests/test_architecture.py",
+    "job_applications/tests/test_settings.py"
   ],
   "prohibited_paths": [
-    "job_applications/**",
     "llm_provider/**",
     "requirements.md",
     "docs/ARCHITECTURE.md",
@@ -91,6 +93,7 @@
     "AC-7/V2-D047: docs/DECISIONS.md gains new entry V2-D047 recording interim JobApplication.employer/job_title target-job signal (consistent with docs/ARCHITECTURE.md §7 separable candidate_memory vs current-job/AJ input classes; richer AJ input lands in M4 without redesign); docs/CURRENT_STATE.md and docs/REQUIREMENT_TRACEABILITY.md reflect implemented slice state for CTX-001/CTX-002/CTX-006",
     "AC-8/samplejd exclusion: no file under candidate_context/** may contain the literal string \"samplejd\" — closes the samplejd/ dependency gap with an executable static check (not prose alone), so committed tests cannot silently depend on the worktree-symlinked local postings directory",
     "AC-9/FORBIDDEN_APPS carve-out: candidate_memory/tests/test_architecture.py may change only by removing \"candidate_context\" from FORBIDDEN_APPS; the other five apps (candidate_matching, positioning_strategy, resume_builder, reviews, job_intake) remain listed and forbidden; no other candidate_memory/ path may change",
+    "AC-10/NOT_YET_BUILT_APPS carve-out: job_applications/tests/test_settings.py may change only by removing \"candidate_context\" from NOT_YET_BUILT_APPS; the other five apps (job_intake, candidate_matching, positioning_strategy, resume_builder, reviews) remain listed and forbidden; no other job_applications/ path may change",
     "candidate_context tests and make verify pass; config/settings.py change is INSTALLED_APPS registration only"
   ],
   "required_tests": [
@@ -103,6 +106,7 @@
     "test_read_only_candidate_memory_boundary must be a runtime side-effect test: ingest fixtures, build a CandidateContextSnapshot via the real candidate_context code path, then assert zero MemoryClaim/CareerEngagement/CandidateProfile/StaticResumeProfile/ExperienceSlot rows were created, modified, or deleted; a static import-boundary check alone is insufficient",
     ".venv/bin/python -c \"from pathlib import Path; import sys; root=Path('candidate_context'); hits=[p for p in root.rglob('*.py') if p.is_file() and 'samplejd' in p.read_text(encoding='utf-8', errors='ignore')]; sys.exit(1 if hits else 0)\"",
     ".venv/bin/python manage.py test candidate_memory.tests.test_architecture",
+    ".venv/bin/python manage.py test job_applications.tests.test_settings",
     "make verify"
   ],
   "required_documentation_updates": [
