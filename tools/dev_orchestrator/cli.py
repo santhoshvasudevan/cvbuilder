@@ -70,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     post_result_parser = sub.add_parser("record-post-result-decision")
     post_result_parser.add_argument("--run-id", required=True)
     post_result_parser.add_argument("--file", required=True, type=Path)
+    reverification_parser = sub.add_parser("record-reverification-decision")
+    reverification_parser.add_argument("--run-id", required=True)
+    reverification_parser.add_argument("--file", required=True, type=Path)
     supplemental_parser = sub.add_parser("record-supplemental-audit")
     supplemental_parser.add_argument("--run-id", required=True)
     supplemental_parser.add_argument("--file", required=True, type=Path)
@@ -168,6 +171,23 @@ def main(argv: list[str] | None = None) -> int:
                         "run_id": args.run_id,
                         "state": state.state,
                         "post_result_decision": str(artifact),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "record-reverification-decision":
+            try:
+                decision = json.loads(args.file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise ControllerError(f"invalid reverification-decision JSON: {exc}") from exc
+            state, artifact = controller.record_reverification_decision(args.run_id, decision)
+            print(
+                json.dumps(
+                    {
+                        "run_id": args.run_id,
+                        "state": state.state,
+                        "reverification_decision": str(artifact),
                     },
                     indent=2,
                 )

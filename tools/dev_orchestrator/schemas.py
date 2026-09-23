@@ -35,6 +35,14 @@ POST_RESULT_DECISION_FIELDS = frozenset(
         "authorized_diff",
     }
 )
+REVERIFICATION_DECISION_FIELDS = frozenset(
+    {
+        "run_id",
+        "decision",
+        "reason",
+        "result_sha",
+    }
+)
 
 PHASE_FIELDS = frozenset(
     {
@@ -251,6 +259,23 @@ def validate_post_result_decision(value: dict[str, Any]) -> dict[str, Any]:
     candidate = Path(value["file_path"])
     if candidate.is_absolute() or ".." in candidate.parts or value["file_path"].startswith("."):
         raise SchemaError("post_result_decision.file_path must be a safe repository-relative path")
+    return value
+
+
+def validate_reverification_decision(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise SchemaError("reverification_decision must be an object")
+    unknown = set(value) - REVERIFICATION_DECISION_FIELDS
+    missing = REVERIFICATION_DECISION_FIELDS - set(value)
+    if unknown or missing:
+        raise SchemaError(
+            "reverification_decision fields invalid: "
+            f"unknown={sorted(unknown)}, missing={sorted(missing)}"
+        )
+    for key in ("run_id", "reason", "result_sha"):
+        _string(value, key)
+    if value["decision"] != "APPROVED":
+        raise SchemaError("reverification_decision.decision must be APPROVED")
     return value
 
 

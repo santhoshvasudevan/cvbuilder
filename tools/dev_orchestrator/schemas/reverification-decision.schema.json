@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "decision", "reason", "result_sha"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1},
+    "decision": {"type": "string", "const": "APPROVED"},
+    "reason": {"type": "string", "minLength": 1},
+    "result_sha": {"type": "string", "minLength": 1}
+  }
+}
