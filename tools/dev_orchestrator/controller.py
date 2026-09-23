@@ -36,6 +36,7 @@ from .schemas import (
     validate_operator_decision,
     validate_phase_contract,
     validate_post_result_decision,
+    validate_reverification_decision,
 )
 from .state import TERMINAL_STATES, RunState, RunStateName, StateError, StateStore, utc_now
 
@@ -376,6 +377,23 @@ class OrchestrationController:
     def _is_implementer_structured_output_failure(message: str) -> bool:
         text = (message or "").lower()
         return "structured final output" in text or "implementer_response" in text
+
+    _VERIFICATION_RESULT_MISMATCH_RE = re.compile(
+        r"^reported exit code for .+ was \d+, observed \d+$"
+    )
+
+    @staticmethod
+    def _is_verification_result_mismatch_failure(message: str) -> bool:
+        """Match only EvidenceCollector._execute_test_commands's own claimed-vs-observed
+        mismatch, which it raises standalone before any other evidence check runs -- never
+        combined with a scope/governance/suspicious-test/ancestry finding in the same message.
+        A matching *reported*-vs-observed mismatch can also originate from the audit/reviewer
+        side (role REVIEWER); callers must additionally require role == ORCHA to scope this to
+        the implementer-evidence-collection stage specifically.
+        """
+        return bool(
+            OrchestrationController._VERIFICATION_RESULT_MISMATCH_RE.match(message or "")
+        )
 
     @staticmethod
     def _is_unapproved_verification_command_failure(message: str) -> bool:
@@ -988,6 +1006,171 @@ class OrchestrationController:
             message="Append-only post-result test-change authorization recorded",
             file_path=decision["file_path"],
             result_sha=state.result_sha,
+            decision_path=self._relative_artifact(paths, decision_path),
+        )
+        return state, decision_path
+
+    def record_reverification_decision(self, run_id: str, value: dict) -> tuple[RunState, Path]:
+        """Re-run required tests against an UNCHANGED candidate after a believed environmental
+        fault (e.g. a database outage) caused the evidence collector's independent re-execution
+        to observe a different exit code than the implementer claimed. Authorizes nothing about
+        the candidate's content or scope; only re-executes the same deterministic commands the
+        evidence collector already runs, exactly once per result_sha, and only when the prior
+        escalation was specifically that kind of claimed-vs-observed mismatch -- never a scope,
+        governance, suspicious-test-change, ancestry, or audit failure.
+        """
+        paths = self.paths(run_id)
+        store = StateStore(paths.state)
+        state = store.load()
+        if state.state != RunStateName.OPERATOR_ESCALATION.value:
+            raise ControllerError(
+                "reverification decisions may only amend an OPERATOR_ESCALATION run"
+            )
+        if not state.result_sha:
+            raise ControllerError(
+                "reverification decision requires state.result_sha; use record-decision for "
+                "pre-result escalations instead"
+            )
+        decision = validate_reverification_decision(value)
+        if decision["run_id"] != run_id:
+            raise ControllerError("reverification decision run_id does not match the target run")
+        if decision["result_sha"] != state.result_sha:
+            raise ControllerError(
+                "reverification decision result_sha does not match the current run result_sha"
+            )
+        events = EventLog(paths.events)
+        records = list(events.read())
+        if not records:
+            raise ControllerError("reverification decision found no prior escalation to amend")
+        last = records[-1]
+        original_failure = str(last.get("message") or "")
+        if (
+            last.get("event") != "agent_failure"
+            or last.get("role") != "ORCHA"
+            or not self._is_verification_result_mismatch_failure(original_failure)
+        ):
+            raise ControllerError(
+                "reverification decision only applies to a verification-result-mismatch "
+                "escalation (an implementer-claimed exit code the evidence collector observed "
+                "differently); it does not apply to a scope, governance, suspicious-test-change, "
+                "ancestry, or audit escalation"
+            )
+        existing = sorted(paths.handoffs.glob("reverification-decision-*.json"))
+        for path in existing:
+            try:
+                prior = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if prior.get("result_sha") == state.result_sha:
+                raise ControllerError(
+                    "reverification decision already used for this result_sha; a new candidate "
+                    "(a fresh implementer invocation producing a new result_sha) is required"
+                )
+        implementation = paths.worktrees / "implementation"
+        registered = {Path(item["worktree"]).resolve() for item in self.repository.worktrees()}
+        if not implementation.exists() or implementation.resolve() not in registered:
+            raise ControllerError("existing implementation worktree is missing or unregistered")
+        if self.repository.status(implementation):
+            raise ControllerError("implementation worktree is dirty; cannot reverify")
+        if self.repository.head(implementation) != state.result_sha:
+            raise ControllerError(
+                "implementation worktree HEAD does not match state.result_sha; a drifted "
+                "worktree can never be reverified, only a fresh invocation"
+            )
+        handoff_path = self._implementer_handoff_path(state, paths)
+        try:
+            handoff = validate_implementer_response(
+                json.loads(handoff_path.read_text(encoding="utf-8"))
+            )
+        except (OSError, json.JSONDecodeError, SchemaError) as exc:
+            raise ControllerError(
+                "reverification decision requires an existing, schema-valid implementer handoff"
+            ) from exc
+        original_test_commands = list(handoff["test_commands"])
+        recorded_at = utc_now()
+        decision_path = self._next_artifact_path(paths.handoffs, "reverification-decision")
+        try:
+            observed_commands = self.evidence_collector.validate_test_commands(
+                implementation, original_test_commands
+            )
+            failing = [
+                f"{command!r} observed exit {exit_code}"
+                for command, exit_code in observed_commands
+                if exit_code != 0
+            ]
+            if failing:
+                # validate_test_commands only proves observed == claimed for every item; an
+                # honestly-reported non-zero claim that still reproduces is a genuine failure,
+                # not an environmental fluke, even though nothing "mismatched" a claim.
+                raise EvidenceError(
+                    "reverification observed a genuinely failing (non-zero) command, not merely "
+                    f"an environmental mismatch: {'; '.join(failing)}"
+                )
+        except EvidenceError as exc:
+            self._append_only_json(
+                decision_path,
+                {
+                    **decision,
+                    "outcome": "STILL_FAILING",
+                    "original_failure": original_failure,
+                    "recorded_at": recorded_at,
+                    "reverification_error": str(exc),
+                },
+            )
+            events.emit(
+                run_id=run_id,
+                role="ORCHA",
+                state=state.state,
+                event="reverification_still_failing",
+                message=str(exc),
+                result_sha=state.result_sha,
+                decision_path=self._relative_artifact(paths, decision_path),
+            )
+            raise ControllerError(f"reverification did not resolve the mismatch: {exc}") from exc
+        self._append_only_json(
+            decision_path,
+            {
+                **decision,
+                "outcome": "RESOLVED",
+                "original_failure": original_failure,
+                "recorded_at": recorded_at,
+            },
+        )
+        if paths.evidence.exists():
+            try:
+                evidence_payload = json.loads(paths.evidence.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                evidence_payload = {}
+        else:
+            evidence_payload = {}
+        evidence_payload["reverification"] = {
+            "decision_path": self._relative_artifact(paths, decision_path),
+            "reason": decision["reason"],
+            "result_sha": state.result_sha,
+            "original_failure": original_failure,
+            "original_test_commands": original_test_commands,
+            "reverified_commands": [
+                {"command": command, "exit_code": exit_code}
+                for command, exit_code in observed_commands
+            ],
+            "recorded_at": recorded_at,
+            "reverified_at": utc_now(),
+        }
+        _atomic_json(paths.evidence, evidence_payload)
+        state.last_error = ""
+        state.transition(RunStateName.VALIDATING_IMPLEMENTATION)
+        store.save(state)
+        events.emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=state.state,
+            event="reverification_decision_recorded",
+            message=(
+                "Append-only environmental re-verification recorded; required tests now "
+                "observed passing and match the implementer's original claim"
+            ),
+            result_sha=state.result_sha,
+            reason=decision["reason"],
             decision_path=self._relative_artifact(paths, decision_path),
         )
         return state, decision_path

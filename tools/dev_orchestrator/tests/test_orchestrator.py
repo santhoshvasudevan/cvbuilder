@@ -36,6 +36,7 @@ from tools.dev_orchestrator.schemas import (
     validate_operator_decision,
     validate_phase_contract,
     validate_post_result_decision,
+    validate_reverification_decision,
 )
 from tools.dev_orchestrator.state import RunState, RunStateName, StateStore
 from tools.dev_orchestrator.tmux_ui import render_event
@@ -351,6 +352,29 @@ class RejectEvidence:
     def derive_implementer_fields(self, **kwargs):
         del kwargs
         raise EvidenceError(self.message)
+
+
+class ScriptedVerificationEvidence(AcceptEvidence):
+    """validate_test_commands is independently scriptable, unlike AcceptEvidence's blind echo --
+    lets tests simulate an environment that has genuinely recovered (observed exit codes differ
+    from the earlier failing controller re-run but now match the implementer's original claim)
+    or one that is still genuinely broken (raises again)."""
+
+    def __init__(self, *, observed_exit_codes=None, raise_message=None):
+        super().__init__()
+        self.observed_exit_codes = observed_exit_codes or {}
+        self.raise_message = raise_message
+        self.reverify_calls: list[list[dict]] = []
+
+    def validate_test_commands(self, worktree, reported):
+        del worktree
+        self.reverify_calls.append(list(reported))
+        if self.raise_message:
+            raise EvidenceError(self.raise_message)
+        return tuple(
+            (item["command"], self.observed_exit_codes.get(item["command"], item["exit_code"]))
+            for item in reported
+        )
 
 
 class TestController(OrchestrationController):
@@ -2867,6 +2891,273 @@ class ControllerTests(unittest.TestCase):
         resumed = controller.execute(run_id, resume=True)
         self.assertEqual(resumed.state, "OPERATOR_ESCALATION")
         self.assertIn("test files deleted or weakened", resumed.last_error)
+
+    def _prepare_reverification_escalation(
+        self,
+        controller,
+        *,
+        run_id="m3a-reverify",
+        mismatched_command=".venv/bin/python manage.py test candidate_memory",
+    ):
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION, run_id=run_id)
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        self.seed_worktree_current_state(implementation)
+        controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
+        handoff = implementer(result_sha=RESULT)
+        _atomic_json(paths.handoffs / "implementer-00.json", handoff)
+        failure_message = (
+            f"reported exit code for {mismatched_command!r} was 0, observed 1"
+        )
+        _atomic_json(
+            paths.evidence,
+            {"accepted": False, "result_sha": RESULT, "error": failure_message},
+        )
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message=failure_message,
+        )
+        return run_id, paths, handoff, failure_message
+
+    def test_reverification_decision_accepts_when_commands_now_pass(self):
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, handoff, failure_message = self._prepare_reverification_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "cvbuilder-db-1 container had cleanly shut down under system memory "
+            "pressure and was restarted; unrelated to the candidate",
+            "result_sha": RESULT,
+        }
+
+        recorded, decision_path = controller.record_reverification_decision(run_id, decision)
+
+        self.assertEqual(recorded.state, "VALIDATING_IMPLEMENTATION")
+        self.assertEqual(recorded.last_error, "")
+        self.assertTrue(decision_path.exists())
+        self.assertEqual(decision_path.name, "reverification-decision-01.json")
+        saved_decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_decision["outcome"], "RESOLVED")
+        self.assertEqual(saved_decision["reason"], decision["reason"])
+        self.assertEqual(saved_decision["original_failure"], failure_message)
+        # Item 8: both observed results (original claim and reverified observation) appear in
+        # the evidence artifact, with timestamps.
+        evidence_payload = json.loads(paths.evidence.read_text(encoding="utf-8"))
+        reverification = evidence_payload["reverification"]
+        self.assertEqual(reverification["original_test_commands"], handoff["test_commands"])
+        self.assertEqual(
+            reverification["reverified_commands"],
+            [{"command": c["command"], "exit_code": c["exit_code"]} for c in handoff["test_commands"]],
+        )
+        self.assertEqual(reverification["original_failure"], failure_message)
+        self.assertIn("recorded_at", reverification)
+        self.assertIn("reverified_at", reverification)
+
+    def test_reverification_decision_rejects_drifted_worktree(self):
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, _, _, _ = self._prepare_reverification_escalation(controller)
+        controller.repository.implementation_head = CORRECTED  # type: ignore[attr-defined]
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        with self.assertRaisesRegex(ControllerError, "does not match state.result_sha"):
+            controller.record_reverification_decision(run_id, decision)
+        self.assertEqual(evidence.reverify_calls, [])
+
+    def test_reverification_decision_rejects_when_result_sha_unset(self):
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        with self.assertRaisesRegex(ControllerError, "requires state.result_sha"):
+            controller.record_reverification_decision(run_id, decision)
+
+    def test_reverification_decision_rejects_non_matching_escalation_type(self):
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id = self.prepare_run(controller, state_name=RunStateName.OPERATOR_ESCALATION, run_id="m3a-scope")
+        paths = controller.paths(run_id)
+        state = StateStore(paths.state).load()
+        state.result_sha = RESULT
+        StateStore(paths.state).save(state)
+        implementation = paths.worktrees / "implementation"
+        implementation.mkdir(parents=True)
+        self.seed_worktree_current_state(implementation)
+        controller.repository.registered_worktrees.append(implementation)  # type: ignore[attr-defined]
+        controller.repository.implementation_head = RESULT  # type: ignore[attr-defined]
+        _atomic_json(paths.handoffs / "implementer-00.json", implementer(result_sha=RESULT))
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message="prohibited/unauthorized paths changed: ['requirements.md']",
+        )
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        with self.assertRaisesRegex(ControllerError, "only applies to a verification-result-mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+        self.assertEqual(evidence.reverify_calls, [])
+
+    def test_reverification_decision_rejects_audit_side_mismatch(self):
+        """The identical message shape from the AUDIT/reviewer stage (role REVIEWER) must not
+        be treated as an implementer-evidence-collection mismatch (role ORCHA required)."""
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, _, _ = self._prepare_reverification_escalation(controller, run_id="m3a-audit-side")
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="REVIEWER",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message="reported exit code for 'make verify' was 0, observed 1",
+        )
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        with self.assertRaisesRegex(ControllerError, "only applies to a verification-result-mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+
+    def test_reverification_decision_genuine_failure_still_escalates(self):
+        still_failing_message = (
+            "reported exit code for '.venv/bin/python manage.py test candidate_memory' "
+            "was 0, observed 1"
+        )
+        evidence = ScriptedVerificationEvidence(raise_message=still_failing_message)
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, _, _ = self._prepare_reverification_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "believed the DB outage was the only cause",
+            "result_sha": RESULT,
+        }
+
+        with self.assertRaisesRegex(ControllerError, "did not resolve the mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+
+        # A genuine (still-failing) test result must leave the run escalated, not clear it.
+        state = StateStore(paths.state).load()
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        decision_path = paths.handoffs / "reverification-decision-01.json"
+        self.assertTrue(decision_path.exists())
+        saved_decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_decision["outcome"], "STILL_FAILING")
+        self.assertIn(still_failing_message, saved_decision["reverification_error"])
+        # A second attempt is refused too, independently of the single-use marker file: the
+        # failed attempt's own event ("reverification_still_failing") is now the last event,
+        # so the escalation-type gate refuses it before the marker-file check is even reached.
+        with self.assertRaisesRegex(ControllerError, "only applies to a verification-result-mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+
+    def test_reverification_decision_rejects_matching_nonzero_as_still_failing(self):
+        """An honestly-reported non-zero claim that still reproduces on re-run is a genuine
+        failure, not an environmental mismatch -- even though nothing 'mismatched' the claim."""
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, handoff, _ = self._prepare_reverification_escalation(controller)
+        # A second, unrelated command in the SAME handoff was already honestly reported as
+        # failing, and still fails identically on re-run (claimed == observed == 1).
+        handoff["test_commands"].append({"command": "make lint", "exit_code": 1})
+        _atomic_json(paths.handoffs / "implementer-00.json", handoff)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "believed the DB outage was the only cause",
+            "result_sha": RESULT,
+        }
+
+        with self.assertRaisesRegex(ControllerError, "did not resolve the mismatch"):
+            controller.record_reverification_decision(run_id, decision)
+
+        state = StateStore(paths.state).load()
+        self.assertEqual(state.state, "OPERATOR_ESCALATION")
+        saved_decision = json.loads(
+            (paths.handoffs / "reverification-decision-01.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved_decision["outcome"], "STILL_FAILING")
+        self.assertIn("genuinely failing", saved_decision["reverification_error"])
+        self.assertIn("make lint", saved_decision["reverification_error"])
+
+    def test_reverification_decision_single_use_per_result_sha(self):
+        evidence = ScriptedVerificationEvidence()
+        controller, _ = self.make_controller(
+            implementer_responses=[], reviewer_responses=[], evidence=evidence
+        )
+        run_id, paths, _, _ = self._prepare_reverification_escalation(controller)
+        decision = {
+            "run_id": run_id,
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        controller.record_reverification_decision(run_id, decision)
+        # Re-escalate the SAME result_sha a second time (a different flake) and confirm the
+        # single-use guard refuses a second reverification for this candidate outright.
+        state = StateStore(paths.state).load()
+        state.state = RunStateName.OPERATOR_ESCALATION.value
+        StateStore(paths.state).save(state)
+        EventLog(paths.events).emit(
+            run_id=run_id,
+            role="ORCHA",
+            state=RunStateName.OPERATOR_ESCALATION.value,
+            event="agent_failure",
+            message="reported exit code for 'make verify' was 0, observed 1",
+        )
+        with self.assertRaisesRegex(ControllerError, "already used for this result_sha"):
+            controller.record_reverification_decision(run_id, decision)
+
+    def test_validate_reverification_decision_schema_is_strict(self):
+        decision = {
+            "run_id": "r1",
+            "decision": "APPROVED",
+            "reason": "ok",
+            "result_sha": RESULT,
+        }
+        self.assertEqual(validate_reverification_decision(decision), decision)
+        with self.assertRaises(SchemaError):
+            validate_reverification_decision({**decision, "extra": True})
+        with self.assertRaises(SchemaError):
+            validate_reverification_decision({**decision, "decision": "MAYBE"})
 
 
 class ValidationAndSafetyTests(unittest.TestCase):
