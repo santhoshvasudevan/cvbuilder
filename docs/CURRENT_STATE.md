@@ -130,7 +130,17 @@ raw section pointer.
 1. Fix the `closure-narrative.schema.json` / Codex strict-structured-output conflict
    (`docs/ORCHESTRATION_BACKLOG.md` item 10) — this is the single remaining blocker keeping
    M3B-S1 from landing.
-2. Then resume or re-plan against the audit-passed candidate `541c4e7` (tag
-   `preserved/m3b-s1-a6628234bbc3-audit-passed`) rather than re-deriving the implementation again.
-3. Only after M3B-S1 actually reaches `COMPLETED` and is merged: author decision `V2-D047` in
-   `docs/DECISIONS.md` from the landed candidate's `decisions_required` narrative, then plan M3B-S2.
+2. Then plan a **fresh** run against the audit-passed candidate `541c4e7` (tag
+   `preserved/m3b-s1-a6628234bbc3-audit-passed`, already the contract's starting-point reference)
+   rather than re-deriving the implementation again. Do not `resume` the old run — see
+   `docs/ORCHESTRATION_HANDOVER.md` for why that specific escalation type has no resume path.
+3. Before approving merge on that fresh run: read the implementer's `decisions_required`
+   narrative directly from its authoritative handoff file (see the operator_gates entry in
+   `.orchestration/contracts/M3B-S1.json` and the Operator verbs section of
+   `docs/DEVELOPMENT_ORCHESTRATION.md` for exactly which file that is) and confirm it names the
+   V2-D047 decision described above — this check happens *before* merge, as part of the normal
+   merge-approval gate.
+4. Only *after* that run reaches `COMPLETED` and is actually merged into `buildwithAgent`: author
+   the real `docs/DECISIONS.md` entry for `V2-D047` by hand, as its own append-only commit (the
+   same pattern used for `V2-D046` in M3A-C1 — the operator authors the entry post-merge, the
+   implementer never touches `docs/DECISIONS.md` itself). Only then plan M3B-S2.

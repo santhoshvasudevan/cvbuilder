@@ -375,10 +375,14 @@ Before planning, approving, or running any phase:
   "accessed by other users" mid-run (see `docs/ORCHESTRATION_BACKLOG.md`).
 - **Never background a controller invocation manually** (`&`, `nohup`, or similar). A
   manually-backgrounded process's lifetime is not tracked; killing what you believe is its wrapper
-  does not reliably kill the actual subprocess tree, and a second, harness-tracked launch against
-  the same worktree can then run concurrently with the still-alive first one. Always launch through
-  the harness's own tracked background-task mechanism, which can be checked and is guaranteed not
-  to silently duplicate.
+  does not reliably kill the actual subprocess tree, and a second, tracked launch against the same
+  worktree can then run concurrently with the still-alive first one. This is agent-tool-specific,
+  not a repository mechanism: whatever coding-agent tool is driving the orchestrator (this
+  session's tool tracks a background shell command by an opaque task ID it can later check or
+  wait on; another tool may offer a different equivalent) has its own supervised way to launch and
+  monitor a long-running process — always use that, and confirm before launching a second time
+  that nothing from an earlier launch is still running (`pgrep -fl dev_orchestrator`, above), since
+  no repository-level lock enforces this.
 - **No tooling merge or push while a controller run is open.** Every `execute()` call re-verifies
   the main repository's HEAD against the run's pinned `base_sha`/`controller_sha`
   (`_verify_run_controller_head`) and, for most transitions, that the main repository itself is
