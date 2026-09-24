@@ -236,6 +236,169 @@ changes. `COMPLETED` therefore means “eligible for an operator merge decision,
 events. Agents do not communicate through keystrokes or pane buffers. `state.json` and `events.jsonl`
 remain authoritative if tmux is closed or detached.
 
+## Contract-authoring checklist
+
+Four M3B-S1 contract-authoring defects reached live runs before being caught, each requiring an
+in-flight amendment, independent re-verification, and a second live run. Author every future phase
+contract against this checklist before planning it, not after a run fails:
+
+1. Every `required_tests` entry must independently pass `EvidenceCollector._validate_verification_argv`
+   (`evidence.py`). The only acceptable shapes are `make <allowed-target>`, `git status --short`,
+   `git diff --check <range>`, `manage.py test`/`manage.py check`,
+   `manage.py makemigrations --check --dry-run`, and `-m unittest` invocations. An inline
+   `python -c "..."` command, or any other shell-composed one-liner, is never accepted — it is
+   silently treated as narrative and never executed, giving a false sense of coverage. Verify every
+   entry against `_validate_verification_argv` directly before approving the contract, not after a
+   run escalates on it.
+2. `required_documentation_updates` must be bare repository-relative paths only (e.g.
+   `docs/CURRENT_STATE.md`), never narrative sentences. The controller checks this field by exact
+   set-subtraction against the implementer's own derived `documentation_updated` list of bare
+   paths; a narrative sentence can never match and the check fails deterministically every time.
+3. `docs/DECISIONS.md` and `requirements.md` are operator-authored governance artifacts and are
+   never implementer scope, under any contract. State this explicitly in the contract's
+   `out_of_scope` (and reinforce in `in_scope`/objective language) — do not rely on omission; that
+   silence is exactly how a defect reached a live run once already. If the slice needs a new
+   decision recorded, route it through the implementer narrative's `decisions_required` field and
+   have the operator author the actual `docs/DECISIONS.md` entry by hand after PASS; note in the
+   contract's `operator_gates` that the operator will read that field directly from the
+   authoritative implementer handoff (`state.active_implementer_handoff_path` if set, otherwise
+   `handoffs/implementer-<correction_cycles>.json` — see `_implementer_handoff_path`), since the
+   field has no schema content requirement and is not surfaced to the reviewer.
+4. A slice that creates a new Django app must add both `candidate_memory/tests/test_architecture.py`
+   and `job_applications/tests/test_settings.py` to `allowed_paths`, with `in_scope` language
+   limiting the edit in each to removing exactly that app's own entry from its milestone-boundary
+   set (`FORBIDDEN_APPS` / `NOT_YET_BUILT_APPS`) and explicitly preserving every other listed app.
+   Removing a line from either file is a test-file deletion the evidence collector's
+   suspicious-test-change gate will always flag; the contract should say plainly that this specific,
+   narrow carve-out will require one `record-post-result-decision` call per file after the candidate
+   exists (see Operator verbs, below) — this is expected, not a defect.
+5. Every `acceptance_criteria` entry needs an executable check behind it — a `required_tests`
+   command, a structural evidence-collector check (allowed/prohibited paths, documentation-updated
+   set, ancestry), or an explicit statement that it is deliberately operator-manual-review-only
+   (naming exactly what the operator will inspect and where). An acceptance criterion backed by
+   prose alone is unverifiable by construction; say so plainly in the contract rather than let it
+   look checked when it is not.
+
+## Operator verbs
+
+Three narrow, single-purpose CLI verbs let the operator amend an escalated run without an
+unbounded ad hoc bypass. Each is deliberately scoped to one specific class of recoverable failure;
+none of them is a general "retry" or "trust the operator" mechanism.
+
+### `record-decision` (pre-result)
+
+Amends an `OPERATOR_ESCALATION` run **before** any candidate commit exists (`state.result_sha` must
+be falsy and the implementation worktree HEAD must still equal `base_sha`). Supplies
+`additional_allowed_paths` and `constraints` as an in-memory effective-contract amendment; the
+original phase contract is never rewritten. Rejects any path that overlaps `prohibited_paths` — an
+absolute veto that widening `allowed_paths` can never override. See `record_operator_decision`
+(`controller.py`).
+
+### `record-post-result-decision` (post-result, one file)
+
+Amends an `OPERATOR_ESCALATION` run caused specifically by the suspicious-test-change gate (a test
+file was deleted or had lines removed) **after** `state.result_sha` is already set. Takes exactly
+one repository-relative `file_path` per call — a slice touching two boundary files needs two
+separate calls, one per file, each re-escalating in between. The controller independently
+recomputes `git diff base_sha..result_sha -- file_path` in the registered, clean implementation
+worktree and accepts the decision only when it matches the operator-supplied `authorized_diff`
+byte-for-byte; the stored diff is never trusted on its own. Every subsequent evidence-collection
+pass re-verifies both the result_sha match and the live diff match fresh — an authorization does
+not survive a candidate change. Rejects any path in `prohibited_paths`. See
+`record_post_result_decision` (`controller.py`).
+
+### `record-reverification-decision` (post-result, whole candidate)
+
+Amends an `OPERATOR_ESCALATION` run caused specifically by a verification-result mismatch — the
+evidence collector's independent re-execution of the implementer's claimed test commands observed a
+different exit code, believed to be a transient environmental fault (e.g. the test-database
+container was briefly down), not a change to the candidate. Requires: `state.result_sha` set; the
+implementation worktree HEAD equal to it exactly; the worktree clean; and the run's last event
+specifically an `ORCHA`-attributed claimed-vs-observed exit-code mismatch
+(`_is_verification_result_mismatch_failure`) — never a scope, governance, suspicious-test-change,
+ancestry, or audit failure, and never the identical message shape from the reviewer/audit side
+(role must be `ORCHA`, not `REVIEWER`). Re-runs the implementer's own reported `test_commands`
+through the same `EvidenceCollector.validate_test_commands` the audit stage already uses for its
+own re-verification — no agent invocation, no model tokens, no re-implementation. Requires every
+observed result to be exactly `0`, not merely equal to what was claimed (an honestly-reported
+non-zero claim that still reproduces is a genuine failure, not an environmental fluke, and still
+escalates). Single-use per `result_sha`: a `handoffs/reverification-decision-NN.json` marker plus
+the natural state-machine effect of consuming the triggering event both prevent reusing it for a
+second, unrelated flake on the same candidate — a new candidate needs a fresh implementer
+invocation. Records the operator's reason append-only, and records both the original claimed
+results and the newly reverified ones, with timestamps, in the run's `evidence.json`. See
+`record_reverification_decision` (`controller.py`).
+
+### Escalation types with no recovery path today
+
+Not every `OPERATOR_ESCALATION` has a verb. As of this writing:
+
+- **A tooling-HEAD-pin mismatch** (`_verify_run_controller_head`: the main repository's HEAD moved
+  since the run's `base_sha`/`controller_sha` was pinned, because tooling or documentation was
+  merged onto `buildwithAgent` while the run was still open) has no operator-acknowledgement path.
+  `resume`'s three tooling-repair helpers (`_retry_reviewer_after_tooling_repair`,
+  `_retry_implementer_strict_output_after_tooling_repair`,
+  `_retry_implementer_evidence_handoff_after_tooling_repair`) each bump `state.controller_sha` as a
+  side effect of retrying one of three specific *prior*-failure types (a reviewer failure, an
+  implementer structured-output failure, or an implementer evidence-handoff failure); none of them
+  fire for a HEAD-pin mismatch that arises from a *clean* prior state. `record_operator_decision`
+  also bumps `controller_sha`, but only pre-result. There is no verb for "the operator acknowledges
+  an unrelated tooling advance and wants to continue an otherwise-healthy run." The only sanctioned
+  recovery today is to abandon the run and re-plan a fresh one referencing the abandoned candidate
+  as a preserved starting point. See `docs/ORCHESTRATION_BACKLOG.md`.
+- **`OPERATOR_ESCALATION` itself is a terminal state** (`state.py` `TERMINAL_STATES`). `resume`'s
+  three helpers are invoked before the terminal-state check, but only for the run's *exact last
+  event*; any escalation whose last event does not match one of their three narrow predicates falls
+  through to the terminal check and returns unchanged, with no retry attempted. See
+  `docs/ORCHESTRATION_BACKLOG.md` for why this has now forced six separate re-plans and a proposed
+  redesign.
+
+The claim that switching the reviewer profile (Claude ↔ Codex) needs no controller code change is
+correct only for the *routing* itself (a one-line YAML merge change); `doctor` must still be
+re-run to qualify the newly-routed adapter, including a live dry audit, before the switch is
+trusted.
+
+## Operational preflight
+
+Before planning, approving, or running any phase:
+
+- **Docker and Postgres must be up and accepting connections.** `docker exec cvbuilder-db-1
+  pg_isready` must report `accepting connections`. The dev database container can be stopped
+  cleanly by Docker Desktop pausing/restarting its VM under system memory pressure, with no crash
+  signature and no macOS jetsam log entry — `docker ps -a` showing the container `Exited (0)` some
+  minutes ago, combined with a `connection refused` from `manage.py test`, is the signature.
+  Restart with `make up` (idempotent; never recreates or loses the data volume).
+- **One controller run at a time.** Before launching (`plan`, `approve`, `run`, `resume`, or any
+  `record-*-decision` verb that re-invokes `run`), confirm `pgrep -fl dev_orchestrator` shows
+  nothing running. A duplicate concurrent invocation against the same run/worktree is a real,
+  reproduced failure mode this session, evidenced by Postgres itself reporting `test_cvbuilder`
+  "accessed by other users" mid-run (see `docs/ORCHESTRATION_BACKLOG.md`).
+- **Never background a controller invocation manually** (`&`, `nohup`, or similar). A
+  manually-backgrounded process's lifetime is not tracked; killing what you believe is its wrapper
+  does not reliably kill the actual subprocess tree, and a second, harness-tracked launch against
+  the same worktree can then run concurrently with the still-alive first one. Always launch through
+  the harness's own tracked background-task mechanism, which can be checked and is guaranteed not
+  to silently duplicate.
+- **No tooling merge or push while a controller run is open.** Every `execute()` call re-verifies
+  the main repository's HEAD against the run's pinned `base_sha`/`controller_sha`
+  (`_verify_run_controller_head`) and, for most transitions, that the main repository itself is
+  clean (`_verify_repository_boundary(require_clean=True)`). This check does not distinguish
+  tooling from documentation from anything else — it fires on *any* commit that moves
+  `buildwithAgent`'s HEAD while a run you intend to continue is still open. Worked example: mid-
+  session, the `record-reverification-decision` verb was built, reviewed, merged, and pushed while
+  an M3B-S1 run was paused at `VALIDATING_IMPLEMENTATION` waiting on that same verb. The very next
+  `run` call — needed to advance the run the merge was meant to help — failed with `repository
+  HEAD ... differs from recorded controller HEAD ...`, because none of `resume`'s three repair
+  helpers match a HEAD-pin failure arising from a clean prior state (see Operator verbs, above).
+  The run had to be abandoned. Land any tooling or documentation change either before starting a
+  run, or only after that run has reached a terminal state you do not intend to revisit.
+- **macOS `vm_stat`'s "Pages free" is not available memory** — the kernel deliberately keeps free
+  pages near zero and reclaims inactive/purgeable pages on demand; it is not a proxy for whether
+  it's safe to launch a memory-heavy process. Use `memory_pressure`'s system-wide free-percentage
+  line and `sysctl kern.memorystatus_vm_pressure_level` (`1`=normal, `2`=warn, `4`=critical)
+  instead. Do not poll either in a tight loop; check once before launching, and once more only if
+  the prior launch was interrupted.
+
 ## M3A contract
 
 The versioned template is `.orchestration/contracts/M3A.json`; it is derived from the current M3A
